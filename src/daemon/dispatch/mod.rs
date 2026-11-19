@@ -658,8 +658,6 @@ const GOSSIP_STALENESS_MS: u64 = 15 * 60 * 1000;
 const GOSSIP_SKEW_MS: u64 = 30_000;
 /// Maximum AllReduce partials in flight before dropping new TpAllReduceRequests (DoS guard).
 const MAX_PENDING_TP_PARTIALS: usize = 512;
-/// Maximum demand rate entries across all (model, region) pairs.
-const MAX_DEMAND_ENTRIES: usize = 10_000;
 /// R130: Cap entries per WishlistAnnouncement. Caps the wire size AND the
 /// per-publisher slice of `state.models.foreign_wishlist`. 64 keeps the
 /// headline (a swarm normally has dozens of models, not hundreds). The one
@@ -3277,26 +3275,19 @@ pub(crate) async fn dispatch_network_messages(
                                             );
                                             continue;
                                         }
-                                        let key = (demand.model_id.clone(), demand.region.clone());
-                                        if shared_state.region_demand.len() >= MAX_DEMAND_ENTRIES
-                                            && !shared_state.region_demand.contains_key(&key)
-                                        {
+                                        // The publisher's latest rate is kept and the mean
+                                        // of the fresh ones blended in by elapsed time, so
+                                        // the region's figure does not depend on how often
+                                        // publishers repeat themselves (#91 (2m)).
+                                        let Some(new_rate) = shared_state.note_region_demand_heard(
+                                            &demand.model_id,
+                                            &demand.region,
+                                            &demand.publisher,
+                                            demand.decayed_rate,
+                                            now_ms,
+                                        ) else {
                                             continue;
-                                        }
-                                        // EMA blend: 0.8 * old + 0.2 * incoming.
-                                        // SEC: also guard the cached `*existing` against
-                                        // NaN — gotcha #98 closed the receive-side guard
-                                        // on `decayed_rate`, but a stale NaN from a
-                                        // pre-R102 DB rehydrate or local-decay race
-                                        // (manager.rs::decay_request_counts) still
-                                        // permanently poisons the EMA: `NaN * 0.8 + x * 0.2 = NaN`.
-                                        let new_rate = if let Some(existing) = shared_state.region_demand.get(&key) {
-                                            let prev = if existing.is_finite() { *existing } else { 0.0 };
-                                            prev * 0.8 + demand.decayed_rate * 0.2
-                                        } else {
-                                            demand.decayed_rate
                                         };
-                                        shared_state.region_demand.insert(key, new_rate);
                                         tracing::debug!(
                                             model = %demand.model_id,
                                             region = %demand.region,

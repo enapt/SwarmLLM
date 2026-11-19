@@ -5385,6 +5385,27 @@ and served nothing while spending ~2.6 Mbit/s.
 - **What one peer lacks is pulled, not pushed** (#91 (2), 2026-10-17): a peer
   advertising `features::MANIFEST_DIGESTS` is told the versions and pulls only
   what it lacks — § "Announce, then pull" below.
+- **A figure that changes on a tick is sent on the tick, and its receiver
+  weighs by TIME** (#91 (2m), 2026-11-19). A computer's demand rate changes
+  only at its 10-minute decay tick, yet went on gossip every 30 s round while
+  above 0.01 — ~4.7 h and ~560 messages per computer and model after ONE
+  request; on 2026-11-18 (v0.3.299, idle, 6 peers) `swarm/regions` was 4.6 of
+  10.3 MB/h received, all `ModelDemandGossip`, ~42 a minute. Now
+  `health::monitor::demand_send_due`: a model goes when new, moved ≥ 10% or
+  10 min since (`DEMAND_REPEAT_AFTER`); A/B `SWARMLLM_DEMAND_SEND=every-round`.
+  ⚠ **The receiver's averaging time was the cadence**: `0.8 old + 0.2 new` per
+  delivered message is τ ≈ 134 s at 30 s and would have been ~45 min at 10 min,
+  and a blend per message is a region's MEAN only while its publishers'
+  messages interleave densely — sparse ones swing the figure to whoever spoke
+  last. `SharedState::note_region_demand_heard` (`daemon/state/demand_heard.rs`)
+  keeps each publisher's latest rate per (model, region) (8 a key, fresh 25 min)
+  and blends their mean with weight `1 − 0.8^(Δt/30 s)` — 0.2 at the old
+  cadence, so a computer one release behind reads as before. Prior art: the
+  irregular-interval EMA (Polars `ewm_mean_by`, Vector `TimeEwma`), Cassandra's
+  per-endpoint gossip state. Test `ten_minutes_of_demand_reach_the_same_figure_whatever_the_cadence`
+  (red at a per-message weight: 0.80 against 3.95). An older RECEIVER blends a
+  new sender's sparse messages per message (τ ~45 min) until it updates —
+  minutes, by auto-update.
 
 ## A capability lists no more parts than every receiver takes (2026-11-17)
 

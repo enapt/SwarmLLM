@@ -2097,7 +2097,7 @@ largest gossip term is now `ShardAnnounce` (26/h × 21.3 KB = 157 B/s), then `He
 received. Taken an hour after a restart, inside the window where the doubling repeat (2i) is still short: a later read
 at steady state can only be lower. Nothing left of (2j).
 
-**(2m) Demand gossip republished every 30 s for hours — read 2026-11-18 22:22-22:32Z, NOT built.** The live node
+**(2m) Demand gossip republished every 30 s for hours — read 2026-11-18 22:22-22:32Z, BUILT 2026-11-19 (on main).** The live node
 (v0.3.299, idle, up 82-92 min, 6 peers on .299, no parts moving): **in 10.3, out 7.4 MB/h** (`/metrics`, total less
 parts; inside .279's README range). `swarm/regions` is now the largest gossip topic, 4.6 MB/h in and 2.2 out, and is
 ALL `ModelDemandGossip`: 4,026 delivered in ~95 min (~42 a minute, 3.0 on 10-16), each received ~3 times
@@ -2117,6 +2117,19 @@ compound by elapsed time alone, whatever the cadence; mixing the two forms skews
 per-endpoint state with a VERSION and exchanges digests (SYN digests → ACK newer state → ACK2), so a stable cluster
 moves little data a round — the shape (2) already gave manifests (`ManifestDigest` / `ManifestPull`) and the one a
 demand fix should reuse before inventing a third: a version per (publisher, model) rate, a change ≥ 10% bumps it.
+**Built 2026-11-19**: the sender repeats a model's rate when new, moved ≥ 10% or 10 min since (`health::monitor::demand_send_due`,
+`DEMAND_REPEAT_AFTER` = the decay tick; A/B `SWARMLLM_DEMAND_SEND=every-round`); the receiver keeps each publisher's latest rate per
+(model, region) — 8 a key, fresh 25 min — and blends their MEAN by elapsed time, `1 − 0.8^(Δt/30 s)`
+(`SharedState::note_region_demand_heard`, `daemon/state/demand_heard.rs`): exactly 0.2 at the old cadence, so a .300 sender reads as
+before. Weighed against the digest/pull shape above: a rate that changes once a tick has nothing for a digest to save (each
+message is the change), and Cassandra's PER-ENDPOINT state is what the receiver took. Tests: `an_unmoved_demand_waits_for_the_decay_tick`,
+`ten_minutes_of_demand_reach_the_same_figure_whatever_the_cadence` (red at a per-message weight: 0.80 against 3.95). **Checked on two
+nodes, one dev binary** (`~/swarmllm-gate/deep/fr/gossip91.sh`: TinyLlama split, B serving part 1 for A, then idle; A's
+`gossip_recv_by_kind` read every 30 s): after B's first send, the every-round arm delivered 8 more in 3.5 min (one a round,
+07:39-07:42Z); the new arm delivered none in the 8.5 min after its first (07:18:49-07:27:20Z), where the old cadence sends ~17.
+**Left**: the field read after the release — `swarm/regions` and `ModelDemandGossip` in `gossip_recv_by_kind` on an idle node
+against 11-18's 4.6 MB/h and ~42 a minute; a region's figure for a key nobody publishes any more still never falls (it did not
+before either: only this node's own region decays).
 
 #### #169 — Connection churn on multi-interface hosts: only the LAN dial is deterministic
 `P3` · network · **PARTIAL** — 2026-07-25 · history: archive § "Connection churn on multi-interface hosts — deterministic dialer partial", gotcha #353

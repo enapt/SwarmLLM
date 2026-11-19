@@ -34,6 +34,9 @@ pub struct HealthMonitor {
     /// [`RETRACTION_REPEATED_FOR`], so peers drop our claim (see
     /// `shard_announce_round`).
     retracted_models: std::collections::HashMap<crate::types::ModelId, std::time::Instant>,
+    /// Each model's demand as this node last put it on gossip, and when
+    /// ([`demand_send_due`], #91 (2m)).
+    demand_sent: std::collections::HashMap<crate::types::ModelId, (f64, std::time::Instant)>,
     /// When the parts list last went on gossip, how many broadcast rounds ago,
     /// and how long an unchanged one waits after it ([`QuietRepeat`]).
     parts_sent: Option<(std::time::Instant, u64, QuietRepeat)>,
@@ -302,6 +305,49 @@ impl QuietRepeat {
 fn quiet_repeat_is_fixed() -> bool {
     static FIXED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *FIXED.get_or_init(|| std::env::var("SWARMLLM_QUIET_REPEAT").is_ok_and(|v| v == "fixed"))
+}
+
+/// How long a model's unmoved demand waits before it goes on gossip again: the
+/// decay tick (`AUTO_MANAGE_REQUEST_RESET_INTERVAL_SECS`), the only time the
+/// rate changes at all (#91 (2m)). Receivers keep a publisher's rate
+/// `demand_heard::HEARD_FRESH_FOR_MS` (25 min), past two of these.
+const DEMAND_REPEAT_AFTER: Duration = Duration::from_secs(600);
+
+/// A move this large since the last send is news — a decay tick with no new
+/// requests moves a rate 15% (`EMA_DECAY_WEIGHT` 0.85), so a falling rate is
+/// sent every tick, and one held steady by fresh requests every
+/// `DEMAND_REPEAT_AFTER`.
+const DEMAND_MOVE_IS_NEWS: f64 = 0.10;
+
+/// Is this model's demand due on gossip? It was every broadcast round (30 s)
+/// while the rate stood above the publish line — ~4.7 h and ~560 messages per
+/// computer and model after ONE request, the largest gossip an idle node
+/// received on 2026-11-18 (4.6 of 10.3 MB/h, FUTURE_WORK #91 (2m)) — although
+/// the rate changes only at the 10-minute decay tick. Receivers blend by
+/// elapsed time (`SharedState::note_region_demand_heard`), so the cadence is
+/// no longer their averaging time. `SWARMLLM_DEMAND_SEND=every-round` is the
+/// A/B arm: every round, as before.
+fn demand_send_due(
+    last: Option<(f64, std::time::Instant)>,
+    rate: f64,
+    now: std::time::Instant,
+) -> bool {
+    if demand_sent_every_round() {
+        return true;
+    }
+    match last {
+        None => true,
+        Some((sent, at)) => {
+            (rate - sent).abs() >= DEMAND_MOVE_IS_NEWS * sent.abs()
+                || now.saturating_duration_since(at) >= DEMAND_REPEAT_AFTER
+        }
+    }
+}
+
+fn demand_sent_every_round() -> bool {
+    static EVERY_ROUND: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *EVERY_ROUND
+        .get_or_init(|| std::env::var("SWARMLLM_DEMAND_SEND").is_ok_and(|v| v == "every-round"))
 }
 
 /// Why a repeat of an unchanged capability went out — the word the publish's
@@ -723,6 +769,7 @@ impl HealthMonitor {
             last_announced_shards: std::collections::HashSet::new(),
             last_withheld_models: std::collections::HashSet::new(),
             retracted_models: std::collections::HashMap::new(),
+            demand_sent: std::collections::HashMap::new(),
             parts_sent: None,
             last_announced_manifests: std::collections::HashMap::new(),
             manifest_announce_counter: 0,
@@ -2316,7 +2363,7 @@ impl HealthMonitor {
     /// the note on those fields. The merged map holds what every peer told us,
     /// and re-publishing it re-originated the whole swarm's demand table under
     /// this node's id every 30 s.
-    async fn broadcast_region_demand(&self) {
+    async fn broadcast_region_demand(&mut self) {
         let Some(our_region) = self.shared_state.effective_region().await else {
             return; // No region — nothing to file demand under
         };
@@ -2341,10 +2388,21 @@ impl HealthMonitor {
             .iter()
             .map(|e| (e.key().clone(), *e.value()))
             .collect();
+        // A model under the line is forgotten, so it goes out at once if it
+        // comes back.
+        self.demand_sent.retain(|m, _| {
+            local_demand
+                .iter()
+                .any(|(id, rate)| id == m && *rate >= 0.01)
+        });
+        let now = std::time::Instant::now();
         for (model_id, rate) in local_demand {
             let model_id = &model_id;
             if rate < 0.01 {
                 continue; // Don't gossip negligible demand
+            }
+            if !demand_send_due(self.demand_sent.get(model_id).copied(), rate, now) {
+                continue;
             }
             let demand = crate::types::ModelDemandGossip {
                 model_id: model_id.clone(),
@@ -2357,7 +2415,9 @@ impl HealthMonitor {
             let msg = NetworkCommand::Broadcast(SwarmMessage::ModelDemandGossip(demand));
             if let Err(e) = self.network_tx.send(msg).await {
                 tracing::debug!(error = %e, "Failed to broadcast demand gossip");
+                continue;
             }
+            self.demand_sent.insert(model_id.clone(), (rate, now));
         }
     }
 
@@ -3105,6 +3165,38 @@ impl HealthMonitor {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// #91 (2m): a model's demand goes on gossip when it is new, when it moved
+    /// 10% since it last went, or when the decay tick's ten minutes have passed
+    /// — never every 30 s round for a rate that changes only every ten minutes.
+    #[test]
+    fn an_unmoved_demand_waits_for_the_decay_tick() {
+        let t = std::time::Instant::now();
+        assert!(
+            demand_send_due(None, 0.5, t),
+            "a model not yet sent goes at once"
+        );
+        let sent = Some((1.0, t));
+        assert!(
+            !demand_send_due(sent, 1.0, t + Duration::from_secs(30)),
+            "the next round, unchanged: the ~560 messages per model this stops"
+        );
+        assert!(!demand_send_due(sent, 1.05, t + Duration::from_secs(590)));
+        assert!(
+            demand_send_due(sent, 0.85, t + Duration::from_secs(30)),
+            "a decay tick with no requests moves it 15%"
+        );
+        assert!(demand_send_due(sent, 1.12, t + Duration::from_secs(30)));
+        assert!(
+            demand_send_due(sent, 1.0, t + DEMAND_REPEAT_AFTER),
+            "repeated every ten minutes, inside receivers' 25-minute window"
+        );
+        assert!(
+            DEMAND_REPEAT_AFTER.as_millis() * 2
+                < u128::from(crate::daemon::state::demand_heard::HEARD_FRESH_FOR_MS),
+            "a receiver keeps a publisher's rate past two of its repeats"
+        );
+    }
 
     /// The regression this whole scheme exists for. A manifest carries the full
     /// tensor table of every shard, and 15 of them measured 825 KB on the

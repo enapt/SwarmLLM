@@ -20,6 +20,7 @@ mod capacity;
 pub(crate) mod capacity_plan;
 mod credits;
 pub(crate) mod declined_leads;
+pub(crate) mod demand_heard;
 mod events;
 pub(crate) mod forward_streams;
 mod hf;
@@ -1745,6 +1746,7 @@ impl SharedState {
                 model_request_counts: DashMap::new(),
                 requests_served_for_peers: DashMap::new(),
                 served_for_peers_at: DashMap::new(),
+                demand_heard: Default::default(),
                 resource_schedule: RwLock::new(config.resources.schedule.clone()),
                 prune_history: RwLock::new(VecDeque::new()),
                 shard_p2p_failed: dashmap::DashSet::new(),

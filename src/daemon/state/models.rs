@@ -268,6 +268,12 @@ pub struct ModelMgmt {
     /// past the same pool-member and unknown-model checks); read only by
     /// `AutoShardManager::watch_model_use`, which saves it into `model_use`.
     pub served_for_peers_at: DashMap<crate::types::ModelId, i64>,
+    /// Each computer's latest gossiped demand per (model, region), so a
+    /// region's figure is the mean of what its computers last said, blended by
+    /// time rather than per message (#91 (2m)). Written and read ONLY by
+    /// `SharedState::note_region_demand_heard` (dispatch's `ModelDemandGossip`
+    /// arm), the one way a peer's demand reaches `region_demand`.
+    pub demand_heard: super::demand_heard::DemandHeard,
     pub resource_schedule: RwLock<crate::config::ResourceSchedule>,
     pub prune_history: RwLock<VecDeque<crate::types::PruneEvent>>,
     /// Parallax Phase C.2 stability counter per shard. Positive values mean
@@ -1340,6 +1346,7 @@ mod tests {
             model_request_counts: DashMap::new(),
             requests_served_for_peers: DashMap::new(),
             served_for_peers_at: DashMap::new(),
+            demand_heard: Default::default(),
             resource_schedule: RwLock::new(Default::default()),
             prune_history: RwLock::new(VecDeque::new()),
             parallax_stability: DashMap::new(),
