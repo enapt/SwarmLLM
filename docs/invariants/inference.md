@@ -6250,9 +6250,13 @@ Code 21-68% SLOWER, prose 12-30% faster. A tree round took ~260 ms against the c
 169-189 ms against 150-159: a forward that reads a mask is never captured, § above) and on code kept fewer a
 round (6.4-8.1 against 8.3; 17-21 rounds against 17). Every arm wrote the same opening of each reply; both nodes
 `device=Cuda`. Code is where a split pays most and card to card is the field's shape, so
-`block_draft::block_trees_on` is off unless `SWARMLLM_BLOCK_TREE=1`. What would turn it back on: a captured tree
-check on the card, or the tree chosen per kind of reply (`pipeline::reply_kind`, #469) — prose only — each
-measured on this rig first (FUTURE_WORK #437).
+block trees were off unless `SWARMLLM_BLOCK_TREE=1`. **Now chosen per kind of reply** (#437 (2), 2026-11-19 evening):
+`block_draft::block_trees_for(pipeline::reply_kind(request))` — a tree only for a reply read as prose, the chain for
+code, tools, a grammar or a turn too short to tell; `SWARMLLM_BLOCK_TREE=1` / `=0` forces either for every reply. The
+loop logs its choice once a reply (`DIAG: the block drafter's guesses go as a tree only for a reply read as prose`).
+Measured on the same rig (`~/swarmllm-gate/card437_1119d`, arms default / chain / default, decode s): code read `Code`
+and ran the chain, 3.18-4.10 against 3.27-4.12; the story read `Prose` and ran a tree, 14.07 / 16.13 against the chain's
+22.67. Left: a captured tree check on the card, which would let code take one too.
 
 Tests: `a_tree_checks_rows_are_cut_to_its_kept_path`, `a_walked_trees_rows_are_its_kept_paths_in_order`,
 the rows half of `the_walk_follows_the_branch_that_carries_each_pick` (each red with its gather

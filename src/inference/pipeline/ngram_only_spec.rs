@@ -840,12 +840,23 @@ impl PipelineExecutor {
         // advertises what that needs (`ModelArch::block_tree_features`) and
         // the tail walks it. Its rounds are DSD's (`dsd_tree::TreeRounds`):
         // the check priced row by row, the kept path's tokens past the rows
-        // in place read again by the next check, whatever it guesses. Off
-        // unless `SWARMLLM_BLOCK_TREE=1` (`block_draft::block_trees_on`: on a
-        // card it wrote code slower than the chain).
+        // in place read again by the next check, whatever it guesses. Only
+        // for a reply predicted to be prose (`block_draft::block_trees_for`:
+        // on a card it wrote prose faster than the chain and code slower).
+        let reply_kind = super::reply_kind(&self.request);
+        let trees_for_this_reply = super::block_draft::block_trees_for(reply_kind);
+        if block.as_ref().is_some_and(|b| b.block.is_some()) {
+            // Once a reply, so the choice can be read on any node's log.
+            tracing::info!(
+                request_id = %self.request.id,
+                ?reply_kind,
+                trees = trees_for_this_reply,
+                "DIAG: the block drafter's guesses go as a tree only for a reply read as prose (#437)"
+            );
+        }
         let mut trees = block
             .as_ref()
-            .filter(|b| b.block.is_some() && super::block_draft::block_trees_on())
+            .filter(|b| b.block.is_some() && trees_for_this_reply)
             .and_then(|_| self.shared_state.gguf_meta_for(&self.request.model_id))
             .and_then(|m| {
                 crate::inference::model_arch::ModelArch::from_gguf_arch(&m.architecture)

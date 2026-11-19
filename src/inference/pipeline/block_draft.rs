@@ -29,20 +29,32 @@ pub(crate) const PROMPT_WINDOW: u32 = 64;
 /// the wire.
 pub(crate) const BLOCK_TREE_MOST_ROWS: usize = crate::inference::layers::SsmState::MOST_ROWS_KEPT;
 
-/// May a reply whose family reads trees check one grown from the block
-/// drafter's marginals (#437)? OFF by default: `SWARMLLM_BLOCK_TREE=1` turns it
-/// on, the A/B inside one binary. Read once.
+/// May a reply of `kind` whose family reads trees check one grown from the
+/// block drafter's marginals (#437)? By default only a reply predicted to be
+/// PROSE (`pipeline::reply_kind`, #469 — the one prediction plans are priced
+/// by): `SWARMLLM_BLOCK_TREE=1` turns it on for every reply, `=0` off for
+/// every reply, the A/B inside one binary. Read once.
 ///
-/// Off because a split on the CARD wrote code 21-68% slower with it (Qwen3.5-4B
-/// over two card nodes 130 ms apart, 2026-11-19, `~/rig428/scripts/card437.sh`:
-/// a tree round ~260 ms against the chain's ~190 — a check that reads a mask is
-/// never captured — and fewer tokens kept a round on code), though prose came
-/// out 12-30% faster and two processor nodes gained ~5% on both
-/// (`docs/invariants/inference.md` § "A recurrent layer reads a tree…"). What
-/// would turn it back on is FUTURE_WORK #437's residual.
-pub(crate) fn block_trees_on() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("SWARMLLM_BLOCK_TREE").as_deref() == Ok("1"))
+/// Prose only because a split on the CARD (Qwen3.5-4B over two card nodes
+/// 130 ms apart, 2026-11-19, `~/rig428/scripts/card437.sh`) wrote prose 12-30%
+/// faster with it and code 21-68% SLOWER: a tree round ~260 ms against the
+/// chain's ~190 — a check that reads a mask is never captured — and fewer
+/// tokens kept a round on code; two processor nodes gained ~5% on both
+/// (`docs/invariants/inference.md` § "A recurrent layer reads a tree…"). A
+/// reply with tools, a grammar, or too little asked to tell keeps the chain.
+pub(crate) fn block_trees_for(kind: crate::daemon::state::split_rounds::ReplyKind) -> bool {
+    block_trees_setting().unwrap_or(kind == crate::daemon::state::split_rounds::ReplyKind::Prose)
+}
+
+/// `SWARMLLM_BLOCK_TREE`: `Some(true)` at `1`, `Some(false)` at `0`, else the
+/// default ([`block_trees_for`]).
+fn block_trees_setting() -> Option<bool> {
+    static SETTING: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    *SETTING.get_or_init(|| match std::env::var("SWARMLLM_BLOCK_TREE").as_deref() {
+        Ok("1") => Some(true),
+        Ok("0") => Some(false),
+        _ => None,
+    })
 }
 
 /// What a reply that drafts by block asks of its segments, and the rows they
@@ -1168,6 +1180,20 @@ fn choose(block: Choice, head: Choice) -> By {
 mod tests {
     use super::*;
     use crate::inference::dsd_controller::{CheckReach, FIRST_BLOCK_GUESSES, FIRST_PROBE_AFTER};
+
+    /// By default a tree goes only for a reply read as prose (#437 (2)): the
+    /// card rig wrote prose 12-30% faster with one and code 21-68% slower.
+    #[test]
+    fn a_block_tree_goes_only_for_a_reply_read_as_prose() {
+        use crate::daemon::state::split_rounds::ReplyKind;
+        if std::env::var("SWARMLLM_BLOCK_TREE").is_ok() {
+            return; // the A/B switch decides for every reply
+        }
+        assert!(block_trees_for(ReplyKind::Prose));
+        for kind in [ReplyKind::Code, ReplyKind::Structured, ReplyKind::Unsure] {
+            assert!(!block_trees_for(kind), "{kind:?} keeps the chain");
+        }
+    }
 
     /// A segment's rows are kept only as asked of it: layers it runs and the
     /// reply asked for, each once, and no more rows than its forward asked.

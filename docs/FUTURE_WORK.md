@@ -4992,9 +4992,15 @@ rows for ANY tree (an old gate, gotcha #1144). **Stage D on the CARD rig (2026-1
 both nodes on the RTX 3070): code 21-68% SLOWER, prose 12-30% faster** (decode s, two arms: palindrome 5.48 / 4.10
 against the chain's 3.26 / 3.39, binary tree 5.05 / 5.65 against 4.01 / 4.05, story 13.94 / 13.86 against 15.77 /
 19.63): a tree round ~260 ms against ~190, its check uncaptured (it reads a mask), and fewer kept a round on code.
-So it SHIPS OFF (`block_draft::block_trees_on`, `SWARMLLM_BLOCK_TREE=1` turns it on). Left: (1) capture the tree
-check on the card, or (2) grow a tree only for a reply predicted to be prose (`pipeline::reply_kind`, #469) — each
-on the card rig first; then the field (here [0,8) ↔ AU, `~/swarmllm-gate/field428_1119/run.sh` pattern).
+So it shipped OFF. **(2) BUILT on main the same evening: a tree only for a reply read as prose**
+(`block_draft::block_trees_for(pipeline::reply_kind(request))`; `SWARMLLM_BLOCK_TREE=1` / `=0` forces either for every
+reply; INFO `DIAG: the block drafter's guesses go as a tree only for a reply read as prose`). Card rig
+(`~/swarmllm-gate/card437_1119d`, 17:08-17:12Z, arms default / chain / default, decode s): the two code prompts read
+`Code` → chain, 4.10 / 3.18 and 3.90 / 3.99 against the chain's 3.27 and 4.12; the story read `Prose` → tree, 14.07 /
+16.13 against the chain's 22.67 (and 15.77 / 19.63 before). Prior art: EAGLE-2's dynamic trees size the tree by the
+drafter's confidence; arXiv 2604.14682 finds acceptance differs by task — no system found chooses tree or chain by a
+predicted kind of reply. Left: (1) capture the tree check on the card (would let code take a tree); then the field
+(here [0,8) ↔ AU, `~/swarmllm-gate/field428_1119/run.sh` pattern).
 
 #### #318 — A large model split across machines is too slow to use
 `P2` · perf-split · **OPEN** — 2026-10-20 · plan: `docs/plans/large_model_splits.md` · draws on #134, #145, #148, #149, #192

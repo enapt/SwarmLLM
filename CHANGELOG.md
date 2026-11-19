@@ -46,6 +46,11 @@ plan was still priced as if it guessed 2.3 words a round. On Qwen3.6-35B-A3B the
 and arrived four times later than predicted. The plan now keeps the drafter's room, and a plan that leaves none is
 priced as one that guesses nothing (#481).
 
+**A split of a Qwen 3.5, 3.6 or 3.8 model writes prose faster.** The small model that guesses ahead for such a split
+now sends a branching set of guesses when the reply is read as prose, and its single line of guesses for code: on two
+graphics cards the branching guesses wrote prose 12-38% faster and code 21-68% slower than the line, so each kind of
+reply now gets the one that is faster for it (#437).
+
 **A split that starts and finishes on this computer no longer fails when its first part fills the graphics card.**
 With Qwen3.8-27B planned as this computer's first 21 layers and its last one, the first part's load found a little
 more free memory than planned and took it, and the last layer then had no room: five of six requests failed with
