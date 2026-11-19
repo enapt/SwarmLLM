@@ -419,10 +419,13 @@ impl SplitModel {
     /// A tree's rows sit at positions that are not consecutive and attend a
     /// mask that is not causal, which only plain attention over a full cache
     /// takes: a sliding window keeps keys by position, a layer reading another
-    /// layer's cache must reach exactly the forward's end, MLA ropes on its own
-    /// path, and a recurrent layer keeps one state, not one per branch (#228).
-    /// The coordinator asks the same question of the model's family first
-    /// (`ModelArch::reads_draft_trees`); this is the answer that holds.
+    /// layer's cache must reach exactly the forward's end, and MLA ropes on its
+    /// own path. Qwen 3.5's recurrent layers keep one state, and read a tree
+    /// row by row from each row's parent's (#437: `qwen35::tree_parents_now`,
+    /// up to `SsmState::MOST_ROWS_KEPT` rows, the whole tree in one forward);
+    /// the verdict takes the state back into the kept path by the rows the
+    /// step kept. The coordinator asks the same question of the model's family
+    /// first (`ModelArch::reads_draft_trees`); this is the answer that holds.
     pub(crate) fn draft_tree_refusal(&self) -> Option<&'static str> {
         for layer in &self.layers {
             match layer {
@@ -435,7 +438,7 @@ impl SplitModel {
                     }
                 }
                 LayerVariant::DeepSeek { .. } => return Some("its attention is MLA"),
-                _ => return Some("its layers keep a recurrent state"),
+                LayerVariant::Qwen35Attn { .. } | LayerVariant::Qwen35Ssm { .. } => {}
             }
         }
         if !self.image_spans.is_empty() {
@@ -1312,7 +1315,10 @@ impl SplitModel {
     /// the capture with the rope rows (`layers::stage_tree_forward`) — and no
     /// mask, which would be a host copy inside it. Uncaptured, a level of the
     /// 0.5B drafter's tree was ~530 launches, nearly all host time (~12 ms on
-    /// an idle card). `SWARMLLM_TREE_GRAPH=0` keeps it op by op.
+    /// an idle card). `SWARMLLM_TREE_GRAPH=0` keeps it op by op. Never a
+    /// Qwen 3.5 model's (#437): its recurrent layers read the tree's parents
+    /// off the host per call (`DeltaNetWeights::causal_conv_along`), which a capture
+    /// would not see.
     fn tree_steps_may_be_captured(&self) -> bool {
         crate::inference::cuda_graph::tree_steps_requested()
             && crate::inference::decode_attn::tree_kernel_enabled()

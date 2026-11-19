@@ -18,8 +18,15 @@ use super::{
 impl Qwen35AttnWeights {
     pub(crate) fn apply_rotary_emb(&self, x: &Tensor, index_pos: usize) -> CandleResult<Tensor> {
         let (_b_sz, _n_head, seq_len, _head_dim) = x.dims4()?;
-        let cos = self.cos.narrow(0, index_pos, seq_len)?;
-        let sin = self.sin.narrow(0, index_pos, seq_len)?;
+        // A tree check's rows turn at their own depths (`RowPositions`, #437),
+        // as a dense layer's do (`LayerWeights::rope_tables`).
+        let (cos, sin) = match super::tree_rope_rows(seq_len, &self.cos, &self.sin)? {
+            Some(rows) => rows,
+            None => (
+                self.cos.narrow(0, index_pos, seq_len)?,
+                self.sin.narrow(0, index_pos, seq_len)?,
+            ),
+        };
         // IMROPE with every position component equal to the token index —
         // what text is — rotates each pair by `pos * base^(-2i/n_rot)`, i.e.
         // plain NEOX-style partial RoPE over the first `rope_dim` dims —
@@ -413,13 +420,21 @@ impl DeltaNetWeights {
         let mixed = self.wqkv.forward(x)?; // [b, seq, 2·nk·kd + nv·vd]
         let z = self.wz.forward(x)?; // [b, seq, nv·vd]
         let gates = self.gates(x)?;
+        // A tree of guesses (#437): each row's parent among the step's rows —
+        // its convolution reads up its own line and its delta rule starts
+        // from its parent's state. `None` for a step's ordinary rows.
+        let tree = tree_parents_now(seq_len)?;
 
         // The state must describe the position this step starts from: a step
         // from 0 starts over, any other on a state out of step — or none — is
         // a conversation this layer has lost, refused rather than answered
-        // from a summary of some other history.
-        match ssm_state.as_ref().map(SsmState::positions) {
-            Some(at) if at == index_pos => {}
+        // from a summary of some other history. A branching tree's state is
+        // its last row's: the verdict takes it back before a step reads on.
+        match ssm_state.as_ref().map(|s| (s.positions(), s.is_branched())) {
+            Some((at, false)) if at == index_pos => {}
+            Some((at, true)) if at == index_pos && index_pos > 0 => candle_core::bail!(
+                "a DeltaNet layer's state is a tree check's, not yet taken back to the path it kept"
+            ),
             _ if index_pos == 0 => {
                 let channels = mixed.dim(2)?;
                 *ssm_state = Some(SsmState::new(
@@ -435,7 +450,8 @@ impl DeltaNetWeights {
                 ));
             }
             at => candle_core::bail!(
-                "a DeltaNet layer's state describes {at:?} positions, the step starts at {index_pos}"
+                "a DeltaNet layer's state describes {:?} positions, the step starts at {index_pos}",
+                at.map(|(at, _)| at)
             ),
         }
         let held = ssm_state.as_mut().expect("set above");
@@ -461,9 +477,9 @@ impl DeltaNetWeights {
         // On a card the convolution and its SiLU are one launch, written as
         // q | k and v apart and its window straight into the step's buffers
         // (`conv_on_the_card`); `new_conv` is then `None`.
-        let fused = match target.as_ref() {
-            Some(t) => self.conv_on_the_card(&mixed, &read.conv_state, &t.conv_state)?,
-            None => None,
+        let fused = match (target.as_ref(), &tree) {
+            (Some(t), None) => self.conv_on_the_card(&mixed, &read.conv_state, &t.conv_state)?,
+            _ => None,
         };
         let (qk, v, new_conv) = match fused {
             Some((qk, v)) => (
@@ -472,7 +488,10 @@ impl DeltaNetWeights {
                 None,
             ),
             None => {
-                let (conv, new_conv) = self.causal_conv(&mixed, &read.conv_state)?;
+                let (conv, new_conv) = match tree.as_deref() {
+                    None => self.causal_conv(&mixed, &read.conv_state)?,
+                    Some(parents) => self.causal_conv_along(&mixed, &read.conv_state, parents)?,
+                };
                 let conv = candle_nn::ops::silu(&conv)?; // [b, seq, C]
                 (
                     conv.narrow(2, 0, 2 * self.key_dim())?
@@ -495,6 +514,7 @@ impl DeltaNetWeights {
             &gates,
             &read.recurrent_state,
             target.as_ref().map(|t| &t.recurrent_state),
+            tree.as_deref(),
         )?; // out [b, seq, nv, vd]
 
         // Gated RMSNorm per value head: RMSNorm(o, ssm_norm) · silu(z).
@@ -526,6 +546,9 @@ impl DeltaNetWeights {
             in_place,
         )?;
         held.advance(next, index_pos + seq_len);
+        if tree.is_some() {
+            held.mark_branched();
+        }
         self.ssm_out.forward(&gated)
     }
 
@@ -545,6 +568,66 @@ impl DeltaNetWeights {
         for j in 0..k {
             let tap = padded
                 .narrow(2, j, seq_len)?
+                .broadcast_mul(&w.narrow(2, j, 1)?)?;
+            acc = Some(match acc {
+                None => tap,
+                Some(a) => (a + tap)?,
+            });
+        }
+        let out = acc
+            .expect("kernel has at least one tap")
+            .transpose(1, 2)?
+            .contiguous()?;
+        let new_state = padded.narrow(2, seq_len, pad)?.contiguous()?;
+        Ok((out, new_state))
+    }
+
+    /// [`Self::causal_conv`] over a TREE's rows (#437): row i's taps read up
+    /// its own line — itself, its parent, its parent's parent — and past the
+    /// tree's first row the window before the step, last input first, where
+    /// a chain's read the rows before it (Twig, arXiv 2608.01651: a node's
+    /// convolution inputs are its root-to-node path, found by parent links).
+    /// The taps are summed in the chain's order, so a row whose line IS the
+    /// rows before it gets the chain's bits. The window returned is the
+    /// chain's — a branching tree's state is taken back before it is read
+    /// ([`SsmState::mark_branched`]).
+    pub(crate) fn causal_conv_along(
+        &self,
+        x: &Tensor,
+        prev: &Tensor,
+        parents: &[Option<usize>],
+    ) -> CandleResult<(Tensor, Tensor)> {
+        let (_b_sz, seq_len, channels) = x.dims3()?;
+        if parents.len() != seq_len {
+            candle_core::bail!("a tree of {} rows for a step of {seq_len}", parents.len());
+        }
+        let k = self.conv_kernel;
+        let pad = k - 1;
+        // `[tap, row]`: the column of `padded` (the window, then the step's
+        // rows) tap j of row i reads — the input `pad − j` steps up i's line.
+        let mut columns = vec![0u32; k * seq_len];
+        for i in 0..seq_len {
+            let (mut at, mut above) = (Some(i), 0usize);
+            for back in 0..k {
+                let column = match at {
+                    Some(r) => pad + r,
+                    None => {
+                        above += 1;
+                        pad - above
+                    }
+                };
+                columns[(pad - back) * seq_len + i] = column as u32;
+                at = at.and_then(|r| parents[r]);
+            }
+        }
+        let columns = Tensor::from_vec(columns, (k, seq_len), x.device())?;
+        let x_t = x.transpose(1, 2)?.contiguous()?; // [b, C, seq]
+        let padded = Tensor::cat(&[prev, &x_t], 2)?; // [b, C, seq + K − 1]
+        let w = self.conv1d.reshape((1, channels, k))?;
+        let mut acc: Option<Tensor> = None;
+        for j in 0..k {
+            let tap = padded
+                .index_select(&columns.get(j)?, 2)?
                 .broadcast_mul(&w.narrow(2, j, 1)?)?;
             acc = Some(match acc {
                 None => tap,
@@ -787,6 +870,7 @@ fn written_into(
 /// (`SWARMLLM_DELTA_RULE=steps`). q and k are `qk` `[b, seq, 2·nk, kd]`,
 /// L2-normalised; the scale is `1/√kd`. Returns the outputs
 /// `[b, seq, nv, vd]` and the new state.
+#[allow(clippy::too_many_arguments)]
 fn delta_rule_into(
     qk: &Tensor,
     nk: usize,
@@ -794,6 +878,7 @@ fn delta_rule_into(
     gates: &Gates,
     state: &Tensor,
     into: Option<&Tensor>,
+    tree: Option<&[Option<usize>]>,
 ) -> CandleResult<(Tensor, Tensor, bool)> {
     let (g, beta) = (&gates.g, &gates.beta);
     let (_, _, nv, vd) = v.dims4()?;
@@ -802,21 +887,22 @@ fn delta_rule_into(
     let scale = 1.0 / (kd as f64).sqrt();
     let one_pass = delta_rule_in_one_pass();
     crate::inference::prof::timed!(crate::inference::prof::Stage::DeltaRule, {
-        let on_card = if one_pass && device.is_cuda() && card_delta_rule_covers(kd, vd) {
-            let out_buffer = match into {
-                Some(t) => t.clone(),
-                None => state.zeros_like()?,
+        let on_card =
+            if one_pass && device.is_cuda() && card_delta_rule_covers(kd, vd) && tree.is_none() {
+                let out_buffer = match into {
+                    Some(t) => t.clone(),
+                    None => state.zeros_like()?,
+                };
+                delta_rule_cuda(qk, nk, v, gates, state, &out_buffer, scale as f32)?
+                    .map(|out| (out, out_buffer, into.is_some()))
+            } else {
+                None
             };
-            delta_rule_cuda(qk, nk, v, gates, state, &out_buffer, scale as f32)?
-                .map(|out| (out, out_buffer, into.is_some()))
-        } else {
-            None
-        };
         let (q, k) = (qk.narrow(2, 0, nk)?, qk.narrow(2, nk, nk)?);
         Ok(match on_card {
             Some(done) => done,
             None if one_pass && device.is_cpu() => {
-                let (out, new) = delta_rule_cpu(&q, &k, v, g, beta, state, scale as f32)?;
+                let (out, new) = delta_rule_cpu(&q, &k, v, g, beta, state, scale as f32, tree)?;
                 (out, new, false)
             }
             None => {
@@ -829,7 +915,7 @@ fn delta_rule_into(
                 } else {
                     (q, k)
                 };
-                let (out, new) = delta_rule(&(q * scale)?, &k, v, g, beta, state.clone())?;
+                let (out, new) = delta_rule(&(q * scale)?, &k, v, g, beta, state.clone(), tree)?;
                 (out, new, false)
             }
         })
@@ -886,6 +972,7 @@ fn replay_rows_composed(
         &Gates::apart(first(&kept.g)?, first(&kept.beta)?),
         &read.recurrent_state,
         into.map(|t| &t.recurrent_state),
+        None,
     )?;
     written_into(into.cloned(), Some(conv_state), recurrent_state, written)
 }
@@ -899,7 +986,9 @@ fn replay_rows_composed(
 /// ```
 ///
 /// q/k/v `[b, seq, heads, dim]`, g/beta `[b, seq, heads]`, state
-/// `[b, heads, v_dim, k_dim]`. Returns `[b, seq, heads, v_dim]` and the state.
+/// `[b, heads, v_dim, k_dim]`. Returns `[b, seq, heads, v_dim]` and the state
+/// — a tree's (`tree`, each row's parent, #437) its last row's, each row
+/// started from its parent's state.
 fn delta_rule(
     q: &Tensor,
     k: &Tensor,
@@ -907,10 +996,19 @@ fn delta_rule(
     g: &Tensor,
     beta: &Tensor,
     mut state: Tensor,
+    tree: Option<&[Option<usize>]>,
 ) -> CandleResult<(Tensor, Tensor)> {
     let seq_len = q.dim(1)?;
     let mut outs = Vec::with_capacity(seq_len);
+    let read = state.clone();
+    let mut row_states: Vec<Tensor> = Vec::new();
     for t in 0..seq_len {
+        if let Some(parents) = tree {
+            state = match parents[t] {
+                Some(p) => row_states[p].clone(),
+                None => read.clone(),
+            };
+        }
         let q_t = q.narrow(1, t, 1)?.squeeze(1)?.unsqueeze(3)?; // [b, h, kd, 1]
         let k_t = k.narrow(1, t, 1)?.squeeze(1)?; // [b, h, kd]
         let v_t = v.narrow(1, t, 1)?.squeeze(1)?; // [b, h, vd]
@@ -926,6 +1024,9 @@ fn delta_rule(
         let e = (v_t - sk)?.broadcast_mul(&beta_t)?; // [b, h, vd]
         state = (state + e.unsqueeze(3)?.matmul(&k_t.unsqueeze(2)?)?)?;
         outs.push(state.matmul(&q_t)?.squeeze(3)?); // [b, h, vd]
+        if tree.is_some() {
+            row_states.push(state.clone());
+        }
     }
     Ok((Tensor::stack(&outs, 1)?, state))
 }
@@ -957,6 +1058,15 @@ fn delta_rule_in_one_pass() -> bool {
 /// `[b, seq, nv, vd]` and the state. Not bit-identical to [`delta_rule`] (its
 /// sums run in another order): `one_pass_delta_rule_matches_token_by_token`
 /// bounds it.
+///
+/// A TREE's rows (`tree`, each row's parent, #437) each start from their
+/// parent's state — one kept a row, in a buffer each pool thread keeps (a
+/// tree is at most `SsmState::MOST_ROWS_KEPT` rows: 2 MB a head at 128 × 128)
+/// — with the same arithmetic a row of a chain gets, so a row whose line is
+/// the rows before it gets the chain's bits. The state returned is the last
+/// row's. Twig (arXiv 2608.01651) solves the same tree in closed form over an
+/// ancestor mask to keep no state per node; at 32 rows the states fit.
+#[allow(clippy::too_many_arguments)]
 fn delta_rule_cpu(
     q: &Tensor,
     k: &Tensor,
@@ -965,6 +1075,7 @@ fn delta_rule_cpu(
     beta: &Tensor,
     state: &Tensor,
     scale: f32,
+    tree: Option<&[Option<usize>]>,
 ) -> CandleResult<(Tensor, Tensor)> {
     let (b, seq, nk, kd) = q.dims4()?;
     let (_, _, nv, vd) = v.dims4()?;
@@ -977,7 +1088,7 @@ fn delta_rule_cpu(
         .enumerate()
         .for_each(|(bh, (s, o))| {
             let (bi, h) = (bh / nv, bh % nv);
-            for t in 0..seq {
+            let step = |s: &mut [f32], o: &mut [f32], t: usize| {
                 let qk = ((bi * seq + t) * nk + h % nk) * kd;
                 let (q_t, k_t) = (&q[qk..qk + kd], &k[qk..qk + kd]);
                 let gb = (bi * seq + t) * nv + h;
@@ -990,12 +1101,75 @@ fn delta_rule_cpu(
                     axpy(delta, k_t, row);
                     o_t[j] = dot(row, q_t) * scale;
                 }
+            };
+            match tree {
+                None => (0..seq).for_each(|t| step(s, o, t)),
+                Some(parents) => TREE_ROW_STATES.with(|kept| {
+                    let mut kept = kept.borrow_mut();
+                    let size = vd * kd;
+                    kept.resize(seq * size, 0.0);
+                    for (t, parent) in parents.iter().enumerate() {
+                        let (before, from_here) = kept.split_at_mut(t * size);
+                        let here = &mut from_here[..size];
+                        here.copy_from_slice(match parent {
+                            Some(p) => &before[p * size..(p + 1) * size],
+                            None => &*s,
+                        });
+                        step(here, o, t);
+                    }
+                    if seq > 0 {
+                        s.copy_from_slice(&kept[(seq - 1) * size..seq * size]);
+                    }
+                }),
             }
         });
     let out = Tensor::from_vec(out, (b, nv, seq, vd), &Device::Cpu)?
         .transpose(1, 2)?
         .contiguous()?;
     Ok((out, Tensor::from_vec(s, (b, nv, vd, kd), &Device::Cpu)?))
+}
+
+thread_local! {
+    /// Each row's state while [`delta_rule_cpu`] reads a tree, kept by the
+    /// pool thread across calls: a tree's check is up to 32 rows × 64 KB a
+    /// head, and fresh pages for it every head of every layer would cost more
+    /// than the rule.
+    static TREE_ROW_STATES: std::cell::RefCell<Vec<f32>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// A tree check's rows as a recurrent layer reads them (#437): each row's
+/// parent among the step's `seq_len` rows, `None` for one that follows the
+/// state the step reads (`RowVisibility::parents`, off the tree the forward
+/// set — `SplitModel::with_draft_tree`). `None` outside a tree, and for a
+/// tree that is one chain — each row the previous row's child, a step's own
+/// shape, read as a step is. A tree wider than the rows a step keeps
+/// ([`SsmState::MOST_ROWS_KEPT`]) is refused: its verdict could not be taken
+/// back into it.
+fn tree_parents_now(seq_len: usize) -> CandleResult<Option<Vec<Option<usize>>>> {
+    let Some(seen) = super::tree_scope_now().and_then(|scope| scope.visibility) else {
+        return Ok(None);
+    };
+    let parents = seen.parents().map_err(candle_core::Error::msg)?;
+    if parents.len() != seq_len {
+        candle_core::bail!(
+            "a tree of {} rows in a DeltaNet step of {seq_len}",
+            parents.len()
+        );
+    }
+    if parents
+        .iter()
+        .enumerate()
+        .all(|(row, parent)| *parent == row.checked_sub(1))
+    {
+        return Ok(None);
+    }
+    if seq_len > SsmState::MOST_ROWS_KEPT {
+        candle_core::bail!(
+            "a tree of {seq_len} rows: a recurrent layer takes back at most {}",
+            SsmState::MOST_ROWS_KEPT
+        );
+    }
+    Ok(Some(parents))
 }
 
 /// Does `kernels/delta_rule.cu` take this layer? A lane holds `D / 32` of a
@@ -2472,7 +2646,11 @@ mod tests {
             .unwrap();
         let beta = Tensor::rand(0f32, 1.0, (1, 3, 4), &device).unwrap();
         let state = Tensor::randn(0f32, 0.3, (1, 4, 128, 128), &device).unwrap();
-        let run = |gates: &Gates| delta_rule_into(&qk, 2, &v, gates, &state, None).unwrap().0;
+        let run = |gates: &Gates| {
+            delta_rule_into(&qk, 2, &v, gates, &state, None, None)
+                .unwrap()
+                .0
+        };
         let right = run(&Gates::apart(g.clone(), beta.clone()));
         let swapped = run(&Gates::apart(beta, g));
         assert!(
@@ -2773,6 +2951,158 @@ mod tests {
         assert!(held.rows_held == 0 && !held.can_rewind_to(5));
     }
 
+    /// A tree check's rows (#437) are each what the row's own line gives read
+    /// alone — the step from the state before the tree over the row's
+    /// ancestors and itself, in order: every row, bit for bit, both ways a
+    /// step writes its state. The state a branching tree leaves (its last
+    /// row's) is refused until the verdict takes it back; taken back into the
+    /// in-place path (the rows whose line is the rows before them) it is where
+    /// that path read alone leads. Red if a row's convolution reads the rows
+    /// before it instead of its line, if its delta rule starts from the
+    /// previous row's state, or if the tree's end could be read on from.
+    #[test]
+    fn a_tree_checks_rows_are_their_lines_read_alone() {
+        use crate::inference::draft_tree::DraftTree;
+        let device = Device::Cpu;
+        // Exact projections, as `a_check_rewound_into_its_middle_is_where_its_kept_rows_lead`.
+        let w = weights_of(&device, true);
+        let x = exact(Tensor::randn(0f32, 1.0, (1, 10, 8), &device).unwrap(), 8.0);
+        let tree_x = x.narrow(1, 3, 7).unwrap();
+        // Rows 0-2 one line (in place); 3 a second child of 0 and 4 its child;
+        // 5 a second child of 1; 6 a second line from the context itself.
+        let parents: Vec<Option<usize>> =
+            vec![None, Some(0), Some(1), Some(0), Some(3), Some(1), None];
+        let as_sent: Vec<Option<u16>> = parents.iter().map(|p| p.map(|p| p as u16)).collect();
+        let tree = DraftTree::new(3, as_sent.clone()).unwrap();
+        let (positions, seen) = tree.rows_for(3, 7).unwrap();
+        assert_eq!(
+            seen.parents().unwrap(),
+            parents,
+            "the parents read off the tree's bits"
+        );
+        // A recurrent layer reads a tree whole, never its last rows alone.
+        let grown = DraftTree::new(3, as_sent).unwrap();
+        assert!(grown.rows_for(6, 4).unwrap().1.parents().is_err());
+
+        for into_spare in [false, true] {
+            let run = |state: &mut Option<SsmState>, rows: &Tensor, from: usize| {
+                w.forward_deltanet_into(rows, state, from, into_spare)
+            };
+            let prompt = || {
+                let mut s = None;
+                run(&mut s, &x.narrow(1, 0, 3).unwrap(), 0).unwrap();
+                s
+            };
+            let mut held = prompt();
+            let out = {
+                let _tree = super::super::RowPositions::for_tree(positions.clone(), seen.clone());
+                run(&mut held, &tree_x, 3).unwrap()
+            };
+            for row in 0..parents.len() {
+                let mut line = vec![row];
+                while let Some(p) = parents[*line.last().unwrap()] {
+                    line.push(p);
+                }
+                line.reverse();
+                let rows: Vec<Tensor> = line
+                    .iter()
+                    .map(|&r| tree_x.narrow(1, r, 1).unwrap())
+                    .collect();
+                let mut alone = prompt();
+                let want = run(&mut alone, &Tensor::cat(&rows, 1).unwrap(), 3).unwrap();
+                assert_eq!(
+                    max_abs_diff(
+                        &out.narrow(1, row, 1).unwrap(),
+                        &want.narrow(1, line.len() - 1, 1).unwrap()
+                    ),
+                    0.0,
+                    "into_spare={into_spare}: row {row}, its line {line:?}"
+                );
+            }
+
+            let h = held.as_mut().unwrap();
+            assert!(h.is_branched());
+            assert!(
+                !h.can_rewind_to(10) && !h.rewind_to(10).unwrap(),
+                "the tree's end is no history"
+            );
+            assert!(
+                run(&mut held, &x.narrow(1, 0, 1).unwrap(), 10).is_err(),
+                "nothing reads on from a branching tree's state"
+            );
+            // The verdict kept rows 0-2, in place: the take-back replays them.
+            let h = held.as_mut().unwrap();
+            assert!(h.rewind_to(6).unwrap() && !h.is_branched());
+            let mut alone = prompt();
+            run(&mut alone, &tree_x.narrow(1, 0, 3).unwrap(), 3).unwrap();
+            let (got, want) = (held.as_ref().unwrap(), alone.as_ref().unwrap());
+            assert_eq!(got.positions(), want.positions());
+            assert_eq!(
+                max_abs_diff(
+                    &got.current().recurrent_state,
+                    &want.current().recurrent_state
+                ),
+                0.0,
+                "into_spare={into_spare}: the state taken back into the kept path"
+            );
+            assert_eq!(
+                max_abs_diff(&got.current().conv_state, &want.current().conv_state),
+                0.0,
+                "into_spare={into_spare}: the window taken back into the kept path"
+            );
+            // And the reply reads on from it as from the path read alone.
+            let next = x.narrow(1, 9, 1).unwrap();
+            assert_eq!(
+                max_abs_diff(
+                    &run(&mut held, &next, 6).unwrap(),
+                    &run(&mut alone, &next, 6).unwrap()
+                ),
+                0.0
+            );
+        }
+    }
+
+    /// The token-by-token composition (`SWARMLLM_DELTA_RULE=steps`) reads a
+    /// tree as the one-pass kernel does: each row from its parent's state.
+    #[test]
+    fn the_composed_delta_rule_reads_a_tree_as_the_one_pass_kernel_does() {
+        let device = Device::Cpu;
+        let (nk, nv, kd, vd, seq) = (2usize, 4usize, 8usize, 8usize, 6usize);
+        let n = |dims: &[usize]| Tensor::randn(0f32, 1.0, dims, &device).unwrap();
+        let unit = |t: Tensor| l2_norm(&t, 1e-6).unwrap();
+        let (q, k, v) = (
+            unit(n(&[1, seq, nk, kd])),
+            unit(n(&[1, seq, nk, kd])),
+            n(&[1, seq, nv, vd]),
+        );
+        let g = (n(&[1, seq, nv]).abs().unwrap() * -0.3).unwrap();
+        let beta = candle_nn::ops::sigmoid(&n(&[1, seq, nv])).unwrap();
+        let state = n(&[1, nv, vd, kd]);
+        let scale = 1.0 / (kd as f64).sqrt();
+        let parents = [None, Some(0), Some(0), Some(2), None, Some(4)];
+        let (out, _) =
+            delta_rule_cpu(&q, &k, &v, &g, &beta, &state, scale as f32, Some(&parents)).unwrap();
+        let tile = |t: &Tensor| Tensor::cat(&vec![t; nv / nk], 2).unwrap();
+        let (want, _) = delta_rule(
+            &(tile(&q) * scale).unwrap(),
+            &tile(&k),
+            &v,
+            &g,
+            &beta,
+            state.clone(),
+            Some(&parents),
+        )
+        .unwrap();
+        assert!(
+            max_abs_diff(&out, &want) < 1e-4,
+            "{}",
+            max_abs_diff(&out, &want)
+        );
+        // Null control: read as a chain, the branching rows differ.
+        let (chain, _) = delta_rule_cpu(&q, &k, &v, &g, &beta, &state, scale as f32, None).unwrap();
+        assert!(max_abs_diff(&out, &chain) > 1e-3);
+    }
+
     /// A state that does not describe the step's first position is a lost
     /// conversation: refused, never answered from zeros or someone's history.
     #[test]
@@ -2819,7 +3149,8 @@ mod tests {
             let state = Tensor::randn(0f32, 0.5, (b, nv, vd, kd), &device).unwrap();
             let scale = 1.0 / (kd as f64).sqrt();
 
-            let (out, s) = delta_rule_cpu(&q, &k, &v, &g, &beta, &state, scale as f32).unwrap();
+            let (out, s) =
+                delta_rule_cpu(&q, &k, &v, &g, &beta, &state, scale as f32, None).unwrap();
             // The composition takes one sequence at a time (its per-token
             // slices of a batch of two are strided in a way candle's matmul
             // refuses), so the batch is checked sequence by sequence.
@@ -2834,6 +3165,7 @@ mod tests {
                         &one(&g, i),
                         &one(&beta, i),
                         one(&state, i),
+                        None,
                     )
                     .unwrap()
                 })

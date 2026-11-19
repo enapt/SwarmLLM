@@ -4870,6 +4870,23 @@ sees less than its position allows — read, not run), and EAGLE on a windowed t
 goes through a separate MTP worker). Take: cut each row's window at its DEPTH position (`layers::RowPositions` already
 carry base + depth), keep the cache's `WINDOW_REWIND_POSITIONS` (64) ≥ the tree's depth so a rejected branch rolls
 back, slide only after the verdict; on a card the tree kernel (`gqa_tree_attention_cuda`) needs the window too.
+**Design for the recurrent half, 2026-11-19** (after #428's field run: prose keeps ~1 guess a round over a real split).
+Prior art: Twig (arXiv 2608.01651, method read 2026-11-19) — a node's convolution inputs are its root-to-node path, read
+by following PARENT LINKS (fixed width, depth-independent); the delta rule in closed form over an ancestor mask, `(I+G)U =
+R` with G strictly ancestor-lower, S_i = P_i·S_pre + Σ_{j∈A(i)∪{i}} (P_i/P_j)·k_j·u_j^T; the accepted state rebuilt from the
+accepted PATH's factors, no snapshot per node (57 MB against 4.7 GB at 100 nodes, Qwen3.5-9B). Take: parent links for the
+convolution; each row's delta rule started from its PARENT's state (a tree here is ≤ 32 rows, `SsmState::MOST_ROWS_KEPT`, so
+a state per row on the processor, the path re-walked from the read state on a card — no closed form needed at this size);
+the commit is the replay we already have: DSD's tree settle keeps the kept guesses at consecutive rows (`rows_in_place`, a
+pure chain) and re-reads the rest next round, so `SsmState::rewind_to`'s replay of a PREFIX of the kept rows is exact — no
+gather. Rows ordered best child first, so the likeliest path is the in-place one. Attention layers: the tree's mask and
+RoPE rows (`tree_rope_rows`). A tree check on a recurrent model is never captured (its parents reach the card per call).
+**Stage A, processor half: BUILT 2026-11-19 (on main)** — Qwen 3.5's layers read a whole tree (≤ 32 rows) in one forward,
+each row from its parent's state; the tree's end refused until the verdict's take-back (`SsmState::mark_branched`); tests
+exact (every row against its line read alone) and red under three null controls (`docs/invariants/inference.md` § "A
+recurrent layer reads a tree from each row's parent's state"). No coordinator sends one yet (`ModelArch::reads_draft_trees`).
+Left: the card kernel taking parents (on a card the composition runs now), stage B (a tree from the drafter's marginals),
+C (the n-gram loop sends it, a new feature bit), D (measure).
 
 #### #318 — A large model split across machines is too slow to use
 `P2` · perf-split · **OPEN** — 2026-10-20 · plan: `docs/plans/large_model_splits.md` · draws on #134, #145, #148, #149, #192

@@ -3162,6 +3162,12 @@ pub(crate) struct SsmState {
     /// Rows of `rows` the last step wrote: 0 after a step of one position, or
     /// once the next step has begun.
     rows_held: usize,
+    /// The last step was a TREE of guesses (#437): `current` is its last row's
+    /// state, which describes no history the reply can have — the check's
+    /// verdict takes the state back into it ([`Self::rewind_to`]) before any
+    /// step reads on. Set by [`Self::mark_branched`]; a rewind into the check
+    /// clears it, and nothing else may read `current` while it is set.
+    branched: bool,
 }
 
 /// What a step of several positions gave its convolution and delta rule, one
@@ -3223,8 +3229,7 @@ pub(crate) struct SsmSlot {
 impl SsmState {
     /// The widest step whose rows are kept: the most positions a check reads
     /// (`network::protocol::MAX_SPEC_LOGITS_POSITIONS` — an honest chain is at
-    /// most `config::MAX_GUESSES_PER_CHECK` + 1; a tree is refused for a
-    /// recurrent layer). A wider step is a prompt pass, never rewound into: its
+    /// most `config::MAX_GUESSES_PER_CHECK` + 1; a TREE is held to it, #437). A wider step is a prompt pass, never rewound into: its
     /// rows would be 128 MB a layer at 4,096 tokens of Qwen3.5-4B. The worker's
     /// own checks are held to it (`model_worker::LocalSpec`).
     pub(crate) const MOST_ROWS_KEPT: usize = crate::network::protocol::MAX_SPEC_LOGITS_POSITIONS;
@@ -3238,6 +3243,7 @@ impl SsmState {
             previous_at: None,
             rows: None,
             rows_held: 0,
+            branched: false,
         }
     }
 
@@ -3322,13 +3328,26 @@ impl SsmState {
         self.previous = Some(read);
         self.previous_at = Some(self.at);
         self.at = positions;
+        self.branched = false;
+    }
+
+    /// The step just taken ([`Self::advance`]) read a tree whose rows branch:
+    /// only a rewind into it gives a state the reply can read on from.
+    pub(crate) fn mark_branched(&mut self) {
+        self.branched = true;
+    }
+
+    /// Whether the state is a branching tree's, awaiting its verdict
+    /// ([`Self::mark_branched`]).
+    pub(crate) fn is_branched(&self) -> bool {
+        self.branched
     }
 
     /// Whether [`Self::rewind_to`] would succeed: the state is there already,
     /// the last step started there, or it is inside the last step and that
     /// step kept its rows up to it.
     pub(crate) fn can_rewind_to(&self, positions: usize) -> bool {
-        self.at == positions
+        (self.at == positions && !self.branched)
             || self.previous_at == Some(positions)
             || self.rows_to_replay(positions).is_some()
     }
@@ -3350,7 +3369,8 @@ impl SsmState {
     /// kept, so a later rewind to a position before this one still works.
     pub(crate) fn rewind_to(&mut self, positions: usize) -> CandleResult<bool> {
         if self.at == positions {
-            return Ok(true);
+            // A branching tree's end is no position the reply holds.
+            return Ok(!self.branched);
         }
         if let Some(rows) = self.rows_to_replay(positions) {
             let (Some(read), Some(kept)) = (&self.previous, &self.rows) else {
@@ -3360,6 +3380,7 @@ impl SsmState {
             self.current =
                 qwen35::replay_rows(read, kept, rows, in_place.then_some(&self.current))?;
             self.at = positions;
+            self.branched = false;
             return Ok(true);
         }
         if self.previous_at != Some(positions) {
@@ -3374,6 +3395,7 @@ impl SsmState {
         self.previous_at = None;
         self.rows_held = 0;
         self.at = positions;
+        self.branched = false;
         Ok(true)
     }
 

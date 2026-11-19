@@ -50,6 +50,27 @@ impl RowVisibility {
         }
     }
 
+    /// The row each forward row follows, for a forward holding its WHOLE tree:
+    /// the nearest tree row below it that it reads — a row reads exactly its
+    /// ancestors and itself (`DraftTree::rows_for`), and its parent comes after
+    /// every other ancestor — or `None` for a row that follows the confirmed
+    /// context. A layer keeping ONE state a request (Qwen 3.5's recurrent
+    /// layers, #437) starts each row from its parent's state by it. Refused for
+    /// a forward of only a tree's LAST rows (the drafter grows a tree that
+    /// way): such a layer keeps no state for rows an earlier forward read.
+    pub(crate) fn parents(&self) -> Result<Vec<Option<usize>>, String> {
+        let rows = self.rows();
+        if self.kv_len != self.base + rows {
+            return Err(format!(
+                "a forward of {rows} rows of a tree of {} rows: a recurrent layer reads a tree whole",
+                self.kv_len.saturating_sub(self.base)
+            ));
+        }
+        Ok((0..rows)
+            .map(|q| (0..q).rev().find(|&j| self.sees(q, self.base + j)))
+            .collect())
+    }
+
     /// The additive mask `[rows, kv_len]`, row-major: 0 where a row reads a
     /// key, −∞ where it does not — what the matmul path adds to its scores.
     pub(crate) fn mask(&self) -> Vec<f32> {

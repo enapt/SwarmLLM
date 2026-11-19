@@ -6103,6 +6103,47 @@ across steps (FUTURE_WORK #228 (5)).
 
 **Moved from `arch-inference.md` (trimmed 2026-11-17):** Qwen 3.5's DeltaNet layers keep a recurrent state per request, and a rejected guess would leave its tokens in it. `SsmRows` holds the convolution's inputs, normalised q and k, v, g and beta; the replay runs only the convolution window and the delta rule through the ONE kernel choice a step makes, so the state lands bit for bit where the step passed. A wider step (a prompt pass) keeps none; a request past the kept rows fails loudly. On a card a check's row moves with the check's WIDTH (the matmul kernel changes at 4 rows), never with what comes after it (`a_checks_row_reads_nothing_after_it`), so a card's guessed reply may part from one at a time only where the card cannot decide - a near tie, or a token its own prompt pass does not pick either (where llama.cpp's card build parts from its processor build too). `a_check_rewound_into_its_middle_is_where_its_kept_rows_lead` is bit for bit both ways a step and a replay write; `a_guessed_reply_is_the_reply_read_one_token_at_a_time` uses a real file; a check of 9-11+ rows parts Qwen3.5-4B's story at a near tie (#426).
 
+
+## A recurrent layer reads a tree from each row's parent's state (2026-11-19, #437)
+
+A tree check's rows branch: row i follows its parent, not the row before it. Qwen 3.5's Gated
+DeltaNet layers keep ONE state a request, so a tree used to be refused for them
+(`draft_tree_refusal`), and a Qwen 3.5/3.6 split's block drafter could only send a chain — on the
+#428 field run (here ↔ Australia, 2026-11-19) prose kept ~1 guess a round, where a tree of the same
+width keeps +36% (the 11-18 processor measure). Now the layer reads the whole tree in one forward:
+
+- **Parents** are read off the forward's visibility bits once (`RowVisibility::parents`: the
+  nearest tree row a row reads — its ancestors are exactly what it reads), only for a forward
+  holding its WHOLE tree (a drafter growing a tree by its last rows is refused: no state is kept
+  for rows an earlier forward read). A pure chain is read as a step, bit for bit
+  (`qwen35::tree_parents_now` answers `None`). More than `SsmState::MOST_ROWS_KEPT` (32) rows is
+  refused: the verdict could not be taken back into it.
+- **The convolution** reads up each row's own line, then the window before the step
+  (`DeltaNetWeights::causal_conv_along`: one `index_select` a tap over `[window | rows]`, summed
+  in the chain's tap order, so an in-place row's taps are the chain's bits).
+- **The delta rule** starts each row from its parent's state: on the processor a state a row in a
+  buffer each pool thread keeps (`TREE_ROW_STATES`, 32 × 64 KB a head at 128 × 128), the same
+  per-row arithmetic as a chain's; the composition (`SWARMLLM_DELTA_RULE=steps`) the same; on a
+  card the composition until the kernel takes parents.
+- **The state the tree leaves is its LAST row's**, a history no reply has: `SsmState::mark_branched`
+  makes the next step refuse to read on, and `rewind_to` refuses that position, until the verdict
+  takes it back. The take-back is the replay that already exists: the settle keeps the kept
+  guesses at consecutive rows in place (`TreeOutcome::rows_in_place`, a chain) and re-reads the
+  rest, so `rewind_to` replays a PREFIX of the step's kept rows — no gather.
+- **Never captured** (`tree_steps_may_be_captured` takes dense layers only): the parents reach
+  the layer from the host per call.
+
+Prior art: Twig (arXiv 2608.01651) — the convolution's inputs are the root-to-node path, found by
+parent links; the delta rule in closed form over an ancestor mask to keep no state per node; the
+accepted state rebuilt from the accepted path's factors. At ≤ 32 rows a state per row fits, so the
+closed form is not needed; the commit is our existing prefix replay.
+
+**Tests**: `a_tree_checks_rows_are_their_lines_read_alone` — a 7-row tree with two branches and a
+second root after 3 prompt rows, exact projections: every row equals its line read alone as a
+chain, 0.0 apart, both ways a step writes its state; the end refused; the take-back into the
+in-place rows equal to those rows read alone (state, window, the next step's output). Red with the
+convolution read as a chain, the delta rule read as a chain, and the branched mark left off.
+`the_composed_delta_rule_reads_a_tree_as_the_one_pass_kernel_does` (< 1e-4; red read as a chain).
 ## A file's own guess head (2026-11-07, FUTURE_WORK #425)
 
 **What it is.** Qwen 3.5, 3.6 and 3.8 files (`qwen35`, `qwen35moe`) declare
