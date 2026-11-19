@@ -2338,6 +2338,14 @@ after taking it out (`cut_off_peer` and `leave_the_table_if_out_of_reach` drop e
 to ~5 lookups. The README now states the measured figure ("up to about 15 MB an hour each way", seven computers
 connected) until this is fixed. Next: count, per node, the bootstraps that were not the periodic one (`kad::Event::OutboundQueryProgressed`
 for `Bootstrap`), then why `swarm/models` is forwarded at that rate.
+**Read 2026-11-19 ~21:40Z (code only):** the automatic bootstrap cannot be turned off from outside the crate —
+`kad::Config::set_automatic_bootstrap_throttle` is `#[cfg(test)] pub(crate)` in 0.48 (`behaviour.rs` ~452) AND on
+rust-libp2p master (read the same night); both insert paths (`add_address`'s `Entry::Absent` insert ~619, and a
+connection with `BucketInserts::OnConnected` ~1383) call `bootstrap_on_low_peers`, true whenever the table holds fewer
+than `K_VALUE` (20) — every table in a swarm this size, so every insert is a bootstrap (500 ms throttle). Three levers
+are ours: fewer RE-inserts (our removals: `identify.rs` ~188 a cut-off peer, `dht.rs` `leave_the_table_if_out_of_reach`
+and `forget_address_answered_by_another`), smaller answers (~2.7 KB for ~6 peers ≈ 450 B a peer: the addresses we let
+into the table), or a vendored kad exposing the setter (a fourth vendored crate, with its own guard).
 
 #### #169 — Connection churn on multi-interface hosts: only the LAN dial is deterministic
 `P3` · network · **PARTIAL** — 2026-07-25 · history: archive § "Connection churn on multi-interface hosts — deterministic dialer partial", gotcha #353
