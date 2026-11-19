@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.3.301-alpha] — 2026-11-19
+## [0.3.301-alpha] — 2026-11-20
 
 **"Stop keeping it for me": let use decide whether a model stays.** A model you downloaded, or set to "Keep on this
 computer", now has a second way out beside Delete. It deletes nothing: from then on the computer keeps the model only
