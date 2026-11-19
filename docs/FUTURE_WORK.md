@@ -910,9 +910,19 @@ Gardner and Seltzer advise beginning "where it left off"; Serf persisted its coo
 (hashicorp/serf#489-#490) after a stale one stuck "essentially forever" (#487) — so a restore validates, keeps a
 figure only with its age and sample count, and lets a fresh measurement replace it at once. Tor keeps its circuit-build-time histogram (`CircuitBuildTimeBin`) in its state file across
 restarts, RESETS it when the loaded count disagrees with `TotalBuildTimes` (a corrupt file), and shuffles the loaded
-times so old ones still expire in order (`circuitstats.c`, read 2026-11-19) — a restored figure ages as a live one. Next: which figures
-to keep (per peer and model: warm decode, delegated runs, prompt rates; never a failure streak), where (redb
-beside the trust table), how old a figure may be, and a rig that restarts the node between two identical runs.
+times so old ones still expire in order (`circuitstats.c`, read 2026-11-19) — a restored figure ages as a live one. Mapped 2026-11-19
+(read-only): split rounds ALREADY survive a restart (`SplitRounds::persist` / `restore` through `RecentByModel`, tree
+`measured_here`, a `counted_as` field voiding a record counted another way; saved on the shutdown drain beside
+`persist_peer_exchange` in `daemon/mod.rs` and on the health tick, restored at `SharedState` construction). What does
+not: `metrics.peer_speed` — `DashMap<NodeId, PeerSpeed>`, a `ModelSpeed` per model holding the decode EMA and its
+samples, the two-term `LinearFit` sums, the delegated EMA and samples, the prompt rate (no count) and the whole-prompt
+floor — plus the peer's delivery ratio and `PeerInfo`'s goodput (from the network manager's per-`PeerId` estimator).
+Every age is an `Instant`, which cannot be saved: a record needs a wall-clock stamp, and the health monitor evicts an
+entry unused for `PEER_SPEED_MAX_AGE` (an hour), so a restored one obeys the same hour. ⚠ A `DecodeSteps` figure holds
+OUR round trip at the time (#481 (1)), so it is saved with that latency and corrected against the latency measured
+after the restart, not taken as is. Next: one `measured_here`-style tree for `ModelSpeed` (counts and fit sums, never a
+failure streak, `counted_as` from day one), validated (finite, inside the clamps, else dropped) and aged by its stamp;
+a rig that restarts the node between two identical runs (`tier_1119p` against `tier_1119n` is the shape).
 
 #### #481 — A peer that holds a popular model whole was passed over for a split through it 8x slower
 `P1` · routing · **PARTIAL: (1) priced on main 2026-11-19 but the hand-off still not chosen after a split; (3a) fixed on main; (5) partly (every request answered, an 8 GB card's tail still on the processor); (4) diagnosable; (2), (3b), (3c) open** — 2026-11-19 · history: #3 (j3), #3 (j4), #469, #10, #458
