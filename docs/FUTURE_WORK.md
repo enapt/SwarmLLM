@@ -4885,8 +4885,10 @@ RoPE rows (`tree_rope_rows`). A tree check on a recurrent model is never capture
 each row from its parent's state; the tree's end refused until the verdict's take-back (`SsmState::mark_branched`); tests
 exact (every row against its line read alone) and red under three null controls (`docs/invariants/inference.md` § "A
 recurrent layer reads a tree from each row's parent's state"). No coordinator sends one yet (`ModelArch::reads_draft_trees`).
-Left: the card kernel taking parents (on a card the composition runs now), stage B (a tree from the drafter's marginals),
-C (the n-gram loop sends it, a new feature bit), D (measure).
+**The card half the same day**: one launch each for the convolution (`ssm_conv_silu_tree_f32_k4`, bit for bit) and the
+delta rule (`delta_rule_tree_f32_d*`, a row re-walks its line only at a branch); checked on the RTX 3070 against the
+processor, red with the parents ignored. Left: stage B (a tree from the drafter's marginals), C (the n-gram loop sends
+it, a new feature bit), D (measure).
 
 #### #318 — A large model split across machines is too slow to use
 `P2` · perf-split · **OPEN** — 2026-10-20 · plan: `docs/plans/large_model_splits.md` · draws on #134, #145, #148, #149, #192

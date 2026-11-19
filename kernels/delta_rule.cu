@@ -64,11 +64,81 @@ __device__ __forceinline__ float warp_sum(float x) {
     return x;
 }
 
+// A row of a tree of guesses with no parent among the step's rows (#437).
+constexpr unsigned int NO_PARENT = 0xffffffffu;
+
+// One row's update of a warp's state row `s` (lane `lane` holds elements
+// r·32 + lane): decay, the delta rule's correction, the write. Returns the
+// lane's share of the row's output, before the warp's sum and the scale.
+template <int D>
+__device__ __forceinline__ float delta_rule_update(
+    float (&s)[D / 32],
+    const float *__restrict__ qk,
+    const float *__restrict__ v,
+    const float *__restrict__ g,
+    const float *__restrict__ beta_in,
+    const int gs,
+    const int nk,
+    const int nv,
+    const int seq,
+    const long long sv_b,
+    const long long sv_t,
+    const long long sv_h,
+    const int bi,
+    const int h,
+    const int kh,
+    const int col,
+    const int lane,
+    const int t
+) {
+    constexpr int R = D / 32;
+    const size_t bt = (size_t)bi * seq + t;
+    const float *q_t = qk + (bt * 2 * nk + kh) * D;
+    const float *k_t = q_t + (size_t)nk * D;
+    const size_t gi = (bt * nv + h) * gs;
+    const float decay = expf(g[gi]);
+    const float beta = beta_in[gi];
+    const float v_col = v[bi * sv_b + t * sv_t + h * sv_h + col];
+
+    float kr[R], qr[R];
+#pragma unroll
+    for (int r = 0; r < R; r++) {
+        kr[r] = k_t[r * 32 + lane];
+        qr[r] = q_t[r * 32 + lane];
+    }
+
+    float kv = 0.0f;
+#pragma unroll
+    for (int r = 0; r < R; r++) {
+        kv += s[r] * kr[r];
+    }
+    kv = warp_sum(kv);
+
+    const float delta = (v_col - decay * kv) * beta;
+    float o = 0.0f;
+#pragma unroll
+    for (int r = 0; r < R; r++) {
+        s[r] = decay * s[r] + kr[r] * delta;
+        o += s[r] * qr[r];
+    }
+    return o;
+}
+
 // g and beta of (token bt, head h) are at `g[(bt·nv + h)·gs]` and
 // `beta[(bt·nv + h)·gs]`: a step passes its gates' two blocks, a replay the two
 // tensors it kept (gs = 1 both). OUT = false writes no outputs: a
 // replay wants only the state, and runs every update as the step did, so the
 // state is bit for bit the one the step passed at that row.
+//
+// `parents` (a tree of guesses, #437; `nullptr` for a step's rows in order):
+// row t follows row parents[t] (`NO_PARENT`: the state before the step). A row
+// that follows the row just read goes on from its state, as a chain's does; any
+// other starts again from the state read and walks down its own line, root
+// first — the same updates in the same order as the line read alone, so its
+// state and output are that line's bits (Twig, arXiv 2608.01651, solves the
+// same tree in closed form; at ≤ 32 rows the walk is cheaper than its
+// matrices). Ordered best child first, a tree walks again once a branch. The
+// state written is the last row's.
 template <int D, bool OUT>
 __device__ void delta_rule_body(
     const float *__restrict__ qk,
@@ -85,7 +155,8 @@ __device__ void delta_rule_body(
     const long long sv_b,
     const long long sv_t,
     const long long sv_h,
-    const float scale
+    const float scale,
+    const unsigned int *__restrict__ parents
 ) {
     constexpr int R = D / 32;
     const int h = blockIdx.x;
@@ -105,38 +176,27 @@ __device__ void delta_rule_body(
     }
 
     for (int t = 0; t < seq; t++) {
-        const size_t bt = (size_t)bi * seq + t;
-        const float *q_t = qk + (bt * 2 * nk + kh) * D;
-        const float *k_t = q_t + (size_t)nk * D;
-        const size_t gi = (bt * nv + h) * gs;
-        const float decay = expf(g[gi]);
-        const float beta = beta_in[gi];
-        const float v_col = v[bi * sv_b + t * sv_t + h * sv_h + col];
-
-        float kr[R], qr[R];
+        if (parents != nullptr && parents[t] != (unsigned int)(t - 1)) {
+            int line[32];
+            int n = 0;
+            for (unsigned int a = parents[t]; a < (unsigned int)t && n < 32; a = parents[a]) {
+                line[n++] = (int)a;
+            }
 #pragma unroll
-        for (int r = 0; r < R; r++) {
-            kr[r] = k_t[r * 32 + lane];
-            qr[r] = q_t[r * 32 + lane];
+            for (int r = 0; r < R; r++) {
+                s[r] = s_in[r * 32 + lane];
+            }
+            for (int i = n - 1; i >= 0; i--) {
+                delta_rule_update<D>(s, qk, v, g, beta_in, gs, nk, nv, seq, sv_b, sv_t,
+                                     sv_h, bi, h, kh, col, lane, line[i]);
+            }
         }
-
-        float kv = 0.0f;
-#pragma unroll
-        for (int r = 0; r < R; r++) {
-            kv += s[r] * kr[r];
-        }
-        kv = warp_sum(kv);
-
-        const float delta = (v_col - decay * kv) * beta;
-        float o = 0.0f;
-#pragma unroll
-        for (int r = 0; r < R; r++) {
-            s[r] = decay * s[r] + kr[r] * delta;
-            o += s[r] * qr[r];
-        }
+        float o = delta_rule_update<D>(s, qk, v, g, beta_in, gs, nk, nv, seq, sv_b, sv_t,
+                                       sv_h, bi, h, kh, col, lane, t);
         if constexpr (OUT) {
             o = warp_sum(o);
             if (lane == 0) {
+                const size_t bt = (size_t)bi * seq + t;
                 dst[(bt * nv + h) * D + col] = o * scale;
             }
         }
@@ -159,7 +219,18 @@ __device__ void delta_rule_body(
         const float scale) {                                                       \
         const float *beta = gates + (size_t)gridDim.y * seq * nv;                  \
         delta_rule_body<D, true>(qk, v, gates, beta, 1, state, state_out, dst, nk, \
-                                 nv, seq, sv_b, sv_t, sv_h, scale);                \
+                                 nv, seq, sv_b, sv_t, sv_h, scale, nullptr);       \
+    }                                                                              \
+    extern "C" __global__ void __launch_bounds__(128) delta_rule_tree_f32_d##D(    \
+        const float *__restrict__ qk, const float *__restrict__ v,                 \
+        const float *__restrict__ gates, const float *__restrict__ state,          \
+        float *__restrict__ state_out, float *__restrict__ dst, const int nk,      \
+        const int nv, const int seq,                                               \
+        const long long sv_b, const long long sv_t, const long long sv_h,          \
+        const float scale, const unsigned int *__restrict__ parents) {             \
+        const float *beta = gates + (size_t)gridDim.y * seq * nv;                  \
+        delta_rule_body<D, true>(qk, v, gates, beta, 1, state, state_out, dst, nk, \
+                                 nv, seq, sv_b, sv_t, sv_h, scale, parents);       \
     }                                                                              \
     extern "C" __global__ void __launch_bounds__(128) delta_rule_replay_f32_d##D(  \
         const float *__restrict__ qk, const float *__restrict__ v,                 \
@@ -168,7 +239,7 @@ __device__ void delta_rule_body(
         const int nk, const int nv, const int rows,                                \
         const long long sv_t, const long long sv_h) {                              \
         delta_rule_body<D, false>(qk, v, g, beta, 1, state, state_out, nullptr,    \
-                                  nk, nv, rows, 0, sv_t, sv_h, 0.0f);              \
+                                  nk, nv, rows, 0, sv_t, sv_h, 0.0f, nullptr);     \
     }
 
 DELTA_RULE_ENTRY(64)
@@ -256,6 +327,74 @@ extern "C" __global__ void ssm_conv_silu_f32_k4(
     float *__restrict__ state_out, const int channels, const int split,
     const int seq) {
     ssm_conv_silu_body<4>(x, prev, w, out, state_out, channels, split, seq);
+}
+
+// The same over a TREE of guesses (#437, `parents` as the delta rule reads
+// them): row t's taps read up its own line — itself, its parent, its parent's
+// parent — then the window before the step, last input first
+// (`DeltaNetWeights::causal_conv_along`), each product and sum rounded as the
+// chain's are, so a row whose line is the rows before it gets the chain's bits
+// and every row the composition's. The window written is the chain's, the last
+// K − 1 inputs in row order: a branching tree's state is taken back before it
+// is read (`SsmState::mark_branched`).
+template <int K>
+__device__ void ssm_conv_silu_tree_body(
+    const float *__restrict__ x, const float *__restrict__ prev,
+    const float *__restrict__ w, float *__restrict__ out,
+    float *__restrict__ state_out, const int channels, const int split,
+    const int seq, const unsigned int *__restrict__ parents) {
+    const int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= channels) {
+        return;
+    }
+    constexpr int PAD = K - 1;
+    float wc[K];
+#pragma unroll
+    for (int j = 0; j < K; j++) {
+        wc[j] = w[(size_t)c * K + j];
+    }
+    float *v_out = out + (size_t)seq * split;
+    for (int t = 0; t < seq; t++) {
+        float win[K];
+        unsigned int at = (unsigned int)t;
+        int above = 0;
+#pragma unroll
+        for (int back = 0; back < K; back++) {
+            if (at != NO_PARENT) {
+                win[PAD - back] = x[(size_t)at * channels + c];
+                const unsigned int up = parents[at];
+                at = up < at ? up : NO_PARENT;
+            } else {
+                above++;
+                win[PAD - back] = prev[(size_t)c * PAD + (PAD - above)];
+            }
+        }
+        float acc = __fmul_rn(win[0], wc[0]);
+#pragma unroll
+        for (int j = 1; j < K; j++) {
+            acc = __fadd_rn(acc, __fmul_rn(win[j], wc[j]));
+        }
+        const float y = acc / (1.0f + expf(-acc));
+        if (c < split) {
+            out[(size_t)t * split + c] = y;
+        } else {
+            v_out[(size_t)t * (channels - split) + (c - split)] = y;
+        }
+    }
+#pragma unroll
+    for (int j = 0; j < PAD; j++) {
+        const int idx = seq - PAD + j;
+        state_out[(size_t)c * PAD + j] =
+            idx >= 0 ? x[(size_t)idx * channels + c] : prev[(size_t)c * PAD + PAD + idx];
+    }
+}
+
+extern "C" __global__ void ssm_conv_silu_tree_f32_k4(
+    const float *__restrict__ x, const float *__restrict__ prev,
+    const float *__restrict__ w, float *__restrict__ out,
+    float *__restrict__ state_out, const int channels, const int split,
+    const int seq, const unsigned int *__restrict__ parents) {
+    ssm_conv_silu_tree_body<4>(x, prev, w, out, state_out, channels, split, seq, parents);
 }
 
 // ── A step's gates: the decay g and the write strength beta ──

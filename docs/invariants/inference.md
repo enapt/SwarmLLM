@@ -6123,8 +6123,17 @@ width keeps +36% (the 11-18 processor measure). Now the layer reads the whole tr
   in the chain's tap order, so an in-place row's taps are the chain's bits).
 - **The delta rule** starts each row from its parent's state: on the processor a state a row in a
   buffer each pool thread keeps (`TREE_ROW_STATES`, 32 × 64 KB a head at 128 × 128), the same
-  per-row arithmetic as a chain's; the composition (`SWARMLLM_DELTA_RULE=steps`) the same; on a
-  card the composition until the kernel takes parents.
+  per-row arithmetic as a chain's; the composition (`SWARMLLM_DELTA_RULE=steps`) the same. On a
+  card ONE launch (`delta_rule_tree_f32_d*`): a warp keeps its state row in registers, so a row
+  whose parent is not the row just read starts again from the state read and walks down its own
+  line, root first — the same updates in the same order as the line read alone. A row following
+  the row before it (the in-place chain; a first child in best-child-first order) just goes on, so
+  a tree walks again once a branch.
+- **On a card the convolution is ONE launch too** (`ssm_conv_silu_tree_f32_k4`): a thread a
+  channel builds each row's window up its line, then the read window, rounding as the chain's
+  kernel does — bit for bit `causal_conv_along`. The parents reach the card once a step for both
+  (`qwen35::TreeLines`); a card kernel handed a tree with no parents on the card refuses it, so a
+  tree never reaches a chain kernel.
 - **The state the tree leaves is its LAST row's**, a history no reply has: `SsmState::mark_branched`
   makes the next step refuse to read on, and `rewind_to` refuses that position, until the verdict
   takes it back. The take-back is the replay that already exists: the settle keeps the kept
@@ -6144,6 +6153,10 @@ chain, 0.0 apart, both ways a step writes its state; the end refused; the take-b
 in-place rows equal to those rows read alone (state, window, the next step's output). Red with the
 convolution read as a chain, the delta rule read as a chain, and the branched mark left off.
 `the_composed_delta_rule_reads_a_tree_as_the_one_pass_kernel_does` (< 1e-4; red read as a chain).
+On the card (RTX 3070, 2026-11-19): `a_tree_check_on_the_card_is_the_processors` (every row, the
+take-back and the step after within 1e-4 of the processor's; both kernels seen to take the tree)
+and the tree arm of `the_card_convolution_is_the_composed_one_bit_for_bit` (0.0 against
+`causal_conv_along`, three shapes) — both red with the kernels' parents ignored.
 ## A file's own guess head (2026-11-07, FUTURE_WORK #425)
 
 **What it is.** Qwen 3.5, 3.6 and 3.8 files (`qwen35`, `qwen35moe`) declare

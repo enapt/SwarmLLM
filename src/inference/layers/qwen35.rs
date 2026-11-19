@@ -423,7 +423,9 @@ impl DeltaNetWeights {
         // A tree of guesses (#437): each row's parent among the step's rows —
         // its convolution reads up its own line and its delta rule starts
         // from its parent's state. `None` for a step's ordinary rows.
-        let tree = tree_parents_now(seq_len)?;
+        let tree = tree_parents_now(seq_len)?
+            .map(|parents| TreeLines::new(parents, x.device()))
+            .transpose()?;
 
         // The state must describe the position this step starts from: a step
         // from 0 starts over, any other on a state out of step — or none — is
@@ -477,9 +479,11 @@ impl DeltaNetWeights {
         // On a card the convolution and its SiLU are one launch, written as
         // q | k and v apart and its window straight into the step's buffers
         // (`conv_on_the_card`); `new_conv` is then `None`.
-        let fused = match (target.as_ref(), &tree) {
-            (Some(t), None) => self.conv_on_the_card(&mixed, &read.conv_state, &t.conv_state)?,
-            _ => None,
+        let fused = match target.as_ref() {
+            Some(t) => {
+                self.conv_on_the_card(&mixed, &read.conv_state, &t.conv_state, tree.as_ref())?
+            }
+            None => None,
         };
         let (qk, v, new_conv) = match fused {
             Some((qk, v)) => (
@@ -488,9 +492,11 @@ impl DeltaNetWeights {
                 None,
             ),
             None => {
-                let (conv, new_conv) = match tree.as_deref() {
+                let (conv, new_conv) = match &tree {
                     None => self.causal_conv(&mixed, &read.conv_state)?,
-                    Some(parents) => self.causal_conv_along(&mixed, &read.conv_state, parents)?,
+                    Some(lines) => {
+                        self.causal_conv_along(&mixed, &read.conv_state, &lines.parents)?
+                    }
                 };
                 let conv = candle_nn::ops::silu(&conv)?; // [b, seq, C]
                 (
@@ -514,7 +520,7 @@ impl DeltaNetWeights {
             &gates,
             &read.recurrent_state,
             target.as_ref().map(|t| &t.recurrent_state),
-            tree.as_deref(),
+            tree.as_ref(),
         )?; // out [b, seq, nv, vd]
 
         // Gated RMSNorm per value head: RMSNorm(o, ssm_norm) · silu(z).
@@ -659,17 +665,28 @@ impl DeltaNetWeights {
         x: &Tensor,
         prev: &Tensor,
         state_out: &Tensor,
+        tree: Option<&TreeLines>,
     ) -> CandleResult<Option<(Tensor, Tensor)>> {
         #[cfg(feature = "candle-cuda")]
         {
             if !conv_in_one_launch() || self.conv_kernel != 4 || !x.device().is_cuda() {
                 return Ok(None);
             }
+            // A tree's rows read up their own lines (`ssm_conv_silu_tree_f32_k4`),
+            // never the chain's kernel.
+            let parents = match tree {
+                None => None,
+                Some(TreeLines {
+                    on_card: Some(p), ..
+                }) => Some(p.clone()),
+                Some(_) => return Ok(None),
+            };
             let (_, seq_len, _) = x.dims3()?;
             let split = 2 * self.key_dim();
             let op = cuda::ConvSilu {
                 state_out: state_out.clone(),
                 split,
+                parents,
             };
             if !op.takes(x, prev, &self.conv1d) {
                 return Ok(None);
@@ -681,7 +698,7 @@ impl DeltaNetWeights {
         }
         #[cfg(not(feature = "candle-cuda"))]
         {
-            let _ = (x, prev, state_out);
+            let _ = (x, prev, state_out, tree);
             Ok(None)
         }
     }
@@ -878,7 +895,7 @@ fn delta_rule_into(
     gates: &Gates,
     state: &Tensor,
     into: Option<&Tensor>,
-    tree: Option<&[Option<usize>]>,
+    tree: Option<&TreeLines>,
 ) -> CandleResult<(Tensor, Tensor, bool)> {
     let (g, beta) = (&gates.g, &gates.beta);
     let (_, _, nv, vd) = v.dims4()?;
@@ -887,17 +904,17 @@ fn delta_rule_into(
     let scale = 1.0 / (kd as f64).sqrt();
     let one_pass = delta_rule_in_one_pass();
     crate::inference::prof::timed!(crate::inference::prof::Stage::DeltaRule, {
-        let on_card =
-            if one_pass && device.is_cuda() && card_delta_rule_covers(kd, vd) && tree.is_none() {
-                let out_buffer = match into {
-                    Some(t) => t.clone(),
-                    None => state.zeros_like()?,
-                };
-                delta_rule_cuda(qk, nk, v, gates, state, &out_buffer, scale as f32)?
-                    .map(|out| (out, out_buffer, into.is_some()))
-            } else {
-                None
+        let on_card = if one_pass && device.is_cuda() && card_delta_rule_covers(kd, vd) {
+            let out_buffer = match into {
+                Some(t) => t.clone(),
+                None => state.zeros_like()?,
             };
+            delta_rule_cuda(qk, nk, v, gates, state, &out_buffer, scale as f32, tree)?
+                .map(|out| (out, out_buffer, into.is_some()))
+        } else {
+            None
+        };
+        let tree = tree.map(|lines| lines.parents.as_slice());
         let (q, k) = (qk.narrow(2, 0, nk)?, qk.narrow(2, nk, nk)?);
         Ok(match on_card {
             Some(done) => done,
@@ -1172,6 +1189,42 @@ fn tree_parents_now(seq_len: usize) -> CandleResult<Option<Vec<Option<usize>>>> 
     Ok(Some(parents))
 }
 
+/// A tree check's rows as a recurrent layer reads them (#437): each row's
+/// parent among the step's rows ([`tree_parents_now`]), and on a card the same
+/// as `u32`s (`u32::MAX`: no parent), copied there once a step for both of its
+/// kernels (`ssm_conv_silu_tree_f32_k4`, `delta_rule_tree_f32_d*`) — never
+/// inside a capture: a recurrent model's tree is never captured
+/// (`SplitModel::tree_steps_may_be_captured`).
+struct TreeLines {
+    parents: Vec<Option<usize>>,
+    #[cfg(feature = "candle-cuda")]
+    on_card: Option<Tensor>,
+}
+
+impl TreeLines {
+    fn new(parents: Vec<Option<usize>>, device: &Device) -> CandleResult<Self> {
+        #[cfg(feature = "candle-cuda")]
+        {
+            let on_card = if device.is_cuda() {
+                let ids: Vec<u32> = parents
+                    .iter()
+                    .map(|p| p.map_or(u32::MAX, |p| p as u32))
+                    .collect();
+                let rows = ids.len();
+                Some(Tensor::from_vec(ids, rows, device)?)
+            } else {
+                None
+            };
+            Ok(Self { parents, on_card })
+        }
+        #[cfg(not(feature = "candle-cuda"))]
+        {
+            let _ = device;
+            Ok(Self { parents })
+        }
+    }
+}
+
 /// Does `kernels/delta_rule.cu` take this layer? A lane holds `D / 32` of a
 /// state row in registers, with equal key and value widths, D ∈ {64, 128}
 /// (every Qwen 3.5 size has 128).
@@ -1195,6 +1248,7 @@ const DELTA_RULE_PTX: &str = include_str!(concat!(env!("OUT_DIR"), "/delta_rule.
 /// `SsmState`'s second pair); the outputs `[b, seq, nv, vd]` are returned.
 /// `None` off a card build or outside that scope — the caller keeps the
 /// composition. Not bit-identical to it; replies are judged against llama.cpp.
+#[allow(clippy::too_many_arguments)]
 fn delta_rule_cuda(
     qk: &Tensor,
     nk: usize,
@@ -1203,6 +1257,7 @@ fn delta_rule_cuda(
     state: &Tensor,
     state_out: &Tensor,
     scale: f32,
+    tree: Option<&TreeLines>,
 ) -> CandleResult<Option<Tensor>> {
     #[cfg(feature = "candle-cuda")]
     {
@@ -1213,6 +1268,15 @@ fn delta_rule_cuda(
         {
             return Ok(None);
         }
+        // A tree's rows each start from their parent's state
+        // (`delta_rule_tree_f32_d*`), never the chain's kernel.
+        let parents = match tree {
+            None => None,
+            Some(TreeLines {
+                on_card: Some(p), ..
+            }) => Some(p.clone()),
+            Some(_) => return Ok(None),
+        };
         let (b, seq, nv, vd) = v.dims4()?;
         let stacked = gates.stacked()?; // [2, b, seq, nv]
         let op = cuda::DeltaRule {
@@ -1220,13 +1284,14 @@ fn delta_rule_cuda(
             state_out: state_out.clone(),
             nk,
             scale,
+            parents,
         };
         let out = qk.contiguous()?.apply_op3_no_bwd(v, &stacked, &op)?;
         Ok(Some(out.reshape((b, seq, nv, vd))?))
     }
     #[cfg(not(feature = "candle-cuda"))]
     {
-        let _ = (qk, nk, v, gates, state, state_out, scale);
+        let _ = (qk, nk, v, gates, state, state_out, scale, tree);
         Ok(None)
     }
 }
@@ -1261,6 +1326,41 @@ mod cuda {
     pub(super) struct ConvSilu {
         pub(super) state_out: Tensor,
         pub(super) split: usize,
+        /// A tree's parents (`super::TreeLines::on_card`, `[seq]` u32): each
+        /// row's taps read up its own line (`ssm_conv_silu_tree_f32_k4`).
+        pub(super) parents: Option<Tensor>,
+    }
+
+    /// A tree's parents as a kernel reads them: `[rows]` u32, contiguous, on
+    /// the card — the guard that keeps the buffer alive while a launch reads it.
+    struct ParentsView<'a> {
+        storage: std::sync::RwLockReadGuard<'a, candle_core::Storage>,
+        start: usize,
+        end: usize,
+    }
+
+    impl<'a> ParentsView<'a> {
+        fn of(parents: &'a Tensor, rows: usize, op: &str) -> Result<Self> {
+            if parents.dtype() != DType::U32 || parents.dims() != [rows] {
+                candle_core::bail!("{op}: a tree's parents must be [{rows}] u32");
+            }
+            let (storage, layout) = parents.storage_and_layout();
+            let Some((start, end)) = layout.contiguous_offsets() else {
+                candle_core::bail!("{op}: a tree's parents must be contiguous");
+            };
+            Ok(Self {
+                storage,
+                start,
+                end,
+            })
+        }
+
+        fn slice(&self) -> Result<candle_core::cuda_backend::cudarc::driver::CudaView<'_, u32>> {
+            let candle_core::Storage::Cuda(on_card) = &*self.storage else {
+                candle_core::bail!("a tree's parents are not on the card");
+            };
+            Ok(on_card.as_cuda_slice::<u32>()?.slice(self.start..self.end))
+        }
     }
 
     impl ConvSilu {
@@ -1281,6 +1381,12 @@ mod cuda {
                 && prev.dims() == [1, channels, 3]
                 && w.dims() == [channels, 4]
                 && self.state_out.dims() == [1, channels, 3]
+                && self.parents.as_ref().is_none_or(|p| {
+                    p.dtype() == candle_core::DType::U32
+                        && p.dims() == [x.dim(1).unwrap_or(0)]
+                        && p.is_contiguous()
+                        && p.device().is_cuda()
+                })
         }
     }
 
@@ -1347,8 +1453,17 @@ mod cuda {
             // Every element is assigned: each (position, channel) by its
             // channel's thread, into the q | k block or the v block.
             let mut out = dev.alloc_fully_overwritten::<f32>(n_out)?;
+            let tree = match &self.parents {
+                Some(p) => Some(ParentsView::of(p, seq, "ssm-conv-silu")?),
+                None => None,
+            };
+            let parents = tree.as_ref().map(ParentsView::slice).transpose()?;
             let func = dev.get_or_load_custom_func(
-                "ssm_conv_silu_f32_k4",
+                if parents.is_some() {
+                    "ssm_conv_silu_tree_f32_k4"
+                } else {
+                    "ssm_conv_silu_f32_k4"
+                },
                 "swarmllm_delta_rule",
                 super::DELTA_RULE_PTX,
             )?;
@@ -1367,6 +1482,9 @@ mod cuda {
             builder.arg(&channels_i);
             builder.arg(&split_i);
             builder.arg(&seq_i);
+            if let Some(parents) = &parents {
+                builder.arg(parents);
+            }
             // SAFETY: ffi. Shapes and contiguity are checked above: the kernel
             // reads x [seq, C], prev [C, 3] and w [C, 4], writes each of `out`'s
             // seq·C elements once and `state_out`'s C·3. `state_out` is the
@@ -1864,6 +1982,9 @@ mod cuda {
         pub(super) state_out: Tensor,
         pub(super) nk: usize,
         pub(super) scale: f32,
+        /// A tree's parents (`super::TreeLines::on_card`, `[seq]` u32): each
+        /// row starts from its parent's state (`delta_rule_tree_f32_d*`).
+        pub(super) parents: Option<Tensor>,
     }
 
     impl CustomOp3 for DeltaRule {
@@ -1940,11 +2061,17 @@ mod cuda {
             // output by its warp's lane 0. Each element of `state_out` is
             // assigned by its lane too.
             let mut dst = dev.alloc_fully_overwritten::<f32>(n_out)?;
+            let tree = match &self.parents {
+                Some(p) => Some(ParentsView::of(p, seq, "gated-delta-rule")?),
+                None => None,
+            };
+            let parents = tree.as_ref().map(ParentsView::slice).transpose()?;
             let func = dev.get_or_load_custom_func(
-                if d == 64 {
-                    "delta_rule_f32_d64"
-                } else {
-                    "delta_rule_f32_d128"
+                match (d, parents.is_some()) {
+                    (64, false) => "delta_rule_f32_d64",
+                    (64, true) => "delta_rule_tree_f32_d64",
+                    (_, false) => "delta_rule_f32_d128",
+                    (_, true) => "delta_rule_tree_f32_d128",
                 },
                 "swarmllm_delta_rule",
                 super::DELTA_RULE_PTX,
@@ -1970,6 +2097,9 @@ mod cuda {
             builder.arg(&sv_t);
             builder.arg(&sv_h);
             builder.arg(&self.scale);
+            if let Some(parents) = &parents {
+                builder.arg(parents);
+            }
             // SAFETY: ffi. Shapes and contiguity are checked above and the
             // width by `card_delta_rule_covers` (d ∈ {64, 128}, the kernel's
             // two entry points); every read is within the views by those
@@ -2370,7 +2500,7 @@ mod tests {
             let conv = candle_nn::ops::silu(&conv).unwrap();
             let state_out = Tensor::zeros((1, channels, 3), DType::F32, &device).unwrap();
             let (qk, v) = w
-                .conv_on_the_card(&x, &prev, &state_out)
+                .conv_on_the_card(&x, &prev, &state_out, None)
                 .unwrap()
                 .expect("the one-launch convolution took the step");
             let qk = qk.reshape((1, seq, split)).unwrap();
@@ -2390,6 +2520,58 @@ mod tests {
                 0.0,
                 "{seq} positions: the window after the step"
             );
+        }
+
+        // A tree's rows (#437) read up their own lines in the one launch too,
+        // bit for bit `causal_conv_along`; its window is the chain's. Red if
+        // the kernel read the rows before each row (rows 3, 5, 6 and 7 land
+        // elsewhere), or the chain's kernel ran.
+        for parents in [
+            vec![
+                None,
+                Some(0),
+                Some(1),
+                Some(0),
+                Some(3),
+                Some(1),
+                None,
+                Some(6),
+            ],
+            vec![None, Some(0)],
+            vec![None, None, None],
+        ] {
+            let seq = parents.len();
+            let x = Tensor::randn(0f32, 1.0, (1, seq, channels), &device).unwrap();
+            let prev = Tensor::randn(0f32, 1.0, (1, channels, 3), &device).unwrap();
+            let (conv, window) = w.causal_conv_along(&x, &prev, &parents).unwrap();
+            let conv = candle_nn::ops::silu(&conv).unwrap();
+            let state_out = Tensor::zeros((1, channels, 3), DType::F32, &device).unwrap();
+            let lines = TreeLines::new(parents.clone(), &device).unwrap();
+            let (qk, v) = w
+                .conv_on_the_card(&x, &prev, &state_out, Some(&lines))
+                .unwrap()
+                .expect("the one-launch convolution took the tree");
+            let qk = qk.reshape((1, seq, split)).unwrap();
+            let v = v.reshape((1, seq, channels - split)).unwrap();
+            let both = Tensor::cat(&[&qk, &v], 2).unwrap();
+            assert_eq!(max_abs_diff(&both, &conv), 0.0, "tree {parents:?}");
+            assert_eq!(
+                max_abs_diff(&state_out, &window),
+                0.0,
+                "tree {parents:?}: window"
+            );
+            if parents
+                .iter()
+                .enumerate()
+                .any(|(i, p)| *p != i.checked_sub(1))
+            {
+                let (chain, _) = w.causal_conv(&x, &prev).unwrap();
+                let chain = candle_nn::ops::silu(&chain).unwrap();
+                assert!(
+                    max_abs_diff(&both, &chain) > 1e-3,
+                    "tree {parents:?}: read as a chain"
+                );
+            }
         }
     }
 
@@ -3060,6 +3242,158 @@ mod tests {
                 0.0
             );
         }
+    }
+
+    /// A tree check on a card (#437) — the convolution and the delta rule
+    /// each ONE launch taking the tree's parents (`ssm_conv_silu_tree_f32_k4`,
+    /// `delta_rule_tree_f32_d*`) — writes what the processor's tree read
+    /// writes, to float rounding, every row; the verdict's take-back into the
+    /// in-place rows and the step after it land where the processor's do.
+    /// Both kernels are seen to run (a refusal would fall back to the
+    /// composition, which matches too), and the delta rule read as a chain
+    /// lands far off on the branching rows.
+    #[cfg(feature = "candle-cuda")]
+    #[test]
+    fn a_tree_check_on_the_card_is_the_processors() {
+        use crate::inference::draft_tree::DraftTree;
+        let Ok(device) = Device::new_cuda(0) else {
+            eprintln!("SKIPPED: no card");
+            return;
+        };
+        let (on_cpu, on_card) = head_width_weights(&device);
+        assert!(on_card.delta_rule_runs_on_the_card_kernel());
+        let x = Tensor::randn(0f32, 1.0, (1, 10, 256), &Device::Cpu).unwrap();
+        let parents: Vec<Option<u16>> =
+            vec![None, Some(0), Some(1), Some(0), Some(3), Some(1), None];
+        let (positions, seen) = DraftTree::new(3, parents).unwrap().rows_for(3, 7).unwrap();
+        let close = |got: &Tensor, want: &Tensor, what: &str| {
+            let got = got.to_device(&Device::Cpu).unwrap();
+            let scale: f32 = want
+                .abs()
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .max(0)
+                .unwrap()
+                .to_scalar()
+                .unwrap();
+            let diff = max_abs_diff(&got, want);
+            assert!(
+                diff <= 1e-4 * scale.max(1.0),
+                "{what}: {diff} off (up to {scale})"
+            );
+        };
+        let (mut cpu_state, mut card_state) = (None, None);
+        let prompt = x.narrow(1, 0, 3).unwrap();
+        on_cpu
+            .forward_deltanet_into(&prompt, &mut cpu_state, 0, false)
+            .unwrap();
+        on_card
+            .forward_deltanet_into(
+                &prompt.to_device(&device).unwrap(),
+                &mut card_state,
+                0,
+                true,
+            )
+            .unwrap();
+        let tree_x = x.narrow(1, 3, 7).unwrap();
+        let (want, got) = {
+            let _tree = super::super::RowPositions::for_tree(positions, seen.clone());
+            (
+                on_cpu
+                    .forward_deltanet_into(&tree_x, &mut cpu_state, 3, false)
+                    .unwrap(),
+                on_card
+                    .forward_deltanet_into(
+                        &tree_x.to_device(&device).unwrap(),
+                        &mut card_state,
+                        3,
+                        true,
+                    )
+                    .unwrap(),
+            )
+        };
+        for row in 0..7 {
+            close(
+                &got.narrow(1, row, 1).unwrap(),
+                &want.narrow(1, row, 1).unwrap(),
+                &format!("tree row {row}"),
+            );
+        }
+        for state in [&mut cpu_state, &mut card_state] {
+            assert!(state.as_mut().unwrap().rewind_to(6).unwrap());
+        }
+        let (cpu, card) = (cpu_state.as_ref().unwrap(), card_state.as_ref().unwrap());
+        close(
+            &card.current().recurrent_state,
+            &cpu.current().recurrent_state,
+            "taken back",
+        );
+        close(
+            &card.current().conv_state,
+            &cpu.current().conv_state,
+            "window taken back",
+        );
+        let next = x.narrow(1, 9, 1).unwrap();
+        close(
+            &on_card
+                .forward_deltanet_into(&next.to_device(&device).unwrap(), &mut card_state, 6, true)
+                .unwrap(),
+            &on_cpu
+                .forward_deltanet_into(&next, &mut cpu_state, 6, false)
+                .unwrap(),
+            "the step after",
+        );
+
+        // The mechanism: both kernels take the tree on the card.
+        let lines = TreeLines::new(seen.parents().unwrap(), &device).unwrap();
+        let mixed =
+            Tensor::randn(0f32, 1.0, (1, 7, on_card.conv1d.dim(0).unwrap()), &device).unwrap();
+        let window =
+            Tensor::randn(0f32, 1.0, (1, on_card.conv1d.dim(0).unwrap(), 3), &device).unwrap();
+        let window_out = window.zeros_like().unwrap();
+        assert!(on_card
+            .conv_on_the_card(&mixed, &window, &window_out, Some(&lines))
+            .unwrap()
+            .is_some());
+        let qk = l2_norm(
+            &Tensor::randn(0f32, 1.0, (1, 7, 4, 128), &device).unwrap(),
+            1e-6,
+        )
+        .unwrap();
+        let v = Tensor::randn(0f32, 1.0, (1, 7, 4, 128), &device).unwrap();
+        let g = Tensor::rand(0f32, 1.0, (1, 7, 4), &device)
+            .unwrap()
+            .neg()
+            .unwrap();
+        let beta = Tensor::rand(0f32, 1.0, (1, 7, 4), &device).unwrap();
+        let state = Tensor::randn(0f32, 0.3, (1, 4, 128, 128), &device).unwrap();
+        let into = state.zeros_like().unwrap();
+        let gates = Gates::apart(g, beta);
+        let (as_tree, _, written) =
+            delta_rule_into(&qk, 2, &v, &gates, &state, Some(&into), Some(&lines)).unwrap();
+        assert!(written, "the card's tree kernel writes the state itself");
+        let cpu = |t: &Tensor| t.to_device(&Device::Cpu).unwrap();
+        let (on_host, _) = delta_rule_cpu(
+            &cpu(&qk.narrow(2, 0, 2).unwrap()),
+            &cpu(&qk.narrow(2, 2, 2).unwrap()),
+            &cpu(&v),
+            &cpu(&gates.g),
+            &cpu(&gates.beta),
+            &cpu(&state),
+            1.0 / (128f32).sqrt(),
+            Some(&lines.parents),
+        )
+        .unwrap();
+        close(
+            &as_tree,
+            &on_host,
+            "the tree kernel against the processor's",
+        );
+        // Null control: read as a chain, a branching row lands far off.
+        let (as_chain, _, _) =
+            delta_rule_into(&qk, 2, &v, &gates, &state, Some(&into), None).unwrap();
+        assert!(max_abs_diff(&cpu(&as_chain), &on_host) > 1e-2);
     }
 
     /// The token-by-token composition (`SWARMLLM_DELTA_RULE=steps`) reads a
