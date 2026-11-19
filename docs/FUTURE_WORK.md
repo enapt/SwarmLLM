@@ -2139,6 +2139,15 @@ nodes, one dev binary** (`~/swarmllm-gate/deep/fr/gossip91.sh`: TinyLlama split,
 against 11-18's 4.6 MB/h and ~42 a minute; a region's figure for a key nobody publishes any more still never falls (it did not
 before either: only this node's own region decays).
 
+**(2n) The idle UPLOAD reads 15 MB an hour — read 2026-11-19 13:50-14:20Z, OPEN (cause not yet read).** The live node
+(v0.3.300, idle, 15-45 min after a start with no request before it, three 10-min windows, total less parts, inference and
+relay, `~/swarmllm-gate/idle301/`): **in 9.8 / 6.9 / 7.1, out 14.9 / 15.2 / 5.3 MB/h** — the upload above the README's
+"under 10 MB an hour each way" (from v0.3.279: out 6.4-8.4). At ~50 min up, `/meshsub` had sent 11.3 MB of 17.0 MB out,
+**10.7 MB of it on `swarm/models`: 653 messages of ~16 KB, 70 published by this node, the rest forwarded**; kad answers
+3.4 MB. (2m) cut DEMAND figures, a different topic. To read first: which `SwarmMessage` a 16 KB `swarm/models` message is
+(this node holds 138 parts), what re-publishes it 70 times in 50 min, and whether forwarding repeats it to every mesh peer
+(gossipsub's mesh degree, `flood_publish`). Until it is fixed the README's figure goes up at the next release.
+
 #### #169 — Connection churn on multi-interface hosts: only the LAN dial is deterministic
 `P3` · network · **PARTIAL** — 2026-07-25 · history: archive § "Connection churn on multi-interface hosts — deterministic dialer partial", gotcha #353
 
