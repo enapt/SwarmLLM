@@ -442,6 +442,9 @@
       var removeId = target.getAttribute('data-remove-model');
       if (removeId) { App.models.remove(removeId); return; }
 
+      var letUseId = target.getAttribute('data-let-use-decide');
+      if (letUseId) { App.models.letUseDecide(letUseId); return; }
+
       var unloadId = target.getAttribute('data-unload-model');
       if (unloadId) { App.models.unload(unloadId); return; }
 

@@ -366,6 +366,11 @@ pub fn build_router(state: AppState) -> Router {
             "/api/admin/models/{id}/keep-on-this-computer",
             get(admin::get_model_keep_on_this_computer).put(admin::set_model_keep_on_this_computer),
         )
+        // "Stop keeping it for me": use decides whether the model stays (#452)
+        .route(
+            "/api/admin/models/{id}/let-use-decide",
+            post(admin::let_model_use_decide),
+        )
         // One action to make prompt privacy possible: fetch the first and last
         // pieces of a model. Privacy then engages on its own.
         .route(

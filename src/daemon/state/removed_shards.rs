@@ -13,8 +13,10 @@
 //! not a gap.** It is recorded here, persisted across restarts (the fact is
 //! about what the user wants, and a restart does not change that), honoured
 //! by `gather_candidates`, and cleared only by an equally explicit request
-//! for the shard again — an HF shard download of the model, a single-shard
-//! download, or a pool pin that names this device. A configured
+//! for the shard again — the dashboard's Download of the model, an HF shard
+//! download of it, a single-shard download, a pool pin that names this device,
+//! or "Stop keeping it for me"
+//! (`SharedState::let_use_decide`), which hands the model to the use rule. A configured
 //! `shard_range` and a pin to this node both outrank it in the scorer, since
 //! each is itself an explicit instruction about what this node should hold.
 
@@ -79,6 +81,91 @@ impl SharedState {
         }
         shards.len()
     }
+
+    /// The owner stops keeping `model_id` — the dashboard's "Stop keeping it
+    /// for me": their download no longer pins it, "Keep on this computer" goes
+    /// off, and parts they removed may be fetched again. Whether this computer
+    /// holds the model is then decided as for any model — by who runs it here
+    /// or through here, the swarm's demand and what people run outside the
+    /// swarm (`AutoShardManager::unused_verdict`, the acquisition's trust
+    /// gate). Nothing is deleted now: prune gives the parts back once nobody
+    /// runs the model and other computers hold them. The default model and
+    /// “Start and finish on this computer” turned on by hand stay the owner's
+    /// ([`SharedState::owner_keeps`]): they say what the owner RUNS.
+    ///
+    /// "Remove" stays the owner's "do not download its parts again"
+    /// ([`Self::mark_shard_removed_by_user`]), and this is the way back from it.
+    /// Prior art: Windows Storage Sense's "Free up space" beside Delete (an
+    /// "Always keep on this device" file goes online-only and comes back when
+    /// opened); iOS's "Offload App", which keeps the app's place and fetches it
+    /// again on a tap.
+    pub fn let_use_decide(
+        &self,
+        model_id: &ModelId,
+    ) -> Result<OwnersChoiceForgotten, crate::error::SwarmError> {
+        let mut forgotten = OwnersChoiceForgotten::default();
+        // Changed under the guard, stored after it: no map guard is held
+        // across a database write.
+        let unpinned = self
+            .models
+            .model_trust
+            .get_mut(model_id)
+            .and_then(|mut trust| {
+                if !trust.pinned_by_user {
+                    return None;
+                }
+                trust.pinned_by_user = false;
+                // Pinned only by the download: back to where demand and
+                // popularity promote a model from. A level earned by use stays.
+                if trust.trust_level == crate::types::ModelTrustLevel::Pinned {
+                    trust.trust_level = crate::types::ModelTrustLevel::Discovered;
+                }
+                Some(trust.value().clone())
+            });
+        if let Some(trust) = unpinned {
+            forgotten.download = true;
+            self.db.put_json("model_trust", &model_id.0, &trust)?;
+        }
+        if self.kept_on_this_computer(model_id) {
+            self.keep_on_this_computer(model_id, false)?;
+            forgotten.kept_here = true;
+        }
+        forgotten.removed_parts = self.clear_removed_by_user_for_model(model_id);
+        Ok(forgotten)
+    }
+
+    /// The owner asked for `model_id` — the dashboard's Download or a
+    /// HuggingFace download of its parts: their download pins it
+    /// ([`SharedState::owner_fetched`]), stored so a restart keeps it. The
+    /// inverse of [`Self::let_use_decide`]; the caller forgets whichever
+    /// removals its request names.
+    pub fn owner_fetches(&self, model_id: &ModelId) -> Result<(), crate::error::SwarmError> {
+        // Changed under the guard, stored after it.
+        let trust = {
+            let mut trust = self
+                .models
+                .model_trust
+                .entry(model_id.clone())
+                .or_insert_with(crate::types::ModelTrustInfo::new_pinned);
+            trust.pinned_by_user = true;
+            if trust.trust_level < crate::types::ModelTrustLevel::Pinned {
+                trust.trust_level = crate::types::ModelTrustLevel::Pinned;
+            }
+            trust.value().clone()
+        };
+        self.db.put_json("model_trust", &model_id.0, &trust)
+    }
+}
+
+/// What [`SharedState::let_use_decide`] forgot about a model.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct OwnersChoiceForgotten {
+    /// The owner's download no longer pins it.
+    pub download: bool,
+    /// "Keep on this computer" was on and is now off.
+    pub kept_here: bool,
+    /// Parts the owner had removed that may now be fetched again.
+    pub removed_parts: usize,
 }
 
 #[cfg(test)]
@@ -145,5 +232,107 @@ mod tests {
             "another model's removal stands"
         );
         assert_eq!(st.db.iter_raw(REMOVED_SHARDS_TREE).expect("iter").len(), 1);
+    }
+
+    /// "Stop keeping it for me" forgets the owner's download, their "Keep on
+    /// this computer" and their removals of THAT model, stored — and leaves a
+    /// trust level earned by use alone.
+    #[test]
+    fn letting_use_decide_forgets_only_what_the_owner_chose_for_that_model() {
+        use crate::types::{ModelTrustInfo, ModelTrustLevel};
+        let st = state();
+        let m = ModelId("m".into());
+        st.models
+            .model_trust
+            .insert(m.clone(), ModelTrustInfo::new_pinned());
+        st.keep_on_this_computer(&m, true).expect("keep");
+        st.mark_shard_removed_by_user(&sid("m", 1));
+        st.mark_shard_removed_by_user(&sid("other", 0));
+        assert!(st.owner_chose(&m));
+
+        let forgotten = st.let_use_decide(&m).expect("forgotten");
+        assert_eq!(
+            forgotten,
+            OwnersChoiceForgotten {
+                download: true,
+                kept_here: true,
+                removed_parts: 1
+            }
+        );
+        assert!(!st.owner_chose(&m), "nothing the owner chose holds it now");
+        assert!(!st.shard_removed_by_user(&sid("m", 1)));
+        assert!(
+            st.shard_removed_by_user(&sid("other", 0)),
+            "another model's removal stands"
+        );
+        let level = st
+            .models
+            .model_trust
+            .get(&m)
+            .expect("trust")
+            .trust_level
+            .clone();
+        assert_eq!(
+            level,
+            ModelTrustLevel::Discovered,
+            "back where demand and popularity promote from"
+        );
+        let stored: ModelTrustInfo = st
+            .db
+            .get_json("model_trust", "m")
+            .expect("read")
+            .expect("stored");
+        assert!(!stored.pinned_by_user, "a restart does not pin it again");
+
+        let earned = ModelId("earned".into());
+        let mut used = ModelTrustInfo::new_pinned();
+        used.trust_level = ModelTrustLevel::DemandVerified;
+        st.models.model_trust.insert(earned.clone(), used);
+        st.let_use_decide(&earned).expect("earned");
+        let level = st
+            .models
+            .model_trust
+            .get(&earned)
+            .expect("trust")
+            .trust_level
+            .clone();
+        assert_eq!(
+            level,
+            ModelTrustLevel::DemandVerified,
+            "a level earned by use stays"
+        );
+
+        assert_eq!(
+            st.let_use_decide(&m).expect("again"),
+            OwnersChoiceForgotten::default(),
+            "nothing left to forget is not an error"
+        );
+    }
+
+    /// The owner's download pins a model, stored — and "Stop keeping it for
+    /// me" is its way back.
+    #[test]
+    fn the_owners_download_is_stored_and_letting_use_decide_undoes_it() {
+        use crate::types::{ModelTrustInfo, ModelTrustLevel};
+        let st = state();
+        let m = ModelId("m".into());
+        st.models
+            .model_trust
+            .insert(m.clone(), ModelTrustInfo::new_discovered());
+        st.owner_fetches(&m).expect("fetch");
+        assert!(st.owner_fetched(&m));
+        let stored: ModelTrustInfo = st
+            .db
+            .get_json("model_trust", "m")
+            .expect("read")
+            .expect("stored");
+        assert!(
+            stored.pinned_by_user,
+            "a restart keeps the owner's download"
+        );
+        assert_eq!(stored.trust_level, ModelTrustLevel::Pinned);
+
+        st.let_use_decide(&m).expect("forget");
+        assert!(!st.owner_fetched(&m));
     }
 }

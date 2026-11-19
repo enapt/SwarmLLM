@@ -934,6 +934,36 @@ pub async fn set_model_keep_on_this_computer(
     Ok(Json(keep_on_this_computer_status(&state, model_id)))
 }
 
+/// POST /api/admin/models/:model_id/let-use-decide — "Stop keeping it for
+/// me": the owner's download and "Keep on this computer" no longer hold the
+/// model here, and parts they removed may be fetched again
+/// (`SharedState::let_use_decide`). Nothing is deleted: from now on use decides,
+/// as for any model. `still_yours` says whether something else the owner chose
+/// still keeps it (the default model, “Start and finish on this computer”
+/// turned on by hand).
+pub async fn let_model_use_decide(
+    State(state): State<AppState>,
+    Path(model_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    validate_model_id(&model_id)?;
+    let shared = &state.shared_state;
+    let mid = crate::types::ModelId(model_id.clone());
+    let forgotten = shared.let_use_decide(&mid).map_err(ApiError)?;
+    tracing::info!(
+        model = %model_id,
+        download = forgotten.download,
+        kept_here = forgotten.kept_here,
+        removed_parts = forgotten.removed_parts,
+        "The owner let use decide whether this computer keeps the model"
+    );
+    shared.signal_dashboard(crate::daemon::state::DashboardSignal::ModelsChanged);
+    Ok(Json(serde_json::json!({
+        "model_id": model_id,
+        "forgotten": forgotten,
+        "still_yours": shared.owner_keeps(&mid),
+    })))
+}
+
 fn keep_on_this_computer_status(state: &AppState, model_id: String) -> serde_json::Value {
     let mid = crate::types::ModelId(model_id.clone());
     // The question the request gate asks (`parts_missing_here`), so the card's

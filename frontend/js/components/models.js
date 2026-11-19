@@ -474,6 +474,23 @@
       );
     },
 
+    // "Stop keeping it for me": the owner's download and "Keep on this
+    // computer" no longer hold the model here; use decides from now on
+    // (POST /api/admin/models/{id}/let-use-decide). Nothing is deleted.
+    letUseDecide: async function(modelId) {
+      await U.apiAction(
+        U.modelApiUrl(modelId, 'let-use-decide'),
+        { method: 'POST' },
+        async function(resp) {
+          var result = await resp.json().catch(function() { return {}; });
+          var key = result.still_yours ? 'models.stop_keeping_still_yours' : 'models.stop_keeping_done';
+          App.ui.showBanner('success', I18n.t(key, { model: U.formatModelDisplayName(modelId) }));
+          setTimeout(function() { App.dashboard.loadInitial({ force: true }); }, 1000);
+        },
+        { fallback: I18n.t('models.stop_keeping_failed') }
+      );
+    },
+
     unload: async function(modelId) {
       await U.apiAction(
         U.modelApiUrl(modelId, 'unload'),

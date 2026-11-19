@@ -1573,6 +1573,38 @@ reading it. Tests: `unused::tests::an_owners_fetch_lapses_after_a_month_unused_w
 the fetch half of `scoring::fetch_what_prune_keeps::a_model_nobody_runs_is_given_back_and_each_kind_of_use_keeps_it`.
 Records began with #389 (d)'s watch (2026-11-01), so the first fetch lapses on 2026-12-01.
 
+#### "Stop keeping it for me" hands a model to the use rule; Remove stays "never again" (2026-11-19)
+
+**What it replaced**: an owner done with a model had one control, Remove. It deletes the parts AND
+records every one as removed by the owner (`removed_by_user`, persisted), which stops auto-manage
+fetching them again until the owner asks for the model again. Cleaning this project's own node of
+15 older models that way (2026-11-19) struck them all for good: had the swarm's demand for one come
+back, this computer would never have held it again. The owner: "the stop keeping it for me option
+and letting use and popularity decide would be better than perma striking. there should be an
+option for users to NOT download parts of models etc though, so they can manually remove of course".
+
+**The rule**: two ways to let a model go. **`SharedState::let_use_decide`** ("Stop keeping it for
+me", `POST /api/admin/models/{id}/let-use-decide`) forgets the owner's download pin
+(`pinned_by_user`, stored; a `Pinned` level goes back to `Discovered`, a level earned by use stays),
+"Keep on this computer" and the model's removal records, and deletes nothing: from then on the use
+rule decides (#452), and prune gives the parts back once nobody runs it and other computers hold
+it. The default model and "Start and finish on this computer" turned on by hand stay the owner's
+(`owner_keeps`) and are answered `still_yours`. **Remove** keeps its records: it is the owner's "do
+not download its parts again". The pin has one writer, **`SharedState::owner_fetches`** (the
+dashboard's Download and a HuggingFace download), and one way back, `let_use_decide`. The dashboard's
+Download now also forgets the model's removal records, as the HuggingFace path did; kept, they would
+have stopped the parts coming back once the use rule had given them back.
+
+**Prior art**: Windows Storage Sense's "Free up space" beside Delete (an "Always keep on this
+device" file goes online-only and comes back when opened); iOS's "Offload App", which keeps the
+app's place and fetches it again on a tap. Both keep deletion as a separate, deliberate act.
+
+What a change must keep: Remove's records honoured until an equally explicit request; "Stop
+keeping it for me" deleting nothing; the list's `kept_for_you` (download pin or "Keep on this
+computer") deciding when the dashboard offers it. Tests:
+`removed_shards::tests::letting_use_decide_forgets_only_what_the_owner_chose_for_that_model`,
+`the_owners_download_is_stored_and_letting_use_decide_undoes_it`.
+
 **One quantisation per model** (#389 (e)) follows: the reading names one file per base
 (`popular::pick_file` — Q4_K_M, Q8_0 at 2B and under), so a second quantisation of a base people
 run is held only while it is used or chosen.

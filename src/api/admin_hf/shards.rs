@@ -300,29 +300,10 @@ pub async fn hf_download_shards(
         tracing::info!(model = %mid, forgotten, "User asked for these shards again — cleared their removal records");
     }
 
-    // ── Trust: pin this model as user-approved ──────────────────────────
-    // User explicitly chose to download → set Pinned trust level so auto-manage
-    // will propagate shards for this model across the network.
-    {
-        let mut trust = state
-            .shared_state
-            .models
-            .model_trust
-            .entry(mid.clone())
-            .or_insert_with(crate::types::ModelTrustInfo::new_pinned);
-        if !trust.pinned_by_user {
-            trust.pinned_by_user = true;
-            if trust.trust_level < crate::types::ModelTrustLevel::Pinned {
-                trust.trust_level = crate::types::ModelTrustLevel::Pinned;
-            }
-        }
-        if let Err(e) = state
-            .shared_state
-            .db
-            .put_json("model_trust", &mid.0, trust.value())
-        {
-            tracing::warn!(error = %e, model = %mid.0, "Failed to persist model trust pin — may be lost on restart");
-        }
+    // ── Trust: the owner's download pins the model ──────────────────────
+    // Auto-manage then spreads its parts across the network.
+    if let Err(e) = state.shared_state.owner_fetches(&mid) {
+        tracing::warn!(error = %e, model = %mid.0, "Failed to persist model trust pin — may be lost on restart");
     }
 
     // ── Synchronous probe + architecture check ──────────────────────────

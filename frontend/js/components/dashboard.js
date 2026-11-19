@@ -1670,7 +1670,14 @@
 
         var removeHtml = '';
         if (hostedShards > 0 && !isDownloading) {
-          removeHtml = '<button class="btn-action btn-danger" data-remove-model="' + U.escapeHtml(m.id) + '">' + U.escapeHtml(I18n.t('dashboard.btn_remove_model')) + '</button>';
+          // Two ways to let a model go: "Stop keeping it for me" hands one the
+          // owner chose to the use rule (kept while people use it, given back
+          // when nobody does); Delete removes it and does not download its
+          // parts again.
+          if (m.kept_for_you) {
+            removeHtml += '<button class="btn-action" data-let-use-decide="' + U.escapeHtml(m.id) + '" title="' + U.escapeHtml(I18n.t('dashboard.btn_stop_keeping_tip')) + '">' + U.escapeHtml(I18n.t('dashboard.btn_stop_keeping')) + '</button>';
+          }
+          removeHtml += '<button class="btn-action btn-danger" data-remove-model="' + U.escapeHtml(m.id) + '">' + U.escapeHtml(I18n.t('dashboard.btn_remove_model')) + '</button>';
         }
 
         // WHAT THE ROW SAYS IN WORDS.

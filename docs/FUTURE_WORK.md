@@ -963,6 +963,14 @@ frame, then add a receipt ACK or a per-frame read deadline mirroring request-res
 > "Always keep on this device"; Android's auto-archive under low storage. Evidence:
 > `docs/invariants/memory.md` § "An owner's fetch lapses after a month unused". First lapses
 > 2026-12-01 (records began 11-01).
+> **2026-11-19 — "Stop keeping it for me"** (user: "letting use and popularity decide would be better
+> than perma striking"): `SharedState::let_use_decide` (`POST /api/admin/models/{id}/let-use-decide`,
+> a button beside Delete on a model the owner downloaded or keeps here) forgets the download pin,
+> "Keep on this computer" and the model's removal records, deleting nothing — the use rule decides
+> from then on. Remove stays "do not download its parts again"; its confirmation now says so. The
+> dashboard's Download forgets removals too (only the HuggingFace path did). Prior art: Storage
+> Sense's "Free up space" beside Delete, iOS's "Offload App". Evidence: `docs/invariants/memory.md`
+> § "Stop keeping it for me".
 > (d) SCALE: only CONNECTED holders are asked (pre-release
 > review 2026-11-14). A holder serving the model that is not connected here is heard only through its
 > demand gossip, which keeps the model for a few hours after each request (`asked_for`, the EMA's
