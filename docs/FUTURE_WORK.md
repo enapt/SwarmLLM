@@ -952,6 +952,12 @@ beside the trust table), how old a figure may be, and a rig that restarts the no
 > warns "a guesser beside the first segment stopped for this reply" (`no block drafter or guess head beside this
 > segment`); record that against the worker serving the first segment, forgotten when that worker is retired or
 > regrown, and price the next plan through it at a token a round. One mispriced reply after a load instead of all.
+> ⚠ **Not alone** (same plan lines): the corrected figure is floored at the range's per-device PRIOR — Australia whole
+> at 55.7 ms a token (7,134 ms over 128 passes) while it STATES 0.59-0.61 ms a layer (~24 ms a token) and delivered 28-36
+> — and Italy's processor (385 ms away, never measured) prices at 46.6 from its prior, under Australia. Priced honestly
+> at a token a round, the split would then lose to Italy's PROCESSOR, not Australia's card: tonight's (3c) trap again
+> (an honest term exposing a mispriced one). So the yield fix lands WITH the floor read off the peer's stated figure
+> where it has one, and is measured on this rig (`tier_1119r`) before it ships.
 >
 > (2) **Measured and set aside 2026-11-19 evening — the load was not what passed Australia's whole run over.**
 > Australia's split worker held [14,40) (again [12,40), then [8,40)), so its whole run carried `cold_load_ms` (19,820 of
