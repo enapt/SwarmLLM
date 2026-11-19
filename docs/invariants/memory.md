@@ -3327,8 +3327,23 @@ figure the growth will be charged — in BOTH sizings: `partial_gpu_layers`' bud
 reading. Nothing else reads it (the planner's own room questions are unchanged). A/B
 `SWARMLLM_SPAWN_LEAVES_PLANNED=0`. Test `a_split_spawn_leaves_room_for_the_plans_other_ranges_here`: with the plan
 noted the growth is admitted after a refit onto a 7,300 MB reading, with nothing noted (the behaviour before) it is
-refused. **Not covered**: a first range that fits the card WHOLE (the whole admission does not read the plan) and
-a worker already resident for the first range (no spawn to size).
+refused. **The whole admission leaves it too** (`fits_whole_leaving`, asked by `admit_to_gpu_as` and the
+admission after the split's reclaim): the second run the same evening (`~/swarmllm-gate/split27_1119p`, 16:08Z) found
+the card freer, `[0,21)` admitted WHOLE (6,351 of a 6,511 MB budget, 160 left) and the same refusal — the case the first
+fix had listed as not covered. A whole admission that would leave less than the room is refused, nothing charged, and the
+spawn splits to leave it; the room is weighed, never charged (the growth charges its own share). Test
+`a_first_range_that_fits_the_card_whole_still_leaves_the_plans_other_ranges_room`. **Not covered**: a worker already
+resident for the first range (no spawn to size).
+
+**A re-plan is not in its own way.** The same run's re-plan asked Australia for `[21,64)` and was refused "beside the
+copy this node is running for a conversation now" — the conversation was the SAME request's first attempt (a re-plan
+keeps its id, the #448 rule). A peer's question is weighed beside the request it names (`ModelProcessPool::busy_beside`
+→ `WorkerHandle::in_use_beside` in `peer_load_refusal`, `forward_would_load`, and this node's own
+`forward_replaces_the_worker` in `admit_prompt`), and a forward that starts a pass from position 0 (`starts_a_pass`: no
+truncation, the pass's first piece, not a resumed pass) releases that request's earlier hold (`release_an_earlier_pass`,
+the hold only — a reply in flight is still use) before `get_or_spawn`. It names no new lever: the request id is the one
+a `CancelInference` from any authenticated peer already reaches. Tests: the `own-attempt` case of the peer-weighing
+test, `only_a_pass_from_its_first_position_releases_its_requests_earlier_hold`.
 
 ## A model process holds one copy of the output head (2026-11-16, FUTURE_WORK #458)
 

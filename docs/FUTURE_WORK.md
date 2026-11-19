@@ -951,10 +951,16 @@ frame, then add a receipt ACK or a per-frame read deadline mirroring request-res
 > `a_split_spawn_leaves_room_for_the_plans_other_ranges_here` (the growth is refused with nothing noted). Prior art:
 > llama.cpp places every layer of a model in ONE pass over the devices (`llama_model::load_tensors`' `dev_layer`), so
 > no layer is placed after the card is full; here the ranges arrive one by one, so the first leaves the others'
-> share. Left: a first range that fits WHOLE still takes the card before the growth (the whole admission does not
-> read the plan); the same request's earlier attempt holds its peer's worker "for a conversation", so a re-plan that
-> asks that peer for a wider range is refused by its own request (seen in the same run, Australia `[21,64)` "do
-> not fit beside the copy this node is running for a conversation now").
+> share. **Both residuals fixed on main the same evening:** a first range that fits the card WHOLE left nothing
+> (rerun `~/swarmllm-gate/split27_1119p` 16:08Z: `[0,21)` admitted whole, 6,351 of a 6,511 MB budget, the same
+> refusal) — the whole admission now asks `fits_whole_leaving` and splits to leave the room; and a re-plan was refused
+> by its OWN earlier attempt's hold on a peer's worker (Australia `[21,64)` "do not fit beside the copy this node is
+> running for a conversation now") — a question is weighed beside the request it names (`busy_beside`, the #448
+> rule: a re-plan keeps its id) and a pass from position 0 releases that request's earlier hold before it asks for the
+> worker (`starts_a_pass`, `release_an_earlier_pass`). Prior art: vLLM frees an aborted or preempted sequence's
+> blocks before it is rescheduled, never counting them against itself. Left: a worker already RESIDENT whole for the
+> first range (an earlier request of another shape) still refuses the tail's growth; the router's re-plan with fewer
+> layers here then routes elsewhere where the swarm has a route.
 
 #### #452 — Full computers keep parts of models the swarm never runs, so the models people use find no room
 `P1` · placement · **BUILT, field check (a) as designed on the two computers we can read (2026-11-19); other computers open** — 2026-11-14 · history: #389 (d), #400, #401, #246

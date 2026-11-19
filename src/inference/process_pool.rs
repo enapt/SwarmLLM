@@ -276,6 +276,16 @@ pub const DEFAULT_KV_CACHE_TTL_SECS: u64 = 600;
 /// (`KvCacheStore::release_finished_conversations`).
 pub(crate) const CONVERSATION_GAP_SECS: u64 = 120;
 
+/// Does `forward` begin a prompt pass at its first position — the forward a
+/// re-plan of the request sends first (#481 (5))? Not a cache truncation, not
+/// a later piece of a pass (`prompt_span`), not a pass resumed past what a
+/// segment kept (#10: its `index_pos` is past 0).
+fn starts_a_pass(forward: &crate::types::LayerForward) -> bool {
+    forward.index_pos == 0
+        && forward.truncate_kv_to.is_none()
+        && forward.prompt_span.is_none_or(|span| span.start == 0)
+}
+
 /// The `DaemonMsg::AdmitPrompt` a peer's question becomes
 /// ([`ModelProcessPool::weigh_peer_prompt`]): weighed only, under a FRESH
 /// correlation id — the worker routes its answer by it — and naming the
@@ -2350,6 +2360,17 @@ impl WorkerHandle {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(request_id, std::time::Instant::now());
+    }
+
+    /// A new pass of `request_id` from its first position replaces the
+    /// earlier attempt's conversation here (a re-plan keeps its id, #448), so
+    /// that attempt's hold is no use by anyone else (#481 (5)). Only the hold:
+    /// a reply of it still in flight is still use.
+    fn release_an_earlier_pass(&self, request_id: Uuid) {
+        self.kv_holders
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&request_id);
     }
 
     /// `request_id` released its cache here, or was cancelled.
@@ -8928,6 +8949,17 @@ impl ModelProcessPool {
         )
     }
 
+    /// Is `h` in use — by anyone, or (`beside`) by any request but that one?
+    /// A re-plan keeps its request id, so the request a question or a pass
+    /// weighs for is never in its own way (#481 (5)): Australia refused a
+    /// re-plan's wider range "beside the copy this node is running for a
+    /// conversation" when that conversation was the same request's first
+    /// attempt (2026-11-19).
+    fn busy_beside(&self, h: &WorkerHandle, beside: Option<Uuid>) -> bool {
+        let window = self.conversation_window();
+        beside.map_or_else(|| h.in_use(window), |r| h.in_use_beside(r, window))
+    }
+
     /// Would the forward that names `run` have its layers loaded here — what
     /// `get_or_spawn` does for it, charging nothing? With no worker, a fresh
     /// spawn; with one holding `run`, yes; with one that does not, the growth
@@ -8950,12 +8982,13 @@ impl ModelProcessPool {
         run: (u32, u32),
         worker: Option<&WorkerHandle>,
         requester: Requester,
+        beside: Option<Uuid>,
     ) -> bool {
         match worker {
             Some(h) if h.serves_segment(run, RunShape::Plain) => true,
             Some(h) => {
                 self.growth_would_be_admitted(model_id, run, h, requester)
-                    || (!h.in_use(self.conversation_window())
+                    || (!self.busy_beside(h, beside)
                         && self.a_fresh_spawn_fits_in_place_of_the_worker(model_id, run, requester)
                         && self.replacement_keeps_the_card(model_id, run, h))
             }
@@ -8977,9 +9010,10 @@ impl ModelProcessPool {
         run: (u32, u32),
         h: &WorkerHandle,
         requester: Requester,
+        beside: Option<Uuid>,
     ) -> bool {
         !h.serves_segment(run, RunShape::Plain)
-            && !h.in_use(self.conversation_window())
+            && !self.busy_beside(h, beside)
             && !self.growth_would_be_admitted(model_id, run, h, requester)
             && self.a_fresh_spawn_fits_in_place_of_the_worker(model_id, run, requester)
     }
@@ -9891,6 +9925,7 @@ impl ModelProcessPool {
         &self,
         model_id: &ModelId,
         layer_ranges: &[(u32, u32)],
+        for_request: Uuid,
     ) -> Option<(String, u32)> {
         if std::env::var("SWARMLLM_PEER_LOAD_WEIGH").as_deref() == Ok("0") {
             return None;
@@ -9902,8 +9937,10 @@ impl ModelProcessPool {
         }
         self.footprint_inputs(model_id, Some((start, end)))?;
         let worker = self.live_worker(model_id);
-        let takes =
-            |run| self.forward_would_load(model_id, run, worker.as_deref(), Requester::Swarm);
+        let beside = Some(for_request);
+        let takes = |run| {
+            self.forward_would_load(model_id, run, worker.as_deref(), Requester::Swarm, beside)
+        };
         if takes((start, end)) {
             return None;
         }
@@ -9926,7 +9963,7 @@ impl ModelProcessPool {
         // running fewer of its layers on the card (#461): say so, never in
         // system memory's words, which read "needs about 0 MB" for it.
         if let Some(h) = worker.as_deref().filter(|h| {
-            !h.in_use(self.conversation_window())
+            !self.busy_beside(h, beside)
                 && self.a_fresh_spawn_fits_in_place_of_the_worker(
                     model_id,
                     (start, end),
@@ -9958,10 +9995,7 @@ impl ModelProcessPool {
         // which read "needs about 0 MB" for a copy placed on the card — the
         // words a far computer gave for `[23..48)` beside its busy `[26..48)`
         // (2026-11-15, #461).
-        if let Some(h) = worker
-            .as_deref()
-            .filter(|h| h.in_use(self.conversation_window()))
-        {
+        if let Some(h) = worker.as_deref().filter(|h| self.busy_beside(h, beside)) {
             tracing::info!(
                 model = %model_id,
                 layers = format!("[{start}..{end})"),
@@ -10216,10 +10250,15 @@ impl ModelProcessPool {
             .note(&model_id, &admit.layer_ranges, std::time::Instant::now());
         let replaced = crate::inference::executor::without_starving_the_runtime(|| {
             self.live_worker(&model_id).is_some_and(|h| {
-                admit
-                    .layer_ranges
-                    .iter()
-                    .any(|&run| self.forward_replaces_the_worker(&model_id, run, &h, requester))
+                admit.layer_ranges.iter().any(|&run| {
+                    self.forward_replaces_the_worker(
+                        &model_id,
+                        run,
+                        &h,
+                        requester,
+                        Some(request_id),
+                    )
+                })
             })
         });
         if replaced {
@@ -10313,7 +10352,7 @@ impl ModelProcessPool {
         if !holds_the_first {
             if let Some((message, layers_that_fit)) =
                 crate::inference::executor::without_starving_the_runtime(|| {
-                    self.peer_load_refusal(model_id, &layer_ranges)
+                    self.peer_load_refusal(model_id, &layer_ranges, for_request)
                 })
             {
                 return PeerPromptWeight::DoesNotFit {
@@ -10894,7 +10933,13 @@ impl ModelProcessPool {
     /// only as it stands. Ask ONCE unless the answer was no: `admit_to_gpu`
     /// charges the reservation when it succeeds, so a second call would weigh
     /// the model against its own charge and refuse one already let in.
-    async fn admit_to_gpu_as(&self, model_id: &ModelId, estimated: u64, tenancy: Tenancy) -> bool {
+    async fn admit_to_gpu_as(
+        &self,
+        model_id: &ModelId,
+        estimated: u64,
+        tenancy: Tenancy,
+        leaving_mb: u64,
+    ) -> bool {
         if let Tenancy::Guest { leaves_mb, .. } = tenancy {
             if !self.guest_fits_the_card(estimated, leaves_mb) {
                 tracing::debug!(
@@ -10907,19 +10952,38 @@ impl ModelProcessPool {
                 return false;
             }
         }
-        let mut admitted = self.admit_to_gpu(model_id, estimated);
+        let mut admitted = self.fits_whole_leaving(estimated, leaving_mb)
+            && self.admit_to_gpu(model_id, estimated);
         if !admitted && tenancy == Tenancy::Tenant {
-            let freed = self.free_vram_for_admission(model_id, estimated).await;
+            let freed = self
+                .free_vram_for_admission(model_id, estimated.saturating_add(leaving_mb))
+                .await;
             if freed > 0 {
                 tracing::info!(
                     model = %model_id,
                     freed_mb = freed,
                     "Reclaimed graphics memory from idle models; retrying admission"
                 );
-                admitted = self.admit_to_gpu(model_id, estimated);
+                admitted = self.fits_whole_leaving(estimated, leaving_mb)
+                    && self.admit_to_gpu(model_id, estimated);
             }
         }
         admitted
+    }
+
+    /// May a spawn costing `estimated` MB go on the card WHOLE and still leave
+    /// `leaving_mb` there — the room the plan's other ranges here will be grown
+    /// into (#481 (5), [`Self::room_for_the_plans_other_ranges`])? Weighed only,
+    /// against the card as it stands; the spawn is charged `estimated` alone,
+    /// and the growth charges its own share when it comes. Always yes with
+    /// nothing to leave. A no sends the spawn to the split, which is sized to
+    /// leave the room.
+    fn fits_whole_leaving(&self, estimated: u64, leaving_mb: u64) -> bool {
+        leaving_mb == 0
+            || !matches!(
+                self.card_verdict(estimated.saturating_add(leaving_mb)),
+                Verdict::Refused { .. }
+            )
     }
 
     /// [`Self::admit_to_gpu_as`] for the RAM budget: reclaim memory from
@@ -11171,9 +11235,30 @@ impl ModelProcessPool {
             // Demoting to the CPU is the last resort, not the first answer:
             // reclaim the card from models nothing is using, then ask again —
             // for a tenant (`admit_to_gpu_as`).
-            let mut admitted = self.admit_to_gpu_as(model_id, estimated, tenancy).await;
+            // The plan's other ranges here are grown into what this spawn
+            // leaves (#481 (5)): a first range that would fit the card whole
+            // but not beside them is split below instead. Measured 2026-11-19:
+            // Qwen3.8-27B's [0,21) took 6,351 of a 6,511 MB budget whole and
+            // its [63,64) (261 MB) was refused, failing the request.
+            let leaving_mb = if guest {
+                0
+            } else {
+                self.room_for_the_plans_other_ranges(model_id, segment)
+            };
+            let mut admitted = self
+                .admit_to_gpu_as(model_id, estimated, tenancy, leaving_mb)
+                .await;
             if admitted {
                 charged_vram_mb = estimated;
+            } else if leaving_mb > 0 && self.fits_whole_leaving(estimated, 0) {
+                tracing::info!(
+                    model = %model_id,
+                    layers = format!("[{}..{})", segment.0, segment.1),
+                    estimated_mb = estimated,
+                    leaving_mb,
+                    "DIAG: these layers would fit the graphics card whole, but not beside the \
+                     plan's other layers here — placing them so those fit too (#481 (5))"
+                );
             }
             // Before giving the card up entirely, ask whether PART of the
             // model fits. This is the whole point of hybrid placement: a model
@@ -11200,7 +11285,10 @@ impl ModelProcessPool {
                         |extra_mb| self.spawn_split_on_card(model_id, segment, estimated, extra_mb),
                     )
                     .await;
-                if freed > 0 && self.admit_to_gpu(model_id, estimated) {
+                if freed > 0
+                    && self.fits_whole_leaving(estimated, leaving_mb)
+                    && self.admit_to_gpu(model_id, estimated)
+                {
                     charged_vram_mb = estimated;
                     admitted = true;
                 } else if let Some(split) = self.partial_gpu_layers(
@@ -11209,7 +11297,7 @@ impl ModelProcessPool {
                     estimated,
                     // The plan's other ranges here are grown into what this
                     // leaves (#481 (5)).
-                    budget.saturating_sub(self.room_for_the_plans_other_ranges(model_id, segment)),
+                    budget.saturating_sub(leaving_mb),
                 ) {
                     match split {
                         CardSplit::Layers { on_card, total } => {
@@ -12419,6 +12507,15 @@ impl ModelProcessPool {
         // forward sent on its behalf, which is where the memory would have
         // gone.
         crate::inference::cancel::bail_if_cancelled(cancel.as_ref())?;
+        // A pass from the first position replaces this request's earlier
+        // attempt here (a re-plan keeps its id, #448): that attempt's hold is
+        // not use that may keep the worker from growing or being replaced for
+        // it (#481 (5)).
+        if starts_a_pass(&forward) {
+            if let Some(h) = self.live_worker(&model_id) {
+                h.release_an_earlier_pass(forward.request_id);
+            }
+        }
         let handle = self
             .get_or_spawn(
                 &model_id,
@@ -16411,7 +16508,7 @@ mod tests {
         let hour = std::time::Duration::from_secs(3600);
         admit_and_insert_gpu_worker(&pool, &target, 3138, hour).await;
 
-        assert!(!pool.admit_to_gpu_as(&drafter, 3000, TYPICAL_GUEST).await);
+        assert!(!pool.admit_to_gpu_as(&drafter, 3000, TYPICAL_GUEST, 0).await);
         assert!(
             pool.workers.get(&target).is_some(),
             "the target keeps the card"
@@ -16423,7 +16520,10 @@ mod tests {
         );
 
         // The control: the same load as a tenant reclaims the idle model.
-        assert!(pool.admit_to_gpu_as(&drafter, 3000, Tenancy::Tenant).await);
+        assert!(
+            pool.admit_to_gpu_as(&drafter, 3000, Tenancy::Tenant, 0)
+                .await
+        );
         assert!(pool.workers.get(&target).is_none());
         assert_eq!(pool.vram_committed_mb(), 3000);
     }
@@ -16502,7 +16602,7 @@ mod tests {
                 leaves_mb: p.room_a_guest_leaves_mb(&target),
             };
             assert_eq!(
-                p.admit_to_gpu_as(&drafter, guest_mb, spawn).await,
+                p.admit_to_gpu_as(&drafter, guest_mb, spawn, 0).await,
                 on_card,
                 "the spawn's own admission agrees"
             );
@@ -17940,6 +18040,77 @@ mod tests {
             }
         }
         let _ = std::fs::remove_dir_all(&dir);
+
+        // In use only by the request the question names — its own earlier
+        // attempt, a re-plan keeping its id (#481 (5)): weighed as idle, so
+        // go ahead (the pass replaces the worker), where the same hold of
+        // another request is refused above.
+        let (p, dir) = setup("own-attempt");
+        p.set_ram_budget_mb(asked_mb);
+        let h = cpu_worker_holding(&p, &model, held, held_mb).await;
+        let earlier = Uuid::new_v4();
+        h.note_conversation(earlier);
+        assert!(matches!(
+            p.weigh_peer_prompt(&model, vec![asked], 64, earlier).await,
+            PeerPromptWeight::Fits
+        ));
+        // And the pass that follows releases that attempt's hold before it
+        // asks for the worker: no longer in use by anyone.
+        assert!(h.in_use(p.conversation_window()), "control: held");
+        h.release_an_earlier_pass(earlier);
+        assert!(!h.in_use(p.conversation_window()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Which forward starts a pass and so releases its request's earlier hold
+    /// (#481 (5)): position 0, the pass's first piece; never a later piece, a
+    /// resumed pass or a cache truncation.
+    #[test]
+    fn only_a_pass_from_its_first_position_releases_its_requests_earlier_hold() {
+        let mut f = crate::types::LayerForward {
+            request_id: Uuid::new_v4(),
+            sequence_num: 0,
+            index_pos: 0,
+            activations: Vec::new(),
+            format: crate::types::TensorFormat::FP32,
+            model_id: ModelId("m".into()),
+            layer_range: (0, 8),
+            tp_meta: None,
+            vision_embeddings: None,
+            chain: Vec::new(),
+            sender_peer_bytes: None,
+            requester_node_id: None,
+            pre_embedded: false,
+            generated_ids: Vec::new(),
+            adapter_id: None,
+            draft_tokens: Vec::new(),
+            spec_logits_requested: false,
+            spec_walk_at_tail: false,
+            coupling_seed: None,
+            stream_seq: None,
+            truncate_kv_to: None,
+            prompt_cache: None,
+            chunk_meta: None,
+            sampling: None,
+            prompt_span: None,
+            image_spans: Vec::new(),
+            draft_parents: Vec::new(),
+            draft_tree_from: None,
+            stream_lookahead: None,
+            block_rows_wanted: None,
+            stream_branch: None,
+        };
+        assert!(starts_a_pass(&f), "a whole pass from 0");
+        f.prompt_span = Some(swarmllm_types::PromptSpan { start: 0, end: 40 });
+        assert!(starts_a_pass(&f), "its first piece");
+        f.index_pos = 16;
+        assert!(!starts_a_pass(&f), "a later piece");
+        f.index_pos = 0;
+        f.prompt_span = Some(swarmllm_types::PromptSpan { start: 16, end: 40 });
+        assert!(!starts_a_pass(&f), "a pass resumed past what was kept");
+        f.prompt_span = None;
+        f.truncate_kv_to = Some(0);
+        assert!(!starts_a_pass(&f), "a truncation");
     }
 
     /// **An idle worker on the card is kept where the range would not load in
@@ -18049,11 +18220,11 @@ mod tests {
 
         assert!(!p.replacement_keeps_the_card(&model, asked, &h));
         assert!(
-            !p.forward_would_load(&model, asked, Some(&h), Requester::Swarm),
+            !p.forward_would_load(&model, asked, Some(&h), Requester::Swarm, None),
             "up front: a peer is told no, and held to what would load"
         );
         let (message, _) = p
-            .peer_load_refusal(&model, &[asked])
+            .peer_load_refusal(&model, &[asked], Uuid::new_v4())
             .expect("the up-front answer is a refusal");
         assert!(message.contains("graphics card"), "{message}");
         assert!(
@@ -18088,7 +18259,7 @@ mod tests {
         // At the forward, unasked: served as before, never refused.
         p.set_vram_budget_mb(held_mb + 1);
         assert!(
-            p.forward_replaces_the_worker(&model, asked, &h, Requester::Swarm),
+            p.forward_replaces_the_worker(&model, asked, &h, Requester::Swarm, None),
             "the up-front admission's prediction of the forward"
         );
         let outcome = p
@@ -18143,7 +18314,7 @@ mod tests {
         );
         assert!(p.replacement_keeps_the_card(&model, asked, &h));
         assert!(
-            p.forward_would_load(&model, asked, Some(&h), Requester::Swarm),
+            p.forward_would_load(&model, asked, Some(&h), Requester::Swarm, None),
             "up front: a peer is told yes"
         );
         let _ = std::fs::remove_dir_all(&data_dir);
@@ -22707,6 +22878,41 @@ mod admission_tests {
         );
         p.planned_here.note(&m, &[first_range], now);
         assert_eq!(p.planned_here.beside(&m, first_range, now), Vec::new());
+    }
+
+    /// **A first range that fits the card WHOLE leaves the room too** (#481
+    /// (5)): Qwen3.8-27B's `[0,21)` took 6,351 of a 6,511 MB budget whole and
+    /// its `[63,64)` (261 MB) was refused (2026-11-19, the live node on main).
+    /// A whole admission that would leave less than the plan's other ranges
+    /// need is refused — nothing charged — so the spawn splits instead; with
+    /// nothing to leave (the behaviour before) the same admission passes.
+    #[tokio::test]
+    async fn a_first_range_that_fits_the_card_whole_still_leaves_the_plans_other_ranges_room() {
+        let p = pool();
+        p.test_card_in_play.store(true, Ordering::Relaxed);
+        p.set_vram_budget_mb(6_511);
+        let m = ModelId("whole-first-range".into());
+        assert!(
+            !p.admit_to_gpu_as(&m, 6_351, Tenancy::Tenant, 261).await,
+            "6,351 + 261 > 6,511: not whole"
+        );
+        assert_eq!(
+            p.vram_committed_mb(),
+            0,
+            "a refused admission charges nothing"
+        );
+        assert!(p.fits_whole_leaving(6_351, 0), "control: whole alone fits");
+        assert!(
+            p.admit_to_gpu_as(&m, 6_351, Tenancy::Tenant, 0).await,
+            "nothing to leave: admitted whole, as before"
+        );
+        assert_eq!(p.vram_committed_mb(), 6_351, "charged its own share only");
+        let other = ModelId("whole-first-range-room".into());
+        assert!(
+            p.admit_to_gpu_as(&other, 100, Tenancy::Tenant, 50).await,
+            "6,351 + 100 + 50 <= 6,511: whole, and the room is weighed, not charged"
+        );
+        assert_eq!(p.vram_committed_mb(), 6_451);
     }
 
     /// The same for a mixture-of-experts model kept whole on the card with

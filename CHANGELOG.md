@@ -50,7 +50,9 @@ priced as one that guesses nothing (#481).
 With Qwen3.8-27B planned as this computer's first 21 layers and its last one, the first part's load found a little
 more free memory than planned and took it, and the last layer then had no room: five of six requests failed with
 "1 layers 63..64 … need about 261 MB more". The first part now leaves the room the plan's other part here will
-need (#481).
+need, whether it goes on the card whole or split (#481). And a request planned again after a failed attempt is no
+longer turned away by a computer still holding that same request's first attempt: it read as "busy with a
+conversation" and the request went the slow way round.
 
 ## [0.3.300-alpha] — 2026-11-19
 
