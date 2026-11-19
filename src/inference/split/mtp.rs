@@ -381,6 +381,23 @@ pub(crate) enum GuessOver<'a> {
     HotAnd(Option<(&'a QMatMul, &'a [u32])>),
 }
 
+/// A guess's scores, one row a guess, and the words past the hot rows
+/// (`SplitModel::mtp_score_table`).
+type ScoreTable<'w> = (Vec<Vec<f32>>, Option<(usize, &'w [u32])>);
+
+/// The word at index `i` of a guess's score table
+/// (`SplitModel::mtp_score_table`): itself, or past the hot rows one of the
+/// reply's own words.
+fn word_at(i: usize, past: Option<(usize, &[u32])>) -> Result<u32, SwarmError> {
+    match past {
+        Some((n, ids)) if i >= n => ids
+            .get(i - n)
+            .copied()
+            .ok_or_else(|| SwarmError::Internal("next-token head: a word past its rows".into())),
+        _ => Ok(i as u32),
+    }
+}
+
 impl SplitModel {
     /// The layer a forward keeps for the head: the trunk's last (absolute) —
     /// only where this model ends the trunk; a head beside a split's first
@@ -511,6 +528,60 @@ impl SplitModel {
         rows: &Tensor,
         over: GuessOver<'_>,
     ) -> Result<Vec<u32>, SwarmError> {
+        let (scores, past) = self.mtp_score_table(rows, over)?;
+        scores
+            .iter()
+            .map(|row| word_at(crate::inference::sampling::argmax(row) as usize, past))
+            .collect()
+    }
+
+    /// Each of `rows`' `k` likeliest words over what `over` names, likeliest
+    /// first, as (word, log-probability among them) — [`Self::mtp_guesses`]'
+    /// scores ranked, so a row's first is its guess: what a block drafter's
+    /// tree is grown from on the processor (#437). A word the hot rows and a
+    /// reply's own words both name is offered once, at its better place.
+    /// `None` where a row has nothing finite.
+    pub(crate) fn mtp_ranked(
+        &self,
+        rows: &Tensor,
+        over: GuessOver<'_>,
+        k: usize,
+    ) -> Result<Option<super::draft::RankedRows>, SwarmError> {
+        let (scores, past) = self.mtp_score_table(rows, over)?;
+        // Ranked past `k` where the reply's own words could repeat a hot one.
+        let wider = past.map_or(k, |(_, ids)| k + ids.len().min(k));
+        let Some(ranked) = super::draft::likeliest_of_each(&scores, wider) else {
+            return Ok(None);
+        };
+        ranked
+            .into_iter()
+            .map(|row| {
+                let mut seen = std::collections::HashSet::with_capacity(row.len());
+                let mut words = Vec::with_capacity(k);
+                for (i, logp) in row {
+                    let w = word_at(i as usize, past)?;
+                    if seen.insert(w) {
+                        words.push((w, logp));
+                    }
+                    if words.len() == k {
+                        break;
+                    }
+                }
+                Ok(words)
+            })
+            .collect::<Result<_, _>>()
+            .map(Some)
+    }
+
+    /// The scores [`Self::mtp_guesses`] and [`Self::mtp_ranked`] read, one
+    /// row a guess: the whole head's, or the hot rows' and then a reply's own
+    /// words' — the file's suppressed words added to both (#282) — with the
+    /// words past the hot rows (`(n, ids)`: index `n + j` is `ids[j]`).
+    fn mtp_score_table<'w>(
+        &self,
+        rows: &Tensor,
+        over: GuessOver<'w>,
+    ) -> Result<ScoreTable<'w>, SwarmError> {
         let err = |what: &'static str| {
             move |e: candle_core::Error| {
                 SwarmError::Internal(format!("next-token head {what}: {e}"))
@@ -524,11 +595,7 @@ impl SplitModel {
         let table = |t: Tensor| t.to_dtype(DType::F32).and_then(|t| t.to_vec2::<f32>());
         let GuessOver::HotAnd(words) = over else {
             let logits = self.guess_logits(&rows)?;
-            return Ok(table(logits)
-                .map_err(err("logits"))?
-                .iter()
-                .map(|row| crate::inference::sampling::argmax(row))
-                .collect());
+            return Ok((table(logits).map_err(err("logits"))?, None));
         };
         let hot = self
             .hot_head()
@@ -556,18 +623,7 @@ impl SplitModel {
                 row.extend(own);
             }
         }
-        scores
-            .iter()
-            .map(|row| {
-                let best = crate::inference::sampling::argmax(row) as usize;
-                match words {
-                    Some((_, ids)) if best >= n => ids.get(best - n).copied().ok_or_else(|| {
-                        SwarmError::Internal("next-token head: a word past its rows".into())
-                    }),
-                    _ => Ok(best as u32),
-                }
-            })
-            .collect()
+        Ok((scores, words.map(|(_, ids)| (n, ids))))
     }
 
     /// One forward of the head over `tokens`, each beside the hidden state of

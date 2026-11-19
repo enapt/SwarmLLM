@@ -6157,6 +6157,78 @@ On the card (RTX 3070, 2026-11-19): `a_tree_check_on_the_card_is_the_processors`
 take-back and the step after within 1e-4 of the processor's; both kernels seen to take the tree)
 and the tree arm of `the_card_convolution_is_the_composed_one_bit_for_bit` (0.0 against
 `causal_conv_along`, three shapes) — both red with the kernels' parents ignored.
+
+**The coordinator half (stage B + C, 2026-11-19).** The n-gram loop is where a Qwen 3.5/3.6 split's
+block drafter guesses, and it now sends that drafter's guesses as a TREE:
+
+- **Grown from the block's marginals** (`BlockDrafter::draft_ranked`: the same forward as a chain's
+  draft, each guess's `draft_tree::MARGINAL_WORDS` (8) likeliest words ranked where the rows are —
+  `split::draft::likeliest_rows`, the card's kernel or one host pass a row; over the hot rows and
+  the reply's own words on the processor, `SplitModel::mtp_ranked`, from the SAME score table as
+  `mtp_guesses`, so a row's first is the chain's guess). `GrownTree::from_marginals` keeps the
+  block's own `gamma` picks whole as the trunk (SpecExec/Sequoia; the 11-18 measure: a pure
+  best-first tree of 16 lost on code) and spends the rest best-first, ≤ `BLOCK_TREE_MOST_ROWS`
+  (32) rows with the reread and the last token.
+- **Drafted over the chain's count and one level past it** (`model_worker::block_tree_positions`,
+  A/B `SWARMLLM_BLOCK_TREE_DEPTH=block|+N`). A drafter's forward costs what its positions do on a
+  processor, and the check's pricing sends a tree of about the chain's depth (~4 guesses a round
+  on the rig), so the block's deeper positions were drafted and never sent. Sequoia sizes a tree
+  by what the hardware pays a row; DDTree drafts the whole block where a card pays about the same.
+- **Its rounds are DSD's** (`dsd_tree::TreeRounds`, not a second copy): `check` prices the guesses
+  against the loop's own `CheckCost` fit and the calibration `settle` keeps; `settle` reads the walk
+  back, keeps the in-place prefix and leaves the rest of the kept path to read again (`reread`).
+  A round with tokens to read again goes through the tree path WHATEVER it guesses — the block's
+  tree, any other guesser's chain (`GrownTree::chain`), or none — since a chain check from the
+  reply's position would skip them; the one-token miss arm and the far run stand aside then.
+- **A peer segment without the bit is never sent one** (`tree_check_possible(.., needs)`, needs
+  from `ModelArch::block_tree_features`: `BLOCK_TREES` beside `DRAFT_TREES` for EVERY family that
+  reads a tree — a released peer advertising `DRAFT_TREES` (a Llama split's) would check the tree
+  and answer no rows, and the drafter would stop for the reply).
+  A segment that still refuses (`Validation`, before running anything) turns trees off for the
+  reply and cuts every segment back to the reply's position — as DSD does.
+- **The drafter reads only the kept path's rows, as the reply's positions.** A tree's kept path
+  need not sit at consecutive rows, and the drafter's context rows are the target's hidden states
+  of the REPLY's tokens: a row along the kept path is exactly the row its chain would have had
+  there (tree attention and the parent-state delta rule make it so), so gathering those rows gives
+  the drafter its whole context although the target's cache must read the out-of-place ones again.
+  A forward catches its rows for a tree only where it holds the tree WHOLE
+  (`model_worker::rows_are_the_replys`; before, any tree caught none — the rig's first tree run,
+  2026-11-19: the drafter stopped at the first tree round of every reply, "layer 1's rows start at
+  30, not by 25", and the replies took 37-45 s against the chain's 20-31).
+  The walking tail answers the path's rows itself (`sampling::rows_a_walk_kept` →
+  `block_rows_from`'s `kept`, a cut for a chain, a gather for a tree), so no branch's rows cross the
+  link back; a segment that ran before the walk answered every row and the coordinator keeps the
+  path's (`BlockRowsAsk::keep_the_path`); an answer of neither length is dropped — the drafter then
+  finds a gap and stops rather than read a branch's row as the reply's.
+- **The block is judged as the chain it was grown on** (`record_round` gets `min(kept, trunk)` of
+  `trunk`): its gamma controller keeps choosing the trunk by what a chain would have read; the
+  tree's own gain shows in what it wrote, which the set-aside judges.
+
+**Measured on the rig** (2026-11-19, `~/rig428/scripts/rig437.sh`: Qwen3.5-4B Q4_K_M split
+[0,15)+[29,32)+head with the block drafter ↔ [15,29), two processor nodes on 8 cores each, 130 ms
+apart; 160 greedy tokens; the loop's decode seconds, two arms each, one binary):
+
+| reply | tree, +1 level (default) | tree, whole block | chain (`SWARMLLM_BLOCK_TREE=0`) |
+|---|---|---|---|
+| palindrome function | 17.9 / 17.3 | 15.2 / 19.1 | 18.8 / 18.2 |
+| binary search tree | 18.4 / 18.4 | 20.2 / 18.5 | 18.6 / 18.1 |
+| lighthouse story | 29.6 / 29.1 | 37.2 / 35.3 | 31.3 / 31.1 |
+
+The +1 tree keeps more a round (story 0.82 against the chain's 0.70, code ~2.5 against ~2.2) at
+the chain's draft cost (33-44 ms against 26-38); the whole block drafts in 68-147 ms and on prose
+loses to plain steps (set aside at token 88 on pass 2). Replies split at near-ties between ANY two
+arms, the two chain arms included (#313: the processor's matmuls are not invariant to the check's
+width) — every split a coherent word choice. On the processor the gain is small; a card's draft
+and check cost little per row, which is where a wider tree is expected to pay (stage D, card).
+
+Tests: `a_tree_checks_rows_are_cut_to_its_kept_path`, `a_walked_trees_rows_are_its_kept_paths_in_order`,
+the rows half of `the_walk_follows_the_branch_that_carries_each_pick` (each red with its gather
+switched off), `a_block_drafters_tree_is_read_with_its_shape`,
+`a_block_tree_asks_each_family_for_what_its_layers_need`, `a_trees_rows_are_the_replys_where_the_forward_holds_it_whole`
+(red with the old gate, a tree catching nothing), `a_chain_of_guesses_is_a_tree_of_one_path`,
+`a_block_tree_is_drafted_one_level_past_the_chain`, `a_chain_no_drafter_rated_leaves_the_calibration_alone`
+(another guesser's chain, sent as a tree to read kept tokens again, teaches the calibration
+nothing: `TreeCheck::not_rated`), and stage B's `a_block_drafters_tree_keeps_its_chain_and_spends_the_rest_best_first`.
 ## A file's own guess head (2026-11-07, FUTURE_WORK #425)
 
 **What it is.** Qwen 3.5, 3.6 and 3.8 files (`qwen35`, `qwen35moe`) declare

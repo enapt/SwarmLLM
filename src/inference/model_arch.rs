@@ -349,6 +349,24 @@ impl ModelArch {
         )
     }
 
+    /// What every PEER segment of a split must advertise to be sent a BLOCK
+    /// drafter's tree of guesses (#437) for this family — `None` where its
+    /// layers check chains only: [`Self::reads_draft_trees`]' families and
+    /// Qwen 3.5/3.6, whose recurrent layers read each row from its parent's
+    /// state. `features::BLOCK_TREES` beside `features::DRAFT_TREES` for
+    /// every one of them: a segment must also answer the drafter's rows for
+    /// a tree, which no release before it did. Only a check: the block
+    /// drafter grows its tree from its own marginals, never by reading one,
+    /// so DSD's rule (target AND drafter read trees) stays
+    /// [`Self::reads_draft_trees`]. This node's own segments are this build;
+    /// each worker's `SplitModel::draft_tree_refusal` is the answer that
+    /// holds.
+    pub fn block_tree_features(&self) -> Option<u64> {
+        use swarmllm_types::node::features;
+        (self.reads_draft_trees() || matches!(self, ModelArch::Qwen35 | ModelArch::Qwen35Moe))
+            .then_some(features::DRAFT_TREES | features::BLOCK_TREES)
+    }
+
     /// Map to the coarser `ModelArchitecture` variant used by `ModelManifest`.
     ///
     /// Most arches share the standard llama-compatible manifest layout, so they
@@ -443,6 +461,26 @@ pub(crate) enum Activation {
 mod tests {
     use super::ModelArch;
     use crate::types::ModelArchitecture;
+
+    /// What a block drafter's tree needs of every peer segment (#437): both
+    /// bits for a full-cache family AND for Qwen 3.5/3.6 — a released peer
+    /// advertising `DRAFT_TREES` answers a tree with no rows — nothing for a
+    /// windowed or MLA family, and DSD's own rule is not widened.
+    #[test]
+    fn a_block_tree_asks_each_family_for_what_its_layers_need() {
+        use swarmllm_types::node::features::{BLOCK_TREES, DRAFT_TREES};
+        let both = Some(DRAFT_TREES | BLOCK_TREES);
+        assert_eq!(ModelArch::Llama.block_tree_features(), both);
+        for qwen35 in [ModelArch::Qwen35, ModelArch::Qwen35Moe] {
+            assert_eq!(qwen35.block_tree_features(), both);
+            assert!(!qwen35.reads_draft_trees());
+        }
+        assert_eq!(
+            ModelArch::from_gguf_arch("gemma3").block_tree_features(),
+            None
+        );
+        assert_eq!(ModelArch::Qwen3Next.block_tree_features(), None);
+    }
 
     /// `NAMED` lists every variant: adding one breaks this match until it has
     /// a slot, and the slot must be its place in `NAMED`.

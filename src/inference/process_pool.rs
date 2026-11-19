@@ -12723,12 +12723,13 @@ impl ModelProcessPool {
     /// which this node's worker holds (`DaemonMsg::BlockDraft`, #428 stage 3),
     /// after it takes in `rows` — the bytes of `d.rows`, in order. Asked only
     /// of a live worker: a guess never loads a model. Empty where `d.gamma` is
-    /// 0; an error ends the drafter for the reply.
+    /// 0; a tree's shape beside its tokens where `d.tree` asked one (#437); an
+    /// error ends the drafter for the reply.
     pub async fn block_draft(
         &self,
         d: crate::inference::worker_ipc::IpcBlockDraft,
         rows: &[u8],
-    ) -> Result<Vec<u32>, SwarmError> {
+    ) -> Result<crate::inference::worker_ipc::Drafted, SwarmError> {
         let model_id = d.model_id.clone();
         let request_id = d.request_id;
         let Some(handle) = self.live_worker(&model_id) else {
@@ -12756,12 +12757,19 @@ impl ModelProcessPool {
                     WorkerMsg::Drafted {
                         request_id: rid,
                         tokens,
-                        ..
+                        parents,
+                        scores,
+                        runner_ups,
                     },
                     _,
                 )) if rid == request_id => {
                     guard.disarm();
-                    return Ok(tokens);
+                    return Ok(crate::inference::worker_ipc::Drafted {
+                        tokens,
+                        parents,
+                        scores,
+                        runner_ups,
+                    });
                 }
                 Some((
                     WorkerMsg::Error {

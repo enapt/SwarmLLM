@@ -835,6 +835,26 @@ impl PipelineExecutor {
         // truncate_kv_to=Some(valid_pos) so the worker rewinds its KV
         // before applying the new tokens. Mirrors DSD's pattern.
         let mut pending_truncate: Option<u32> = None;
+        // A tree of guesses from the block drafter's marginals (#437): only
+        // for a family whose layers read one, where every peer segment
+        // advertises what that needs (`ModelArch::block_tree_features`) and
+        // the tail walks it. Its rounds are DSD's (`dsd_tree::TreeRounds`):
+        // the check priced row by row, the kept path's tokens past the rows
+        // in place read again by the next check, whatever it guesses. A/B
+        // `SWARMLLM_BLOCK_TREE=0`.
+        let mut trees = block
+            .as_ref()
+            .filter(|b| b.block.is_some() && super::block_draft::block_trees_on())
+            .and_then(|_| self.shared_state.gguf_meta_for(&self.request.model_id))
+            .and_then(|m| {
+                crate::inference::model_arch::ModelArch::from_gguf_arch(&m.architecture)
+                    .block_tree_features()
+            })
+            .filter(|&needs| {
+                super::tree_check_possible(&self.shared_state, &self.assignment.segments, needs)
+            })
+            .map(|_| super::dsd_tree::TreeRounds::new());
+        let trees_planned = trees.is_some();
 
         while finish_reason.is_empty() && (generated.len() as u32) < max_tokens {
             if self.request.is_cancelled() {
@@ -843,6 +863,9 @@ impl PipelineExecutor {
             }
             let remaining = max_tokens - generated.len() as u32;
             let this_gamma = max_draft.min(remaining).max(1);
+            // Kept tokens a tree check left out of place: this round's check
+            // reads them again, whatever it guesses (#437).
+            let rereading = trees.as_ref().is_some_and(|t| !t.reread.is_empty());
 
             // ── The requester's guesses, then the n-gram cascade ──
             let take = guess_gamma.min(remaining);
@@ -918,6 +941,10 @@ impl PipelineExecutor {
             // stay where they are.
             let mut from_block = false;
             let mut from_head = false;
+            // The block's guesses as a tree (#437), and the trunk it was
+            // asked for: a tree is judged as the chain it was grown on.
+            let mut block_tree: Option<crate::inference::draft_tree::GrownTree> = None;
+            let mut trunk = 0u32;
             let drafts = match block.as_mut() {
                 Some(b) => {
                     let ask = if drafts.is_empty() && super::checks_can_be_taken_back(self) {
@@ -925,23 +952,34 @@ impl PipelineExecutor {
                     } else {
                         (super::block_draft::By::Block, 0)
                     };
+                    // As many guesses as one check carries beside the rows it
+                    // reads again and its own last token.
+                    let tree_nodes = trees.as_ref().map_or(0, |t| {
+                        super::block_draft::BLOCK_TREE_MOST_ROWS.saturating_sub(t.reread.len() + 1)
+                            as u32
+                    });
                     match b
                         .round(
                             self,
                             current_pos,
                             last_token,
                             ask,
+                            tree_nodes,
                             &prompt_tokens,
                             &generated,
                         )
                         .await
                     {
                         Ok(guesses) if drafts.is_empty() => {
-                            from_block =
-                                !guesses.is_empty() && ask.0 == super::block_draft::By::Block;
+                            from_block = !guesses.tokens.is_empty()
+                                && ask.0 == super::block_draft::By::Block;
                             from_head =
-                                !guesses.is_empty() && ask.0 == super::block_draft::By::Head;
-                            guesses
+                                !guesses.tokens.is_empty() && ask.0 == super::block_draft::By::Head;
+                            if from_block {
+                                trunk = ask.1;
+                                block_tree = guesses.tree;
+                            }
+                            guesses.tokens
                         }
                         Ok(_) => drafts,
                         Err(e) => {
@@ -966,7 +1004,7 @@ impl PipelineExecutor {
             // cuts this node's caches back to where the reply is.
             let mut from_far_run = false;
             let drafts = match far_run.as_mut() {
-                Some(g) if drafts.is_empty() && g.gamma > 0 => {
+                Some(g) if drafts.is_empty() && g.gamma > 0 && !rereading => {
                     let take = g.gamma.min(remaining);
                     match g.guess(self, current_pos, last_token, take).await {
                         Ok(guesses) => {
@@ -984,7 +1022,7 @@ impl PipelineExecutor {
                 _ => drafts,
             };
 
-            if drafts.is_empty() {
+            if drafts.is_empty() && !rereading {
                 // ── Fallback: single-token verify (γ=0 batch = 1 position) ──
                 fallback_rounds += 1;
                 // R137: bump lifetime miss counter for /api/admin/stats →
@@ -1098,6 +1136,9 @@ impl PipelineExecutor {
                     g.rounds += 1;
                     g.guessed += drafts.len() as u32;
                 }
+            } else if drafts.is_empty() {
+                // Only kept tokens read again (#437): one token, as a miss.
+                fallback_rounds += 1;
             } else {
                 ngram_rounds += 1;
                 // R137: bump lifetime hit counter (counts hit-rounds, not
@@ -1107,9 +1148,48 @@ impl PipelineExecutor {
                     .ngram_hits
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
-            let mut verify_tokens: Vec<u32> = Vec::with_capacity(drafts.len() + 1);
-            verify_tokens.push(last_token);
-            verify_tokens.extend_from_slice(&drafts);
+            // A TREE check where the block grew one or kept tokens wait to be
+            // read again (#437): those rows, the last token, then the guesses
+            // worth their row (`TreeRounds::check`, priced by this reply's
+            // checks). Otherwise a chain: the last token, then every guess.
+            // Another guesser's chain is held to the rows the tree's check may
+            // carry beside the tokens read again, and rated by nobody.
+            let tree_check = match trees.as_ref() {
+                Some(t) if block_tree.is_some() || rereading => {
+                    let fit = check_cost.fit();
+                    Some(match block_tree.take() {
+                        Some(grown) => t.check(last_token, &grown, fit, remaining as usize)?,
+                        None => {
+                            let room = super::block_draft::BLOCK_TREE_MOST_ROWS
+                                .saturating_sub(t.reread.len() + 1);
+                            let chain = crate::inference::draft_tree::GrownTree::chain(
+                                &drafts[..drafts.len().min(room)],
+                            );
+                            t.check(last_token, &chain, fit, remaining as usize)?
+                                .not_rated()
+                        }
+                    })
+                }
+                _ => None,
+            };
+            let reread_len = trees.as_ref().map_or(0, |t| t.reread.len());
+            let (verify_tokens, index_pos, sent, parents): (Vec<u32>, usize, &[u32], &[u16]) =
+                match &tree_check {
+                    Some(c) => (
+                        c.verify_tokens.clone(),
+                        current_pos - reread_len,
+                        &c.guesses,
+                        &c.parents,
+                    ),
+                    None => (
+                        std::iter::once(last_token)
+                            .chain(drafts.iter().copied())
+                            .collect(),
+                        current_pos,
+                        &drafts,
+                        &[],
+                    ),
+                };
 
             let truncate_for_this_round = pending_truncate.take();
             let checked_at = std::time::Instant::now();
@@ -1117,35 +1197,73 @@ impl PipelineExecutor {
                 &self.shared_state,
                 &self.network_tx,
                 request_id,
-                current_pos as u32,
+                index_pos as u32,
                 &self.assignment.segments,
                 &verify_tokens,
                 truncate_for_this_round,
                 Some(super::TailWalk {
-                    drafts: &drafts,
+                    drafts: sent,
                     sampling: &self.request.sampling_params,
                     generated: &generated,
                     coupling: noise.map(|n| n.seed()),
-                    parents: &[],
+                    parents,
                 }),
                 super::worker_requester(&self.request),
                 self.verify_may_chain(),
                 &mut self.chaining_disabled,
                 self.block_rows.as_ref(),
             )
-            .await?;
+            .await;
             let check_ms = checked_at.elapsed().as_secs_f64() * 1000.0;
-            let (accepted, bonus, _all) = match reply.accept(
-                &drafts,
-                &self.request.sampling_params,
-                &generated,
-                noise.as_ref().map(|n| (n, current_pos as u64 + 1)),
-            ) {
-                Ok(decided) => decided,
-                Err(e) => {
-                    tracing::warn!(%request_id, error = %e, "ngram-only: unusable verify reply");
-                    return Err(e);
+            let reply = match reply {
+                // A segment whose layers cannot read a tree refuses before it
+                // runs anything (`model_worker::draft_tree_to_apply`). With
+                // nothing waiting to be read again, the reply goes on in
+                // chains, every segment cut back to where it was — those
+                // before the refusal read the tree.
+                Err(SwarmError::Validation(why)) if tree_check.is_some() && reread_len == 0 => {
+                    tracing::warn!(
+                        %request_id,
+                        reason = %why,
+                        "ngram-only: a segment cannot check a tree of guesses — checking chains for the rest of the reply"
+                    );
+                    trees = None;
+                    pending_truncate = Some(current_pos as u32);
+                    // The block's round is drafted again in a chain: not
+                    // counted twice.
+                    block_rounds = block_rounds.saturating_sub(1);
+                    block_guessed = block_guessed.saturating_sub(drafts.len() as u32);
+                    continue;
                 }
+                other => other?,
+            };
+            // A tree's verdict is read against the tree it went out in; it
+            // says which of the forward's rows the reply now holds and how
+            // many sit in place.
+            let (accepted, bonus, settled) = match (&tree_check, trees.as_mut()) {
+                (Some(c), Some(t)) => {
+                    let super::VerifyReply::Walked(walked) = reply else {
+                        return Err(SwarmError::Inference(
+                            "tree check: the last segment answered logits, not a walk".into(),
+                        ));
+                    };
+                    let o = t.settle(c, &walked).inspect_err(|e| {
+                        tracing::warn!(%request_id, error = %e, "ngram-only: unusable tree check reply");
+                    })?;
+                    (o.kept, o.next, Some((o.rows_kept, o.rows_in_place)))
+                }
+                _ => match reply.accept(
+                    &drafts,
+                    &self.request.sampling_params,
+                    &generated,
+                    noise.as_ref().map(|n| (n, current_pos as u64 + 1)),
+                ) {
+                    Ok((accepted, bonus, _all)) => (accepted, bonus, None),
+                    Err(e) => {
+                        tracing::warn!(%request_id, error = %e, "ngram-only: unusable verify reply");
+                        return Err(e);
+                    }
+                },
             };
             let emitted = super::round_tokens_for_reply(
                 &accepted,
@@ -1153,14 +1271,16 @@ impl PipelineExecutor {
                 &eos_tokens,
                 (max_tokens as usize).saturating_sub(generated.len()),
             );
+            // Judged by the guesses SENT: a tree check sends those worth a row.
+            let sent = sent.len() as u32;
             if from_requester {
                 guesses_kept += accepted.len() as u32;
-                guess_acceptance.record(accepted.len() as u32, drafts.len() as u32);
+                guess_acceptance.record(accepted.len() as u32, sent);
             } else if from_block || from_head {
                 use super::block_draft::By;
                 let by = if from_head {
                     head_kept += accepted.len() as u32;
-                    if !drafts.is_empty() && accepted.len() >= drafts.len() {
+                    if sent > 0 && accepted.len() as u32 >= sent {
                         head_all_kept += 1;
                     }
                     By::Head
@@ -1168,24 +1288,26 @@ impl PipelineExecutor {
                     block_kept += accepted.len() as u32;
                     By::Block
                 };
+                // A tree is judged as the chain it was grown on — how far
+                // along a trunk of that length the reply went — so the block's
+                // choice of chain length reads what a chain would have read
+                // there, and the tree's own gain shows in what it wrote.
+                let (kept_of, guessed_of) = if settled.is_some() && by == By::Block {
+                    ((accepted.len() as u32).min(trunk), trunk)
+                } else {
+                    (accepted.len() as u32, sent)
+                };
                 if let Some(b) = block.as_mut() {
-                    b.record_round(
-                        by,
-                        accepted.len() as u32,
-                        drafts.len() as u32,
-                        emitted.len(),
-                        check_ms,
-                    );
+                    b.record_round(by, kept_of, guessed_of, emitted.len(), check_ms);
                 }
             } else if from_far_run {
                 if let Some(g) = far_run.as_mut() {
                     g.kept += accepted.len() as u32;
-                    g.acceptance
-                        .record(accepted.len() as u32, drafts.len() as u32);
+                    g.acceptance.record(accepted.len() as u32, sent);
                 }
             } else if from_earlier {
                 earlier_rounds += 1;
-                earlier_checked += drafts.len() as u32;
+                earlier_checked += sent;
                 earlier_kept += accepted.len() as u32;
             }
             if let Some(b) = block.as_mut() {
@@ -1225,6 +1347,26 @@ impl PipelineExecutor {
                 b.reply_committed(current_pos + 1, &emitted, generated.len());
             }
             self.block_drafter_set_aside(&mut block, generated.len());
+            if let Some((rows_kept, rows_in_place)) = settled {
+                // The block drafter reads the kept path's rows as the reply's
+                // positions; the segments before the walk answered every row.
+                if let Some(ask) = self.block_rows.as_ref() {
+                    ask.keep_the_path(index_pos as u32, verify_tokens.len(), &rows_kept);
+                }
+                // Every segment's cache holds the rows before the guesses and
+                // the kept path's that sit in place after them; the rest is
+                // cut by the next check, which reads the tokens past them
+                // again (`TreeRounds::reread`).
+                let kv_after = index_pos + verify_tokens.len();
+                let in_cache = index_pos + rows_in_place;
+                pending_truncate = (in_cache < kv_after).then_some(in_cache as u32);
+                current_pos += emitted.len();
+                last_token = *emitted.last().unwrap_or(&last_token);
+                if (generated.len() as u32) >= max_tokens {
+                    finish_reason = "length".into();
+                }
+                continue;
+            }
             // Remote KV grew by verify_tokens.len() positions. If we
             // partially rejected (emitted.len() < verify_tokens.len()),
             // the trailing rejected positions hold incorrect content
@@ -1289,6 +1431,12 @@ impl PipelineExecutor {
             far_run_gamma = far_run.as_ref().map_or(0, |g| g.gamma),
             far_run_ms_each = ?far_run.as_ref().and_then(|g| g.ms_each.median()).map(|m| (m * 10.0).round() / 10.0),
             block_drafter = block_planned,
+            block_trees = trees_planned,
+            block_trees_refused = trees_planned && trees.is_none(),
+            block_tree_rounds = trees.as_ref().map_or(0, |t| t.rounds),
+            block_tree_sent = trees.as_ref().map_or(0, |t| t.guesses_sent),
+            block_tree_kept = trees.as_ref().map_or(0, |t| t.guesses_kept),
+            block_tree_rows = trees.as_ref().map_or(0, |t| t.rows_carried),
             block_stopped = block_planned && !block.as_ref().is_some_and(|b| b.block.is_some()),
             block_rounds,
             block_guessed,

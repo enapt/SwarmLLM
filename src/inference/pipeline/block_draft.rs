@@ -23,6 +23,20 @@ use super::PipelineExecutor;
 /// last 64 (#428 stage 1, `SWARMLLM_GUESS_TEST_CONTEXT`).
 pub(crate) const PROMPT_WINDOW: u32 = 64;
 
+/// The most rows a check of a tree from the block carries — the rows it
+/// reads again and its own last token included: what a recurrent layer reads
+/// in one forward (`SsmState::MOST_ROWS_KEPT`, #437) and a check's bound on
+/// the wire.
+pub(crate) const BLOCK_TREE_MOST_ROWS: usize = crate::inference::layers::SsmState::MOST_ROWS_KEPT;
+
+/// May a reply whose family reads trees check one grown from the block
+/// drafter's marginals (#437)? On by default; `SWARMLLM_BLOCK_TREE=0` checks
+/// the block's chain alone, the A/B inside one binary. Read once.
+pub(crate) fn block_trees_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SWARMLLM_BLOCK_TREE").as_deref() != Ok("0"))
+}
+
 /// What a reply that drafts by block asks of its segments, and the rows they
 /// sent that the drafter has not yet taken in.
 pub(crate) struct BlockRowsAsk {
@@ -99,6 +113,88 @@ impl BlockRowsAsk {
             .lock()
             .map(|mut got| std::mem::take(&mut *got))
             .unwrap_or_default()
+    }
+
+    /// A tree check's rows read as the positions the reply kept (#437): its
+    /// forward of `tree_rows` rows at `from` kept `path` (ascending rows: every
+    /// row before the guesses, then the kept path's,
+    /// `dsd_tree::TreeOutcome::rows_kept`), which the drafter reads as the
+    /// positions `from..from + path.len()`. A segment that ran before the walk
+    /// answered every row, and keeps only the path's, in order; the walking
+    /// tail answered the path already (`sampling::rows_a_walk_kept`) and
+    /// stays; any other answer from `from` is dropped — the drafter then finds
+    /// a gap and stops for the reply rather than read a branch's row as the
+    /// reply's.
+    pub(super) fn keep_the_path(&self, from: u32, tree_rows: usize, path: &[usize]) {
+        let Ok(mut got) = self.got.lock() else {
+            return;
+        };
+        let hidden = self.hidden;
+        let tree_end = from.saturating_add(tree_rows as u32);
+        got.retain_mut(|rows| {
+            // Rows starting inside the tree are its last rows caught alone:
+            // tree rows, never the reply's positions.
+            if rows.from != from {
+                return !(from < rows.from && rows.from < tree_end);
+            }
+            let row_bytes = rows.layers.len() * hidden * 2;
+            if row_bytes == 0 || !rows.data.len().is_multiple_of(row_bytes) {
+                return false;
+            }
+            let n = rows.data.len() / row_bytes;
+            if n == path.len() {
+                return true;
+            }
+            if n != tree_rows || path.iter().any(|&r| r >= n) {
+                return false;
+            }
+            rows.data = path
+                .iter()
+                .flat_map(|&r| {
+                    rows.data[r * row_bytes..(r + 1) * row_bytes]
+                        .iter()
+                        .copied()
+                })
+                .collect();
+            true
+        });
+    }
+}
+
+/// A round's guesses: a chain, or a tree's (#437) with its shape.
+pub(super) struct Guesses {
+    pub tokens: Vec<u32>,
+    /// The tree they are, where one was asked and grown; `None` for a chain.
+    pub tree: Option<crate::inference::draft_tree::GrownTree>,
+}
+
+impl Guesses {
+    /// The drafter's answer read: a tree's parents (0 follows the token
+    /// drafted after, k follows guess k - 1) and ratings, one a guess, where
+    /// it sent a shape — refused where they disagree in length.
+    fn read(d: crate::inference::worker_ipc::Drafted) -> Result<Self, SwarmError> {
+        if d.parents.is_empty() {
+            return Ok(Self {
+                tokens: d.tokens,
+                tree: None,
+            });
+        }
+        if d.parents.len() != d.tokens.len() || d.scores.len() != d.tokens.len() {
+            return Err(SwarmError::Internal(format!(
+                "the block drafter grew {} guesses with {} parents and {} ratings",
+                d.tokens.len(),
+                d.parents.len(),
+                d.scores.len()
+            )));
+        }
+        Ok(Self {
+            tokens: d.tokens.clone(),
+            tree: Some(crate::inference::draft_tree::GrownTree {
+                parents: d.parents.iter().map(|&w| w.checked_sub(1)).collect(),
+                tokens: d.tokens,
+                path_logp: d.scores,
+            }),
+        })
     }
 }
 
@@ -618,16 +714,20 @@ impl SplitBlockDrafter {
     /// ([`Self::gamma`]'s answer). `gamma` 0 only keeps the guessers' rows
     /// level with the reply. An error ends the guesser asked for the reply.
     /// `prompt` and `generated` are the conversation's words so far; the
-    /// worker is told those it has not been.
+    /// worker is told those it has not been. `tree` asks the block for a
+    /// tree of at most that many guesses (#437), its `gamma` picks the trunk;
+    /// 0 a chain.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn round(
         &mut self,
         exec: &PipelineExecutor,
         upto: usize,
         token: u32,
         (by, gamma): (By, u32),
+        tree: u32,
         prompt: &[u32],
         generated: &[u32],
-    ) -> Result<Vec<u32>, SwarmError> {
+    ) -> Result<Guesses, SwarmError> {
         let words: Vec<u32> = prompt
             .iter()
             .chain(generated)
@@ -673,10 +773,16 @@ impl SplitBlockDrafter {
                     words,
                     by_head: by == By::Head,
                     block_aside: self.block_aside_for_the_worker(),
+                    tree: if by == By::Block && gamma > 0 {
+                        tree
+                    } else {
+                        0
+                    },
                 },
                 &payload,
             )
-            .await;
+            .await
+            .and_then(Guesses::read);
         self.calls += 1;
         let asked = (gamma > 0).then_some(by);
         let guesser = match asked {
@@ -689,10 +795,10 @@ impl SplitBlockDrafter {
             g.asked += 1;
         }
         match (&guessed, asked) {
-            (Ok(guesses), Some(by)) if !guesses.is_empty() => {
+            (Ok(guesses), Some(by)) if !guesses.tokens.is_empty() => {
                 let ms = started.elapsed().as_secs_f64() * 1000.0;
                 if let Some(g) = self.guesser_mut(by) {
-                    g.record_draft(guesses.len(), ms);
+                    g.record_draft(guesses.tokens.len(), ms);
                 }
             }
             (Ok(_), _) => {}
@@ -756,12 +862,13 @@ impl SplitBlockDrafter {
                     words: Vec::new(),
                     by_head: false,
                     block_aside: self.block_aside_for_the_worker(),
+                    tree: 0,
                 },
                 &[],
             )
             .await;
         self.calls += 1;
-        match guessed {
+        match guessed.map(|d| d.tokens) {
             Ok(guesses) if !guesses.is_empty() => {
                 let ms = started.elapsed().as_secs_f64() * 1000.0;
                 if let Some(g) = self.block.as_mut() {
@@ -1078,6 +1185,70 @@ mod tests {
         assert!(ask.take().is_empty(), "a layer twice");
         ask.keep(&answer(vec![17], 4), b, 0);
         assert!(ask.take().is_empty(), "a forward that asked for none");
+    }
+
+    /// A tree check's rows (#437): a segment that ran before the walk sent
+    /// every row and keeps only the kept path's, in order; the walking tail's,
+    /// already the path, stays; an answer of any other length from the
+    /// check's first position goes, and rows from elsewhere are not touched.
+    #[test]
+    fn a_tree_checks_rows_are_cut_to_its_kept_path() {
+        let hidden = 2;
+        let ask = BlockRowsAsk::new(vec![1, 17], hidden);
+        // Row r of a layer carries r in every byte of it.
+        let answer = |layers: Vec<u32>, from: u32, rows: &[u8]| BlockRows {
+            data: rows
+                .iter()
+                .flat_map(|&r| std::iter::repeat_n(r, layers.len() * hidden * 2))
+                .collect(),
+            layers,
+            from,
+        };
+        let row_bytes = |rows: &BlockRows| rows.layers.len() * hidden * 2;
+        let rows_of = |rows: &BlockRows| -> Vec<u8> {
+            rows.data.chunks(row_bytes(rows)).map(|r| r[0]).collect()
+        };
+        // A tree of 6 rows at 40: the reply kept rows 0, 1, 3 and 4.
+        let path = [0, 1, 3, 4];
+        ask.keep(&answer(vec![1], 40, &[0, 1, 2, 3, 4, 5]), (0, 8), 6);
+        ask.keep(&answer(vec![17], 40, &[0, 1, 3, 4]), (8, 32), 6);
+        ask.keep(&answer(vec![17], 40, &[0, 1, 2]), (8, 32), 6);
+        ask.keep(&answer(vec![1], 30, &[7, 8, 9]), (0, 8), 6);
+        ask.keep(&answer(vec![1], 43, &[3, 4, 5]), (0, 8), 6);
+        ask.keep_the_path(40, 6, &path);
+        let got = ask.take();
+        assert_eq!(
+            got.len(),
+            3,
+            "neither length, or the tree's last rows alone, goes"
+        );
+        assert_eq!(rows_of(&got[0]), vec![0, 1, 3, 4], "gathered");
+        assert_eq!(rows_of(&got[1]), vec![0, 1, 3, 4], "the tail's stays");
+        assert_eq!((got[2].from, rows_of(&got[2])), (30, vec![7, 8, 9]));
+    }
+
+    /// The drafter's answer read (#437): a tree's wire parents (0 follows the
+    /// token drafted after, k guess k - 1) become the tree's, and a shape
+    /// that disagrees with its tokens in length is refused.
+    #[test]
+    fn a_block_drafters_tree_is_read_with_its_shape() {
+        let drafted = |parents: Vec<u16>, scores: Vec<f32>| crate::inference::worker_ipc::Drafted {
+            tokens: vec![10, 20, 21],
+            parents,
+            scores,
+            runner_ups: Vec::new(),
+        };
+        let chain = Guesses::read(drafted(Vec::new(), Vec::new())).unwrap();
+        assert_eq!((chain.tokens, chain.tree), (vec![10, 20, 21], None));
+        let tree = Guesses::read(drafted(vec![0, 1, 1], vec![-0.1, -0.6, -0.8]))
+            .unwrap()
+            .tree
+            .unwrap();
+        assert_eq!(tree.parents, vec![None, Some(0), Some(0)]);
+        assert_eq!(tree.tokens, vec![10, 20, 21]);
+        assert_eq!(tree.path_logp, vec![-0.1, -0.6, -0.8]);
+        assert!(Guesses::read(drafted(vec![0, 1], vec![-0.1, -0.6, -0.8])).is_err());
+        assert!(Guesses::read(drafted(vec![0, 1, 1], vec![-0.1])).is_err());
     }
 
     /// The rule before 2026-11-09 (`SWARMLLM_SPLIT_GUESS_PRICE=geometric`):

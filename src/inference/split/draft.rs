@@ -247,7 +247,7 @@ fn likeliest_indices(logits: &[f32], k: usize) -> Vec<usize> {
 }
 
 /// Each row's followers, likeliest first: (token, log-probability).
-type RankedRows = Vec<Vec<(u32, f32)>>;
+pub(super) type RankedRows = Vec<Vec<(u32, f32)>>;
 
 /// Each row's likeliest tokens for a coupled draw, best first, with raw scores.
 type RankedTopK = Vec<Vec<crate::inference::sampling::RankedToken>>;
@@ -293,6 +293,37 @@ fn likeliest_rows_where_they_are(
         }
     }
     likeliest_rows_composed(logits, temperature, k)
+}
+
+/// Each row of a `[rows, vocab]` logits tensor's `k` likeliest tokens at
+/// temperature 1, likeliest first, as (token, log-probability) — a tie to the
+/// smaller id, so a row's first is its greedy pick: on a card by its kernel
+/// ([`likeliest_rows_where_they_are`], as [`StepScores::read`] ranks a tree
+/// step's rows; `SWARMLLM_TREE_RANK=host` reads them back), elsewhere one
+/// pass of [`likeliest`] a row. What a block drafter's tree is grown from
+/// (#437, `draft_tree::GrownTree::from_marginals`). `None` where a row has
+/// nothing finite.
+pub(super) fn likeliest_rows(
+    logits: &candle_core::Tensor,
+    k: usize,
+) -> Result<Option<RankedRows>, SwarmError> {
+    if logits.device().is_cuda() && std::env::var("SWARMLLM_TREE_RANK").as_deref() != Ok("host") {
+        if let Some(ranked) = likeliest_rows_where_they_are(logits, 1.0, k)? {
+            return Ok(Some(ranked));
+        }
+    }
+    let rows: Vec<Vec<f32>> = logits
+        .to_dtype(candle_core::DType::F32)
+        .and_then(|t| t.to_vec2())
+        .map_err(SwarmError::internal)?;
+    Ok(likeliest_of_each(&rows, k))
+}
+
+/// [`likeliest`] of each row of a table read back to the host, at temperature
+/// 1; `None` where a row has nothing finite.
+pub(super) fn likeliest_of_each(rows: &[Vec<f32>], k: usize) -> Option<RankedRows> {
+    let ranked: RankedRows = rows.iter().map(|r| likeliest(r, 1.0, k, None)).collect();
+    (!ranked.iter().any(Vec::is_empty)).then_some(ranked)
 }
 
 /// [`likeliest_rows_where_they_are`] composed from candle ops: `k` picks of

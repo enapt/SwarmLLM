@@ -2097,6 +2097,61 @@ struct BlockRowsHere {
 /// `None` where it runs none of the asked layers, or where the forward's rows
 /// are not positions of the reply (`positions_are_the_replys`: no
 /// tensor-parallel phase, no tree of guesses).
+/// How deep a block drafter's tree is drafted past the chain's count (#437):
+/// `SWARMLLM_BLOCK_TREE_DEPTH` — `+N` (default `+1`) or `block` (every
+/// position the block holds).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum BlockTreeDepth {
+    PastTheChain(usize),
+    WholeBlock,
+}
+
+fn block_tree_depth() -> BlockTreeDepth {
+    static DEPTH: std::sync::OnceLock<BlockTreeDepth> = std::sync::OnceLock::new();
+    *DEPTH.get_or_init(
+        || match std::env::var("SWARMLLM_BLOCK_TREE_DEPTH").ok().as_deref() {
+            Some("block") => BlockTreeDepth::WholeBlock,
+            Some(v) => v.trim_start_matches('+').parse().map_or(
+                BlockTreeDepth::PastTheChain(1),
+                BlockTreeDepth::PastTheChain,
+            ),
+            None => BlockTreeDepth::PastTheChain(1),
+        },
+    )
+}
+
+/// The positions a block drafter's tree is drafted over (#437): the chain's
+/// own count `gamma` and one level past it, within the `most` the block
+/// holds. A drafter's forward costs what its positions do where it runs on
+/// a processor (the rig, 2026-11-19: a tree over the whole block of 16 drew
+/// in 70-131 ms against the chain's 31-41, and lost what its extra kept
+/// guesses gained), while the check's pricing sends a tree of about the
+/// chain's depth; so the tree's width goes to the depths the chain already
+/// found worth drafting (Sequoia sizes a tree by what the hardware pays a
+/// row; DDTree drafts the whole block where a card pays about the same).
+fn block_tree_positions(gamma: usize, most: usize, depth: BlockTreeDepth) -> usize {
+    match depth {
+        BlockTreeDepth::PastTheChain(past) => gamma.saturating_add(past).min(most),
+        BlockTreeDepth::WholeBlock => most,
+    }
+}
+
+/// Whether a forward's rows are the reply's own positions, read by a block
+/// drafter as such (#428 stage 3): never a tensor-parallel rank's (a slice of
+/// each row); a tree's only where this forward holds it WHOLE (#437) — the
+/// tail that walks it answers its kept path's rows (`sampling::rows_a_walk_kept`),
+/// a segment before it every row, of which the coordinator keeps the path's
+/// (`BlockRowsAsk::keep_the_path`). Not a tree grown over earlier forwards,
+/// nor one that flows (a draw a row, no path walked).
+fn rows_are_the_replys(
+    tensor_parallel: bool,
+    tree_rows: Option<usize>,
+    positions: usize,
+    draws_each_row: bool,
+) -> bool {
+    !tensor_parallel && !draws_each_row && tree_rows.is_none_or(|rows| rows == positions)
+}
+
 fn block_rows_here(
     wanted: Option<&crate::types::BlockRowsWanted>,
     layers: std::ops::Range<usize>,
@@ -2124,15 +2179,16 @@ fn block_rows_here(
 /// A segment's rows of a block drafter's layers as they travel (#428 stage
 /// 3): little-endian bf16 `[rows, layers × hidden]`, the layers joined in
 /// `layers`' order. `caught` holds each layer's LAST rows of a forward of
-/// `positions` at `index_pos`; `kept` takes only the first that many — a
+/// `positions` at `index_pos`; `kept` takes only those rows, in order — a
 /// check walked here answers only the positions it kept, which it caught
-/// whole.
+/// whole: a chain's first rows, a tree's along its kept path (#437), read
+/// from `index_pos` on as consecutive positions.
 fn block_rows_from(
     caught: &HashMap<usize, candle_core::Tensor>,
     layers: &[u32],
     index_pos: u32,
     positions: usize,
-    kept: Option<usize>,
+    kept: Option<&[usize]>,
 ) -> Result<crate::types::BlockRows, String> {
     let fail = |e: candle_core::Error| e.to_string();
     let mut parts = Vec::with_capacity(layers.len());
@@ -2147,14 +2203,26 @@ fn block_rows_from(
     let first = positions
         .checked_sub(rows)
         .ok_or_else(|| format!("{rows} rows kept of a forward of {positions}"))?;
-    let take = match kept {
+    let taken = match kept {
         Some(_) if first != 0 => return Err("a walked check's rows were not kept whole".into()),
-        Some(n) => n.min(rows),
-        None => rows,
+        Some(kept) if kept.iter().any(|&r| r >= rows) => {
+            return Err(format!("a walk kept a row past the {rows} caught"))
+        }
+        // A chain keeps a run from the first row: a cut, no copy.
+        Some(kept) if kept.iter().enumerate().all(|(i, &r)| r == i) => {
+            joined.narrow(0, 0, kept.len()).map_err(fail)?
+        }
+        Some(kept) => {
+            let at: Vec<u32> = kept.iter().map(|&r| r as u32).collect();
+            candle_core::Tensor::new(at.as_slice(), joined.device())
+                .and_then(|at| joined.index_select(&at, 0))
+                .map_err(fail)?
+        }
+        None => joined,
     };
-    let values: Vec<half::bf16> = joined
-        .narrow(0, 0, take)
-        .and_then(|t| t.to_dtype(candle_core::DType::BF16))
+    let take = taken.dim(0).map_err(fail)?;
+    let values: Vec<half::bf16> = taken
+        .to_dtype(candle_core::DType::BF16)
         .and_then(|t| t.flatten_all())
         .and_then(|t| t.to_vec1())
         .map_err(fail)?;
@@ -2665,7 +2733,12 @@ async fn handle_forward(
         fwd.block_rows_wanted.as_ref(),
         layer_start..layer_end,
         model.hidden_dim,
-        tp_meta.is_none() && draft_tree.is_none(),
+        rows_are_the_replys(
+            tp_meta.is_some(),
+            draft_tree.as_ref().map(|tree| tree.len()),
+            input_positions,
+            draws_each_row,
+        ),
     );
     let rows_capture = rows_here
         .as_ref()
@@ -3188,9 +3261,28 @@ async fn handle_forward(
 
     let mut result = compute_result.map_err(SwarmError::Internal)?;
     if let (Some(here), Some(caught)) = (rows_here.as_ref(), block_caught.into_inner()) {
-        // A check walked here answers only the positions it kept.
-        let kept = (want_spec_output && fwd.spec_walk_at_tail).then_some(result.token_ids.len());
-        match block_rows_from(&caught, &here.layers, fwd.index_pos, input_positions, kept) {
+        // A check walked here answers only the positions it kept — a tree's
+        // along its kept path, in order (#437). A tree that flows is answered
+        // a draw a row, and the drafter that reads rows never flows.
+        let kept = (want_spec_output && fwd.spec_walk_at_tail && !draws_each_row)
+            .then(|| {
+                crate::inference::sampling::rows_a_walk_kept(
+                    draft_tree.as_ref(),
+                    &fwd.draft_tokens,
+                    input_positions,
+                    &result.token_ids,
+                )
+            })
+            .transpose();
+        match kept.and_then(|kept| {
+            block_rows_from(
+                &caught,
+                &here.layers,
+                fwd.index_pos,
+                input_positions,
+                kept.as_deref(),
+            )
+        }) {
             Ok(rows) => result.block_rows = Some(rows),
             // The reply is whole without them: the coordinator stops drafting
             // by block for it.
@@ -5158,8 +5250,8 @@ impl BlockGuesses {
     }
 
     /// Up to `gamma` guesses after `next_token`, the token at `index_pos`:
-    /// the waiting rows taken in (all but the last piece on their own), then
-    /// one forward of the block.
+    /// the waiting rows taken in ([`Self::catch_up`]), then one forward of
+    /// the block.
     fn guesses(
         &mut self,
         model: &crate::inference::split::SplitModel,
@@ -5168,25 +5260,8 @@ impl BlockGuesses {
         gamma: usize,
         over: crate::inference::split::GuessOver<'_>,
     ) -> Result<Vec<u32>, SwarmError> {
-        if self.next_pos != index_pos {
-            return Err(SwarmError::Internal(format!(
-                "block drafter: rows end at {} but the reply is at {index_pos}",
-                self.next_pos
-            )));
-        }
-        let drafter = model
-            .block_drafter()
-            .ok_or_else(|| SwarmError::Internal("block drafter: none attached".into()))?;
-        let chunk = crate::inference::split::BLOCK_CATCH_UP_CHUNK;
-        for piece in join_row_pieces(std::mem::take(&mut self.raw), chunk)? {
-            self.waiting.push(drafter.context_rows(&piece)?);
-        }
-        let mut waiting = std::mem::take(&mut self.waiting);
-        let last = waiting.pop();
-        for piece in &waiting {
-            drafter.take_in(&mut self.cache, piece, self.kv_reserve, self.for_the_owner)?;
-        }
-        drafter.draft(
+        let last = self.catch_up(model, index_pos)?;
+        attached_block_drafter(model)?.draft(
             model,
             &mut self.cache,
             last.as_ref(),
@@ -5197,6 +5272,69 @@ impl BlockGuesses {
             over,
         )
     }
+
+    /// [`Self::guesses`]' forward over `positions` guesses, each answered
+    /// with its `k` likeliest words, likeliest first
+    /// (`BlockDrafter::draft_ranked`) — what a tree of guesses is grown from
+    /// (#437).
+    fn ranked(
+        &mut self,
+        model: &crate::inference::split::SplitModel,
+        next_token: u32,
+        index_pos: usize,
+        positions: usize,
+        over: crate::inference::split::GuessOver<'_>,
+        k: usize,
+    ) -> Result<Vec<Vec<(u32, f32)>>, SwarmError> {
+        let last = self.catch_up(model, index_pos)?;
+        attached_block_drafter(model)?.draft_ranked(
+            model,
+            &mut self.cache,
+            last.as_ref(),
+            next_token,
+            positions,
+            self.kv_reserve,
+            self.for_the_owner,
+            over,
+            k,
+        )
+    }
+
+    /// The waiting rows taken in, all but the last piece on their own — that
+    /// one is handed back for the draft's own forward — once they end where
+    /// the reply is (`index_pos`).
+    fn catch_up(
+        &mut self,
+        model: &crate::inference::split::SplitModel,
+        index_pos: usize,
+    ) -> Result<Option<candle_core::Tensor>, SwarmError> {
+        if self.next_pos != index_pos {
+            return Err(SwarmError::Internal(format!(
+                "block drafter: rows end at {} but the reply is at {index_pos}",
+                self.next_pos
+            )));
+        }
+        let drafter = attached_block_drafter(model)?;
+        let chunk = crate::inference::split::BLOCK_CATCH_UP_CHUNK;
+        for piece in join_row_pieces(std::mem::take(&mut self.raw), chunk)? {
+            self.waiting.push(drafter.context_rows(&piece)?);
+        }
+        let mut waiting = std::mem::take(&mut self.waiting);
+        let last = waiting.pop();
+        for piece in &waiting {
+            drafter.take_in(&mut self.cache, piece, self.kv_reserve, self.for_the_owner)?;
+        }
+        Ok(last)
+    }
+}
+
+/// The block drafter `model` carries, or the error a guess without one is.
+fn attached_block_drafter(
+    model: &crate::inference::split::SplitModel,
+) -> Result<&crate::inference::split::BlockDrafter, SwarmError> {
+    model
+        .block_drafter()
+        .ok_or_else(|| SwarmError::Internal("block drafter: none attached".into()))
 }
 
 /// Kept row pieces (each one tensor per capture layer, `[1, len, hidden]`, in
@@ -5702,6 +5840,10 @@ async fn handle_block_draft(
     })?;
     let req = d.request_id.to_string();
     let upto = d.upto as usize;
+    // A tree's shape beside its tokens (#437): each guess's parent in the
+    // drafter's wire form (0 follows `token`, k follows guess k - 1) and its
+    // path's log-probability. Empty for a chain.
+    let mut tree: (Vec<u16>, Vec<f32>) = Default::default();
     let guessed = tokio::task::block_in_place(|| -> Result<Vec<u32>, SwarmError> {
         if d.first {
             drafts.0.remove(&d.request_id);
@@ -5837,7 +5979,38 @@ async fn handle_block_draft(
             Some(w) if !w.whole => crate::inference::split::GuessOver::HotAnd(w.rows(model)?),
             _ => crate::inference::split::GuessOver::Everything,
         };
-        let guesses = match b.guesses(model, d.token, d.index_pos as usize, gamma, over) {
+        let guessed = if d.tree > 0 {
+            // A tree from the block's marginals over the positions it is worth
+            // drafting (`block_tree_positions`): its own picks for `gamma`
+            // kept whole, the rest best-first, within the rows one check may
+            // carry.
+            let nodes =
+                (d.tree as usize).min(crate::inference::layers::SsmState::MOST_ROWS_KEPT - 1);
+            b.ranked(
+                model,
+                d.token,
+                d.index_pos as usize,
+                block_tree_positions(gamma, b.most(model), block_tree_depth()),
+                over,
+                crate::inference::draft_tree::MARGINAL_WORDS,
+            )
+            .map(|ranked| {
+                let grown =
+                    crate::inference::draft_tree::GrownTree::from_marginals(&ranked, gamma, nodes);
+                tree = (
+                    grown
+                        .parents
+                        .iter()
+                        .map(|p| p.map_or(0, |p| p + 1))
+                        .collect(),
+                    grown.path_logp,
+                );
+                grown.tokens
+            })
+        } else {
+            b.guesses(model, d.token, d.index_pos as usize, gamma, over)
+        };
+        let guesses = match guessed {
             Ok(guesses) => guesses,
             Err(e) => {
                 b.stop(e.to_string());
@@ -5868,8 +6041,8 @@ async fn handle_block_draft(
         &WorkerMsg::Drafted {
             request_id: d.request_id,
             tokens: guessed,
-            parents: Vec::new(),
-            scores: Vec::new(),
+            parents: tree.0,
+            scores: tree.1,
             runner_ups: Vec::new(),
         },
         &[],
@@ -5880,7 +6053,9 @@ async fn handle_block_draft(
 
 #[cfg(test)]
 mod split_block_rows_tests {
-    use super::{block_rows_for_the_drafter, block_rows_from, block_rows_here};
+    use super::{
+        block_rows_for_the_drafter, block_rows_from, block_rows_here, rows_are_the_replys,
+    };
     use crate::inference::worker_ipc::IpcBlockRows;
     use crate::types::BlockRowsWanted;
     use candle_core::{Device, Tensor};
@@ -5922,7 +6097,7 @@ mod split_block_rows_tests {
         index_pos: usize,
         positions: usize,
         last: usize,
-        kept: Option<usize>,
+        kept: Option<&[usize]>,
     ) -> (IpcBlockRows, Vec<u8>) {
         let rows = block_rows_from(
             &caught(layers, index_pos, positions, last),
@@ -5955,6 +6130,48 @@ mod split_block_rows_tests {
     /// The asked layers this segment runs, in the ask's order and once each;
     /// none where it runs none, or the forward's rows are not the reply's
     /// positions; the rows held to what a result may carry.
+    /// A forward's rows reach a block drafter only where they are the reply's
+    /// positions (#437): a chain's; a tree read whole in this forward's (the
+    /// rig's first tree run sent none, so the drafter stopped at its first
+    /// tree round, 2026-11-19); never a tree grown over forwards, one that
+    /// flows, or a tensor-parallel rank's.
+    /// A block tree is drafted one level past the chain's count, never past
+    /// the block; the A/B drafts the whole block (#437).
+    #[test]
+    fn a_block_tree_is_drafted_one_level_past_the_chain() {
+        use super::{block_tree_positions, BlockTreeDepth};
+        assert_eq!(
+            block_tree_positions(5, 16, BlockTreeDepth::PastTheChain(1)),
+            6
+        );
+        assert_eq!(
+            block_tree_positions(16, 16, BlockTreeDepth::PastTheChain(1)),
+            16
+        );
+        assert_eq!(block_tree_positions(5, 16, BlockTreeDepth::WholeBlock), 16);
+    }
+
+    #[test]
+    fn a_trees_rows_are_the_replys_where_the_forward_holds_it_whole() {
+        assert!(rows_are_the_replys(false, None, 5, false), "a chain");
+        assert!(
+            rows_are_the_replys(false, Some(32), 32, false),
+            "a tree read whole"
+        );
+        assert!(
+            !rows_are_the_replys(false, Some(40), 8, false),
+            "a tree grown over forwards"
+        );
+        assert!(
+            !rows_are_the_replys(false, Some(8), 8, true),
+            "a tree that flows"
+        );
+        assert!(
+            !rows_are_the_replys(true, None, 5, false),
+            "a tensor-parallel rank"
+        );
+    }
+
     #[test]
     fn a_segment_keeps_only_the_asked_layers_it_runs_and_no_more_rows_than_a_result_carries() {
         let ask = BlockRowsWanted {
@@ -6003,14 +6220,35 @@ mod split_block_rows_tests {
             .collect();
         assert_eq!(back, want, "each row is its layers in the ask's order");
 
-        let (meta, bytes) = sent(&[8], 60, 5, 5, Some(2));
+        let (meta, bytes) = sent(&[8], 60, 5, 5, Some(&[0, 1]));
         assert_eq!(meta.from, 60);
         assert_eq!(bytes.len(), 2 * HIDDEN * 2);
         assert!(
-            block_rows_from(&caught(&[8], 60, 5, 3), &[8], 60, 5, Some(2)).is_err(),
+            block_rows_from(&caught(&[8], 60, 5, 3), &[8], 60, 5, Some(&[0, 1])).is_err(),
             "a walked check's rows are kept whole"
         );
         assert!(block_rows_from(&caught(&[8], 60, 5, 5), &[8, 1], 60, 5, None).is_err());
+        assert!(
+            block_rows_from(&caught(&[8], 60, 5, 5), &[8], 60, 5, Some(&[0, 5])).is_err(),
+            "a kept row past those caught"
+        );
+    }
+
+    /// A tree check's walking tail answers its KEPT path's rows, in order,
+    /// read from the forward's first position on as the reply's positions
+    /// (#437): rows 0, 2 and 4 of a five-row tree are the reply's 60-62.
+    #[test]
+    fn a_walked_trees_rows_are_its_kept_paths_in_order() {
+        let (meta, bytes) = sent(&[8], 60, 5, 5, Some(&[0, 2, 4]));
+        assert_eq!(meta.from, 60);
+        let back: Vec<f32> = bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| half::bf16::from_bits(u16::from_le_bytes(*b)).to_f32())
+            .collect();
+        let want: Vec<f32> = [60, 62, 64].into_iter().flat_map(|p| row(8, p)).collect();
+        assert_eq!(back, want);
     }
 
     /// The prompt's rows, then a check whose first segment sent every
@@ -6041,7 +6279,7 @@ mod split_block_rows_tests {
         // A check of 4 at 20 that kept 2: the first segment answered all 4.
         let check = [
             sent(&[1, 8], 20, 4, 4, None),
-            sent(&[30], 20, 4, 4, Some(2)),
+            sent(&[30], 20, 4, 4, Some(&[0, 1])),
         ];
         let (metas, payload) = joined(&check);
         let (start, kept) =

@@ -568,7 +568,11 @@ impl PipelineExecutor {
             && reads_trees(&self.request.model_id);
         let mut trees = super::dsd_tree::TreeRounds::new();
         let trees_from_the_start = trees_for_this_reply
-            && super::tree_check_possible(&self.shared_state, &self.assignment.segments);
+            && super::tree_check_possible(
+                &self.shared_state,
+                &self.assignment.segments,
+                swarmllm_types::node::features::DRAFT_TREES,
+            );
 
         // The continuous stream (`dsd_stream`): where the peers' segments are
         // one run between this node's — one peer, or a chain of them (#318) —
@@ -781,9 +785,17 @@ impl PipelineExecutor {
             if !trees.reread.is_empty()
                 || (trees_for_this_reply
                     && !trees.refused
-                    && super::tree_check_possible(&self.shared_state, &self.assignment.segments))
+                    && super::tree_check_possible(
+                        &self.shared_state,
+                        &self.assignment.segments,
+                        swarmllm_types::node::features::DRAFT_TREES,
+                    ))
             {
-                if !super::tree_check_possible(&self.shared_state, &self.assignment.segments) {
+                if !super::tree_check_possible(
+                    &self.shared_state,
+                    &self.assignment.segments,
+                    swarmllm_types::node::features::DRAFT_TREES,
+                ) {
                     return Err(SwarmError::Inference(
                         "the guesses this reply kept can no longer be checked: a segment stopped \
                          reading trees of guesses"

@@ -649,6 +649,14 @@ pub struct IpcBlockDraft {
     /// runs).
     #[serde(default)]
     pub block_aside: bool,
+    /// Guesses of a TREE, at most this many (#437): the block drafter's
+    /// marginals over every position its block holds, its own `gamma` picks
+    /// kept whole as the trunk and the rest spent best-first
+    /// (`draft_tree::GrownTree::from_marginals`); the reply's `parents` and
+    /// `scores` carry its shape. 0 asks a chain, as before; never asked of
+    /// the head (`by_head`).
+    #[serde(default)]
+    pub tree: u32,
 }
 
 /// Forward-pass result header.

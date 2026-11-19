@@ -565,7 +565,13 @@ pub(super) async fn forward_verify_through_segments(
     // the tail must walk it (`tree_check_possible`, which the caller asked
     // before growing one): refused here, before anything is sent, if not.
     let tree_parents: &[u16] = walk.map_or(&[], |w| w.parents);
-    if !tree_parents.is_empty() && !tree_check_possible(shared_state, segments) {
+    if !tree_parents.is_empty()
+        && !tree_check_possible(
+            shared_state,
+            segments,
+            swarmllm_types::node::features::DRAFT_TREES,
+        )
+    {
         return Err(SwarmError::Validation(
             "a tree of guesses was asked of segments that cannot all check one".into(),
         ));
@@ -941,25 +947,28 @@ pub(super) fn check_intermediate_activations(
 /// and the penalties' history. A peer with the walk bit is newer than both, but
 /// the three are asked together so no reading of this depends on that order.
 /// May a check of a tree of guesses (#134) go through these segments? Every
-/// peer's segment must read the tree (`features::DRAFT_TREES`) and the last
-/// must walk it — this node's own segments always can (this build). The one
-/// answer the round loop asks before growing a tree and
-/// `forward_verify_through_segments` asks before sending one; the family is
-/// asked separately (`ModelArch::reads_draft_trees`), and a segment whose
-/// layers still cannot read one refuses before it runs anything.
+/// peer's segment must advertise `needs` — what the model's family needs to
+/// read one (`features::DRAFT_TREES`; a block drafter's tree
+/// `ModelArch::block_tree_features`, `features::BLOCK_TREES` beside it, #437) — and the last must
+/// walk it; this node's own segments always can (this build). The one answer
+/// the round loops ask before growing a tree, with the family's needs, and
+/// `forward_verify_through_segments` asks before sending one, with the least
+/// any tree needs (it does not know the family); a segment whose layers still
+/// cannot read one refuses before it runs anything.
 pub(super) fn tree_check_possible(
     shared_state: &SharedState,
     segments: &[crate::types::PipelineSegment],
+    needs: u64,
 ) -> bool {
     let local = shared_state.identity.node_id();
     let Some(last) = segments.last() else {
         return false;
     };
-    segments.iter().all(|s| {
-        s.node_id == *local
-            || shared_state
-                .peer_advertises_feature(&s.node_id, swarmllm_types::node::features::DRAFT_TREES)
-    }) && (last.node_id == *local || peer_walks_at_tail(shared_state, &last.node_id))
+    let needs = needs | swarmllm_types::node::features::DRAFT_TREES;
+    segments
+        .iter()
+        .all(|s| s.node_id == *local || shared_state.peer_advertises_feature(&s.node_id, needs))
+        && (last.node_id == *local || peer_walks_at_tail(shared_state, &last.node_id))
 }
 
 /// Does every machine of this plan run its layers of `model_id` whole on a

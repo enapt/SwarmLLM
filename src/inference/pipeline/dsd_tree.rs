@@ -310,6 +310,17 @@ pub(super) struct TreeCheck {
     rated: f64,
 }
 
+impl TreeCheck {
+    /// A check of guesses no drafter rated — another guesser's chain sent as
+    /// a tree because kept tokens wait to be read again (#437): read back as
+    /// any other, but it teaches the calibration nothing, since its ratings
+    /// are stand-ins and the next tree is priced by it.
+    pub(super) fn not_rated(mut self) -> Self {
+        self.rated = 0.0;
+        self
+    }
+}
+
 /// What a walked tree check kept.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct TreeOutcome {
@@ -320,6 +331,10 @@ pub(super) struct TreeOutcome {
     /// Rows of the forward that stay in the cache: every row before the
     /// guesses, then the kept guesses that sit in place right after them.
     pub rows_in_place: usize,
+    /// The forward's rows the reply now holds, in order: every row before
+    /// the guesses, then the kept path's — what a block drafter reads as the
+    /// reply's positions (#437, `BlockRowsAsk::keep_the_path`).
+    pub rows_kept: Vec<usize>,
 }
 
 impl TreeRounds {
@@ -667,6 +682,7 @@ impl TreeRounds {
             kept: kept.to_vec(),
             next,
             rows_in_place: check.guessed_from + in_place,
+            rows_kept: (0..check.guessed_from).chain(rows).collect(),
         })
     }
 }
@@ -1037,5 +1053,23 @@ mod tests {
             .check(7, &grown(), Some((400.0, 60.0)), 100)
             .unwrap();
         assert!(priced.guesses.len() < fresh.guesses.len());
+    }
+
+    /// Another guesser's chain, checked as a tree because kept tokens wait to
+    /// be read again (#437), is read back but teaches the calibration nothing:
+    /// its ratings say every guess is sure, and the block's trees are priced
+    /// by what the calibration learned.
+    #[test]
+    fn a_chain_no_drafter_rated_leaves_the_calibration_alone() {
+        let chain = GrownTree::chain(&[10, 11, 12, 13]);
+        let mut rated = TreeRounds::new();
+        let c = rated.check(1, &chain, None, 64).unwrap();
+        rated.settle(&c, &[10, 99]).unwrap();
+        assert!(rated.calibration() < 0.9, "{}", rated.calibration());
+        let mut unrated = TreeRounds::new();
+        let c = unrated.check(1, &chain, None, 64).unwrap().not_rated();
+        let o = unrated.settle(&c, &[10, 99]).unwrap();
+        assert_eq!(unrated.calibration(), 1.0);
+        assert_eq!((o.kept, o.next), (vec![10], 99));
     }
 }

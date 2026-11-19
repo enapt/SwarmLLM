@@ -623,6 +623,39 @@ pub(crate) fn argmax_walk_tree(
     }
 }
 
+/// The rows of a walked check the reply now holds, in order (`walked`: the
+/// guesses kept, then the sample where the walk stopped — what
+/// [`argmax_walk_tree`] and [`walk_verified_tree`] answer): every row before
+/// the guesses, then each kept guess's row along the path. A chain's are its
+/// first `walked.len()` rows. What the tail answers a block drafter with
+/// (#437): a tree's kept path need not sit at consecutive rows, and the
+/// drafter reads the rows as the reply's positions.
+pub(crate) fn rows_a_walk_kept(
+    tree: Option<&crate::inference::draft_tree::DraftTree>,
+    drafts: &[u32],
+    rows: usize,
+    walked: &[u32],
+) -> Result<Vec<usize>, String> {
+    let Some(tree) = tree else {
+        if walked.len() > rows {
+            return Err(format!("spec walk: {} tokens of {rows} rows", walked.len()));
+        }
+        return Ok((0..walked.len()).collect());
+    };
+    let guessed_from = tree_guesses_from(tree, drafts.len(), rows)?;
+    let kept = walked.split_last().map_or(&[][..], |(_, kept)| kept);
+    let mut held: Vec<usize> = (0..guessed_from).collect();
+    let mut at = guessed_from - 1;
+    for &t in kept {
+        at = tree
+            .children(Some(at))
+            .find(|&c| c >= guessed_from && drafts[c - guessed_from] == t)
+            .ok_or_else(|| "spec walk: a kept token no row of the tree carries".to_string())?;
+        held.push(at);
+    }
+    Ok(held)
+}
+
 /// The first guessed row of a tree check of `rows` rows carrying `drafts`
 /// guesses, refused where no honest coordinator sends it: rows that are not
 /// the tree's, no row before the guesses, kept rows that are not a chain from
@@ -2366,6 +2399,19 @@ mod tree_walk_tests {
             crate::inference::draft_tree::kept_rows(&tree, 1, &tokens, &walked[..2]),
             Some(vec![2, 3])
         );
+        // And the tail answers a block drafter with those rows after the
+        // check's own (#437); a chain's are its first rows; a walk naming a
+        // token no row carries is refused.
+        assert_eq!(
+            rows_a_walk_kept(Some(&tree), &drafts, 5, &walked).unwrap(),
+            vec![0, 2, 3]
+        );
+        assert_eq!(
+            rows_a_walk_kept(None, &drafts, 5, &walked).unwrap(),
+            vec![0, 1, 2]
+        );
+        assert!(rows_a_walk_kept(Some(&tree), &drafts, 5, &[other(picks[0]), 7, 1]).is_err());
+        assert!(rows_a_walk_kept(None, &drafts, 2, &walked).is_err());
     }
 
     /// A tree that flows (#134 (b)): the tail answers each row's own draw and

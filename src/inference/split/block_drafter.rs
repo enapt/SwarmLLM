@@ -731,17 +731,76 @@ impl BlockDrafter {
         for_the_owner: bool,
         over: super::GuessOver<'_>,
     ) -> Result<Vec<u32>, SwarmError> {
+        self.paced(|| {
+            self.draft_unpaced(
+                target,
+                cache,
+                context,
+                anchor,
+                guesses,
+                kv_reserve,
+                for_the_owner,
+                over,
+            )
+        })
+    }
+
+    /// [`Self::draft`]'s forward, answered with each guess's `k` likeliest
+    /// words and their log-probabilities, likeliest first — a row's first is
+    /// the guess `draft` makes there (a tie to the smaller id on both). The
+    /// marginals a tree of guesses is grown from (#437: DDTree, arXiv
+    /// 2604.12989; `draft_tree::GrownTree::from_marginals`). Over the hot
+    /// rows and the reply's own words where `draft` reads them (#425 (b)); on
+    /// a card ranked there (`split::draft::likeliest_rows`), so only `k` pairs
+    /// a guess cross to the host. A guess with nothing finite stops the
+    /// drafter for the reply, as it does `draft`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn draft_ranked(
+        &self,
+        target: &SplitModel,
+        cache: &mut BlockCache,
+        context: Option<&Tensor>,
+        anchor: u32,
+        guesses: usize,
+        kv_reserve: usize,
+        for_the_owner: bool,
+        over: super::GuessOver<'_>,
+        k: usize,
+    ) -> Result<Vec<Vec<(u32, f32)>>, SwarmError> {
+        self.paced(|| {
+            let guesses = guesses.min(self.block_size - 1);
+            if guesses == 0 || k == 0 {
+                return Ok(Vec::new());
+            }
+            let out = self.block_rows(
+                target,
+                cache,
+                context,
+                anchor,
+                guesses,
+                kv_reserve,
+                for_the_owner,
+            )?;
+            let ranked =
+                if matches!(over, super::GuessOver::HotAnd(_)) && target.mtp_hot_rows().is_some() {
+                    target.mtp_ranked(&out, over, k)?
+                } else {
+                    let logits = self.block_logits(target, &out)?;
+                    let rows = logits
+                        .squeeze(0)
+                        .map_err(|e| SwarmError::Internal(format!("block drafter logits: {e}")))?;
+                    super::draft::likeliest_rows(&rows, k)?
+                };
+            ranked.ok_or_else(|| {
+                SwarmError::Internal("block drafter: a guess's scores are not finite".into())
+            })
+        })
+    }
+
+    /// `work` as one paced step (`inference::pace`, #440 step 4).
+    fn paced<T>(&self, work: impl FnOnce() -> T) -> T {
         let step = crate::inference::pace::Step::begin();
-        let out = self.draft_unpaced(
-            target,
-            cache,
-            context,
-            anchor,
-            guesses,
-            kv_reserve,
-            for_the_owner,
-            over,
-        );
+        let out = work();
         step.end(
             || {
                 let _ = self.device.synchronize();

@@ -603,6 +603,11 @@ pub(crate) fn reorder<T: Copy>(
     Ok((DraftTree::new(tree.base, parents)?, values))
 }
 
+/// The words of each guess's marginals a block drafter's tree is grown from
+/// (#437, [`GrownTree::from_marginals`]): what a card's ranking kernel ranks a
+/// row (`tree_rank::MOST_FOLLOWERS`); a tree of 31 spends few past them.
+pub(crate) const MARGINAL_WORDS: usize = 8;
+
 /// A tree of guesses as a drafter grew it (`SplitModel::draft_tree_after`),
 /// its likeliest path first: each guess's token, its parent among the guesses
 /// (`None`: it follows the last token read) and its path's log-probability
@@ -616,6 +621,151 @@ pub struct GrownTree {
 }
 
 impl GrownTree {
+    /// A chain of guesses as a tree: each follows the one before, the first
+    /// the last token read; with no ratings, each is rated sure (path
+    /// log-probability 0), so a price that keeps any keeps them in order.
+    /// What a check that must read kept tokens again carries guesses that
+    /// came as a chain in (#437, `TreeRounds::check`).
+    pub(crate) fn chain(tokens: &[u32]) -> Self {
+        Self {
+            tokens: tokens.to_vec(),
+            parents: (0..tokens.len())
+                .map(|i| i.checked_sub(1).map(|p| p as u16))
+                .collect(),
+            path_logp: vec![0.0; tokens.len()],
+        }
+    }
+
+    /// A tree from a BLOCK drafter's one forward (#437): `rows[d]` is the
+    /// drafter's best words at guess position `d` with their log-probability
+    /// there, best first. The block's own picks — `rows[d][0]` for every `d`
+    /// below `chain` — are taken whole, as the chain it guessed; the rest of
+    /// `budget` nodes best-first, a node rated by its path's summed
+    /// log-probabilities and its children the next position's words in rank
+    /// order (DDTree, arXiv 2604.12989: the block's marginals alone, no
+    /// forward per node). Keeping the chain whole is SpecExec's and
+    /// Sequoia's: on the 11-18 measure (FUTURE_WORK #437) a pure best-first
+    /// tree of 16 kept less than the chain on code (8.31 against 8.93 tokens
+    /// a check), the chain plus the rest read as well as either. A child is
+    /// never rated above its parent, so every node's parent is taken first.
+    /// Laid out likeliest path first (`trunk_first`), so the chain is the
+    /// path a check holds in place (`TreeOutcome::rows_in_place`).
+    pub(crate) fn from_marginals(rows: &[Vec<(u32, f32)>], chain: usize, budget: usize) -> Self {
+        /// A frontier entry's rating, ordered for the max-heap.
+        #[derive(PartialEq)]
+        struct Rated(f32);
+        impl Eq for Rated {}
+        impl PartialOrd for Rated {
+            fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+        impl Ord for Rated {
+            fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+                self.0.total_cmp(&other.0)
+            }
+        }
+        let depths = rows.iter().take_while(|r| !r.is_empty()).count();
+        let budget = budget.min(MAX_TREE_ROWS);
+        // (parent node, depth, rank in its row, path rating).
+        let mut nodes: Vec<(Option<usize>, usize, usize, f32)> = Vec::new();
+        // (rating, then the EARLIER entry on a tie, parent, depth, rank).
+        type Offer = (Rated, std::cmp::Reverse<usize>, Option<usize>, usize, usize);
+        let mut frontier: std::collections::BinaryHeap<Offer> = std::collections::BinaryHeap::new();
+        let mut pushed = 0usize;
+        let mut offer = |frontier: &mut std::collections::BinaryHeap<_>,
+                         rating: f32,
+                         parent: Option<usize>,
+                         depth: usize,
+                         rank: usize| {
+            if depth < depths && rank < rows[depth].len() && rating.is_finite() {
+                frontier.push((
+                    Rated(rating),
+                    std::cmp::Reverse(pushed),
+                    parent,
+                    depth,
+                    rank,
+                ));
+                pushed += 1;
+            }
+        };
+        let mut rating = 0.0f32;
+        for (depth, row) in rows.iter().take(chain.min(depths).min(budget)).enumerate() {
+            if !row[0].1.is_finite() {
+                break;
+            }
+            let parent = depth.checked_sub(1);
+            offer(
+                &mut frontier,
+                rating + row.get(1).map_or(f32::NEG_INFINITY, |w| w.1),
+                parent,
+                depth,
+                1,
+            );
+            rating += row[0].1;
+            nodes.push((parent, depth, 0, rating));
+        }
+        match nodes.last() {
+            Some(&(_, depth, _, rating)) => offer(
+                &mut frontier,
+                rating
+                    + rows
+                        .get(depth + 1)
+                        .and_then(|r| r.first())
+                        .map_or(f32::NEG_INFINITY, |w| w.1),
+                Some(nodes.len() - 1),
+                depth + 1,
+                0,
+            ),
+            None => offer(
+                &mut frontier,
+                rows.first()
+                    .and_then(|r| r.first())
+                    .map_or(f32::NEG_INFINITY, |w| w.1),
+                None,
+                0,
+                0,
+            ),
+        }
+        while nodes.len() < budget {
+            let Some((Rated(rating), _, parent, depth, rank)) = frontier.pop() else {
+                break;
+            };
+            let at = nodes.len();
+            nodes.push((parent, depth, rank, rating));
+            let parent_rating = rating - rows[depth][rank].1;
+            if let Some(next) = rows[depth].get(rank + 1) {
+                offer(
+                    &mut frontier,
+                    parent_rating + next.1,
+                    parent,
+                    depth,
+                    rank + 1,
+                );
+            }
+            if let Some(first) = rows.get(depth + 1).and_then(|r| r.first()) {
+                offer(&mut frontier, rating + first.1, Some(at), depth + 1, 0);
+            }
+        }
+        let parents: Vec<Option<u16>> = nodes.iter().map(|n| n.0.map(|p| p as u16)).collect();
+        let Ok(tree) = DraftTree::new(1, parents) else {
+            return Self::default();
+        };
+        let own: Vec<f32> = nodes.iter().map(|n| rows[n.1][n.2].1).collect();
+        let order = trunk_first(&tree, &own);
+        let values: Vec<(u32, f32)> = nodes.iter().map(|n| (rows[n.1][n.2].0, n.3)).collect();
+        let Ok((laid, values)) = reorder(&tree, &values, &order) else {
+            return Self::default();
+        };
+        Self {
+            parents: (0..laid.len())
+                .map(|r| laid.parent(r).map(|p| p as u16))
+                .collect(),
+            tokens: values.iter().map(|&(t, _)| t).collect(),
+            path_logp: values.iter().map(|&(_, s)| s).collect(),
+        }
+    }
+
     /// The part of this tree that follows `kept` and then `next` — the guesses
     /// a check that kept `kept` and sampled `next` can send at once, with no
     /// drafting in its way. `None` where the tree holds no such path.
@@ -758,6 +908,84 @@ pub(crate) fn keep_rows(parents: &[Option<u16>], kept: &[usize]) -> Option<Vec<O
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A block drafter's best words at three positions, best first.
+    fn marginals() -> Vec<Vec<(u32, f32)>> {
+        vec![
+            vec![(10, -0.1), (11, -1.0), (12, -3.0)],
+            vec![(20, -0.5), (21, -0.7), (22, -4.0)],
+            vec![(30, -2.0), (31, -2.1)],
+        ]
+    }
+
+    /// The block's own picks are taken whole and laid out first, in place;
+    /// the rest of the budget goes best-first by path rating — worked by
+    /// hand: after the chain 10 → 20 → 30 the frontier rates 21 under 10 at
+    /// −0.8, 11 at the root at −1.0, then 20 under 11 at −1.5.
+    #[test]
+    fn a_block_drafters_tree_keeps_its_chain_and_spends_the_rest_best_first() {
+        let rows = marginals();
+        let chain_only = GrownTree::from_marginals(&rows, 3, 3);
+        assert_eq!(chain_only.tokens, vec![10, 20, 30]);
+        assert_eq!(chain_only.parents, vec![None, Some(0), Some(1)]);
+
+        let tree = GrownTree::from_marginals(&rows, 3, 5);
+        assert_eq!(tree.tokens, vec![10, 20, 30, 21, 11]);
+        assert_eq!(tree.parents, vec![None, Some(0), Some(1), Some(0), None]);
+        let want = [-0.1f32, -0.6, -2.6, -0.8, -1.0];
+        for (got, want) in tree.path_logp.iter().zip(want) {
+            assert!((got - want).abs() < 1e-6, "{:?}", tree.path_logp);
+        }
+
+        let tree = GrownTree::from_marginals(&rows, 3, 6);
+        assert_eq!(tree.tokens, vec![10, 20, 30, 21, 11, 20]);
+        assert_eq!(
+            tree.parents,
+            vec![None, Some(0), Some(1), Some(0), None, Some(4)]
+        );
+
+        // With no chain kept the tree is DDTree's alone: 10, 20, then 21
+        // (−0.8) before 11 (−1.0).
+        let tree = GrownTree::from_marginals(&rows, 0, 3);
+        assert_eq!(tree.tokens, vec![10, 20, 21]);
+        assert_eq!(tree.parents, vec![None, Some(0), Some(0)]);
+
+        // Every tree is one a check can carry: parents first, ratings that
+        // never rise down a path, siblings with distinct words.
+        for budget in 1..12 {
+            let t = GrownTree::from_marginals(&rows, 2, budget);
+            assert!(t.tokens.len() <= budget);
+            assert!(DraftTree::new(1, t.parents.clone()).is_ok());
+            for (i, p) in t.parents.iter().enumerate() {
+                if let Some(p) = p.map(usize::from) {
+                    assert!(t.path_logp[i] <= t.path_logp[p]);
+                }
+                for j in 0..i {
+                    assert!(t.parents[j] != *p || t.tokens[j] != t.tokens[i], "{t:?}");
+                }
+            }
+        }
+    }
+
+    /// No words, or a pick the drafter rates as impossible, is no tree.
+    /// A chain as a tree (#437): each guess follows the one before, every one
+    /// rated sure, so a check priced at any cost keeps them in order.
+    #[test]
+    fn a_chain_of_guesses_is_a_tree_of_one_path() {
+        let chain = GrownTree::chain(&[7, 8, 9]);
+        assert_eq!(chain.parents, vec![None, Some(0), Some(1)]);
+        assert_eq!(chain.path_logp, vec![0.0; 3]);
+        assert_eq!(GrownTree::chain(&[]), GrownTree::default());
+    }
+
+    #[test]
+    fn a_block_with_no_finite_pick_grows_no_tree() {
+        assert!(GrownTree::from_marginals(&[], 4, 8).tokens.is_empty());
+        let rows = vec![vec![(1, f32::NEG_INFINITY)], vec![(2, -0.1)]];
+        assert!(GrownTree::from_marginals(&rows, 2, 8).tokens.is_empty());
+        let rows = vec![vec![(1, -0.1)], vec![(2, f32::NAN)]];
+        assert_eq!(GrownTree::from_marginals(&rows, 2, 8).tokens, vec![1]);
+    }
 
     /// Root-level rows 0 and 1; 2 follows 0; 3 follows 2; 4 follows 1.
     fn sample() -> DraftTree {

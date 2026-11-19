@@ -487,6 +487,16 @@ pub mod features {
     /// (`SWARMLLM_PROCESSOR_RUN_FIRST`, on by default).
     pub const PROCESSOR_RUN_FIRST: u64 = 1 << 45;
 
+    /// Checks a block drafter's tree of guesses (#437), beside
+    /// [`DRAFT_TREES`]: reads one on layers that keep a recurrent state (Qwen
+    /// 3.5/3.6's DeltaNet layers, each row from its parent's state) and
+    /// answers the drafter's rows ([`SENDS_BLOCK_ROWS`]) for a tree it holds
+    /// whole — every row, or along the kept path where it walks the check. A
+    /// coordinator sends a block tree only where every peer segment
+    /// advertises both, on any family: an older peer answers a tree with no
+    /// rows, and the drafter stops for the reply.
+    pub const BLOCK_TREES: u64 = 1 << 46;
+
     /// The full feature set THIS build implements. Advertised by every node,
     /// with [`KV_HALF_ON_CARD`], [`KV_WINDOW_SLIDES`], [`REQUESTER_GUESSES`],
     /// [`SERVES_SLICES`] and [`PROCESSOR_RUN_FIRST`] beside it where they
@@ -531,7 +541,8 @@ pub mod features {
         | HOP_TIMINGS
         | PROMPT_PROGRESS
         | HOW_SERVED
-        | HOW_SERVED_WHY;
+        | HOW_SERVED_WHY
+        | BLOCK_TREES;
 
     /// Does `advertised` include every bit in `needed`?
     pub fn supports(advertised: u64, needed: u64) -> bool {

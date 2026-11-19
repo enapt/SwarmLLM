@@ -425,7 +425,7 @@ impl SplitModel {
     /// up to `SsmState::MOST_ROWS_KEPT` rows, the whole tree in one forward);
     /// the verdict takes the state back into the kept path by the rows the
     /// step kept. The coordinator asks the same question of the model's family
-    /// first (`ModelArch::reads_draft_trees`); this is the answer that holds.
+    /// first (`ModelArch::block_tree_features`); this is the answer that holds.
     pub(crate) fn draft_tree_refusal(&self) -> Option<&'static str> {
         for layer in &self.layers {
             match layer {

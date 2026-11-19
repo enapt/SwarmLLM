@@ -4887,8 +4887,18 @@ exact (every row against its line read alone) and red under three null controls 
 recurrent layer reads a tree from each row's parent's state"). No coordinator sends one yet (`ModelArch::reads_draft_trees`).
 **The card half the same day**: one launch each for the convolution (`ssm_conv_silu_tree_f32_k4`, bit for bit) and the
 delta rule (`delta_rule_tree_f32_d*`, a row re-walks its line only at a branch); checked on the RTX 3070 against the
-processor, red with the parents ignored. Left: stage B (a tree from the drafter's marginals), C (the n-gram loop sends
-it, a new feature bit), D (measure).
+processor, red with the parents ignored. **Stages B and C BUILT the same day**: the block drafter's marginals
+(`BlockDrafter::draft_ranked`) grow the tree (`GrownTree::from_marginals`, the block's own picks the trunk, the rest
+best-first, ≤ 32 rows); the n-gram loop sends it through DSD's `TreeRounds` (priced rows, the kept path's tail read again
+by the next check, whatever it guesses); only to peers advertising `features::BLOCK_TREES` (bit 46); the drafter
+reads only the kept path's rows (the tail gathers them, the coordinator gathers the segments' before it). A/B
+`SWARMLLM_BLOCK_TREE=0` (`docs/invariants/inference.md` § "A recurrent layer reads a tree…", **The coordinator half**).
+**Stage D on the processor rig** (2026-11-19, `~/rig428/scripts/rig437.sh`: Qwen3.5-4B over two processor nodes at
+130 ms, one binary): the tree drafted one level past the chain's count (default; `SWARMLLM_BLOCK_TREE_DEPTH=block` the
+whole block) wrote code ~5% and a story ~6% faster than the chain (decode 17.3 vs 18.2 s, 29.1 vs 31.1 s, best of two),
+one code reply even; the whole block drafted 2-4x slower and lost on prose. The first run found the worker caught no
+rows for ANY tree (an old gate, gotcha #1144). Left: the card rig (a card's draft and rows cost little, where a wider
+tree should pay), then the field (here [0,8) ↔ AU, `~/swarmllm-gate/field428_1119/run.sh` pattern).
 
 #### #318 — A large model split across machines is too slow to use
 `P2` · perf-split · **OPEN** — 2026-10-20 · plan: `docs/plans/large_model_splits.md` · draws on #134, #145, #148, #149, #192
