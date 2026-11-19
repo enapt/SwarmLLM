@@ -1,5 +1,48 @@
 # Changelog
 
+## [0.3.300-alpha] — 2026-11-19
+
+**Replies on a graphics card no longer stall now and then.** About one reply in three from a model on the
+graphics card ran three to eight times slower than the rest (10-24 tokens a second against 67-70 for a 7B)
+whenever questions came one straight after another, as an agent or a script asks them; a model's first reply after
+it loaded was slow too. Each slow reply was preparing one of the card's step recordings (the CUDA graphs that let
+it run a step in one go), which under Windows' Linux layer sometimes takes 5-10 seconds. The computer prepares them
+ahead while it has nothing to do, but asked back to back it never had nothing to do. A reply now leaves that
+preparation to the quiet moment: until then its steps run the ordinary way, a little slower (about 8%) but never
+stalled, and every reply after the first pause uses the recordings. `SWARMLLM_CUDA_GRAPH_MADE=in-replies` restores
+the old behaviour (#357).
+
+**A model split across the graphics card and the processor no longer fails its first long question.** A split like
+this could answer its first request with "device mismatch in cat" when the last piece of a long question was very
+short (under 32 tokens): the computer's processor layers read longer pieces on the card and short ones on the processor, and the rows
+it keeps for its own guessing came back from both. They are now always kept in one place. Seen with a 14B in the
+last two releases' own checks (#478).
+
+**A refusal no longer contradicts itself when the room is there but scattered.** When the computers holding a model
+had room for every layer between them, but only in pieces no single chain of them could run, the error read "Not
+enough memory … room for about 40 of its 40 layers". It now says the room is there but not in pieces one chain can
+run, beside each computer's own room (commit 8fff831ad).
+
+**A full computer says when its own downloaded models fill it.** When storage was over its limit and nothing could
+be removed, the hourly notice said every part was kept so the network would not be short of a model. Where the
+models the owner downloaded hold most of the parts — and SwarmLLM never removes those by itself — the notice now says
+that instead, with the limit that applies. In all 21 languages (#432, commit 9cf2b3bac).
+
+**Asking for a model right after another one ran no longer says "trying again won't help".** When a computer holding
+the model was still busy with another model it had just run, the request could be refused as needing more memory than
+the swarm has — "trying again won't help, pick a smaller model" — while the same question a minute later ran: that
+computer frees the other model's memory once it has been idle for half a minute. Where a computer holding it is still
+running another model, the refusal now says the holders are busy with other models and to try again in a few
+minutes. Seen with Llama 3.3 70B asked straight after Qwen3-30B-A3B (#479).
+
+**A computer running SwarmLLM under WSL2 now notices when its processor runs hot.** Under Windows' Linux layer the
+node could see no processor temperature at all, so only a hot graphics card could make it pause the work it does for
+other computers; a long job on the processor could hold a laptop at 93 °C or more for minutes with nothing noticing.
+It now asks Windows for the same temperature the Windows version reads, through one small background reader that
+costs about 14 ms of processor time every 15 seconds. Too hot for five minutes, it pauses work for others and slows
+the owner's own chats until it cools, as on Windows. A container under Docker Desktop still cannot see the
+temperature (#440).
+
 ## [0.3.299-alpha] — 2026-11-18
 
 **A computer asked for more layers of a split keeps the ones it ran on its graphics card.** When a computer serving
