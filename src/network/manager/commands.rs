@@ -556,7 +556,15 @@ impl NetworkManager {
                     .gossipsub
                     .publish(gossip_topic, publish_data.clone())
                 {
-                    Ok(_) => tracing::debug!(topic, "Published message to GossipSub"),
+                    Ok(_) => {
+                        // What this node's own publishes are made of, apart
+                        // from what it relays (`GossipKindMeter`, #91 (2n)).
+                        self.shared_state
+                            .metrics
+                            .gossip_by_kind
+                            .note_published(msg.kind_name(), publish_data.len());
+                        tracing::debug!(topic, "Published message to GossipSub")
+                    }
                     Err(e) => {
                         // NET-I4: Buffer messages that fail at startup (no peers), capped to prevent memory leak
                         if self.buffered_gossip.len() < MAX_BUFFERED_GOSSIP {

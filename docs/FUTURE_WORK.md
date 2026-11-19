@@ -2214,6 +2214,13 @@ relay, `~/swarmllm-gate/idle301/`): **in 9.8 / 6.9 / 7.1, out 14.9 / 15.2 / 5.3 
 3.4 MB. (2m) cut DEMAND figures, a different topic. To read first: which `SwarmMessage` a 16 KB `swarm/models` message is
 (this node holds 138 parts), what re-publishes it 70 times in 50 min, and whether forwarding repeats it to every mesh peer
 (gossipsub's mesh degree, `flood_publish`). Until it is fixed the README's figure goes up at the next release.
+**Read further 2026-11-19 15:50-16:05Z (idle sampler `~/swarmllm-gate/idle301b/`)**: "the rest forwarded" was a
+misreading — `sent` is ≈ this node's own publishes × its ~9 peers (`flood_publish` sends each of OUR publishes to every
+peer on the topic, not only the mesh), so the upload is this node's own publishing: ~62 publishes in the first 14 min
+after a start, then ~1 a minute of 4-10 KB. Which message kinds is not readable from the topic totals, so `/api/stats`
+now says what this node PUBLISHED by kind (`gossip_published_by_kind`: messages and wire bytes, beside
+`gossip_recv_by_kind`; `GossipKindMeter::note_published`, written only by `publish_to_gossip`). Next: read it over an
+idle 20 min and fix whichever kind repeats.
 
 #### #169 — Connection churn on multi-interface hosts: only the LAN dial is deterministic
 `P3` · network · **PARTIAL** — 2026-07-25 · history: archive § "Connection churn on multi-interface hosts — deterministic dialer partial", gotcha #353

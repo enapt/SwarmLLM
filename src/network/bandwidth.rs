@@ -801,6 +801,30 @@ gossip_timedout_messages_dropped_per_topic_total{hash=\"swarmllm/models\"} 118
         assert_eq!(got[1].bytes, 3_000);
     }
 
+    /// A node's own publishes are a second composition, never mixed into what
+    /// it received: an idle node's upload turned out to be its own publishes
+    /// (#91 (2n)), and a reader asking "what do WE send" must not be handed
+    /// what peers sent us.
+    #[test]
+    fn published_gossip_is_counted_apart_from_received() {
+        let meter = GossipKindMeter::default();
+        meter.note_published("ModelManifest", 20_000);
+        meter.note_published("ModelManifest", 20_000);
+        meter.note_recv("NodeCapabilityUpdate", 6_000);
+        let published = meter.published_totals();
+        assert_eq!(published.len(), 1, "{published:?}");
+        assert_eq!(
+            (published[0].kind, published[0].msgs, published[0].bytes),
+            ("ModelManifest", 2, 40_000)
+        );
+        let received = meter.totals();
+        assert_eq!(
+            received.iter().map(|k| k.kind).collect::<Vec<_>>(),
+            vec!["NodeCapabilityUpdate"],
+            "a publish is not a receipt"
+        );
+    }
+
     /// Two variants with identical byte totals must not swap places between
     /// reads: the map iterates in an arbitrary order, so the tie needs a
     /// deterministic tiebreak or a diff of two readings invents movement.
@@ -1235,11 +1259,15 @@ gossip_timedout_messages_dropped_per_topic_total{hash=\"swarmllm/models\"} 118
 /// publish intervals is exactly the estimate that entry records being wrong by
 /// 10-100x, three times (gotcha #673).
 ///
-/// **Counted on RECEIVE, deliberately.** An idle node publishes a fraction of
-/// a percent of what it sends — its upload is relaying, and what it relays is
-/// what it received, so the received composition is what its bandwidth is made
-/// of. Counting at the publish sites would measure the one part that is
-/// already cheap.
+/// **Counted on RECEIVE, and on PUBLISH apart.** What a node relays is what it
+/// received, so the received composition is what its forwarding is made of.
+/// Its OWN publishes are counted beside it ([`Self::note_published`]), since
+/// the assumption that they are "a fraction of a percent" of the upload went
+/// stale: on 2026-11-19 a live node 14 min after a start had published 62
+/// `swarm/models` messages of ~20 KB, each sent to every peer (flood publish)
+/// — 504 of the topic's 507 sends and 10 MB — while it received 63 (#91 (2n)).
+/// A publish is the sealed frame once, never per recipient; a message buffered
+/// because no peer was subscribed yet is not counted when it is replayed.
 ///
 /// Plain atomics behind a map keyed by `SwarmMessage::kind_name`, so zero
 /// genuinely means zero and a variant that has never arrived is simply absent
@@ -1248,6 +1276,7 @@ gossip_timedout_messages_dropped_per_topic_total{hash=\"swarmllm/models\"} 118
 #[derive(Default)]
 pub struct GossipKindMeter {
     by_kind: dashmap::DashMap<&'static str, GossipKindCount>,
+    published: dashmap::DashMap<&'static str, GossipKindCount>,
 }
 
 #[derive(Default)]
@@ -1271,17 +1300,39 @@ impl GossipKindMeter {
     /// struct's size: that is what the interface actually carried, and it is
     /// what makes these comparable with the per-topic byte counters.
     pub fn note_recv(&self, kind: &'static str, wire_bytes: usize) {
-        let entry = self.by_kind.entry(kind).or_default();
+        Self::note(&self.by_kind, kind, wire_bytes);
+    }
+
+    /// Record one message this node PUBLISHED (GossipSub took it): the sealed
+    /// frame once, whatever number of peers it then goes to.
+    pub fn note_published(&self, kind: &'static str, wire_bytes: usize) {
+        Self::note(&self.published, kind, wire_bytes);
+    }
+
+    fn note(
+        map: &dashmap::DashMap<&'static str, GossipKindCount>,
+        kind: &'static str,
+        bytes: usize,
+    ) {
+        let entry = map.entry(kind).or_default();
         entry.msgs.fetch_add(1, Ordering::Relaxed);
-        entry.bytes.fetch_add(wire_bytes as u64, Ordering::Relaxed);
+        entry.bytes.fetch_add(bytes as u64, Ordering::Relaxed);
     }
 
     /// Every variant seen, heaviest first — the order the question is asked
     /// in. Empty until the first gossip message arrives, which is honest: an
     /// isolated node genuinely has no composition to report.
     pub fn totals(&self) -> Vec<GossipKindTotals> {
-        let mut out: Vec<GossipKindTotals> = self
-            .by_kind
+        Self::totals_of(&self.by_kind)
+    }
+
+    /// What this node published, by variant, in [`Self::totals`]' order.
+    pub fn published_totals(&self) -> Vec<GossipKindTotals> {
+        Self::totals_of(&self.published)
+    }
+
+    fn totals_of(map: &dashmap::DashMap<&'static str, GossipKindCount>) -> Vec<GossipKindTotals> {
+        let mut out: Vec<GossipKindTotals> = map
             .iter()
             .map(|e| GossipKindTotals {
                 kind: e.key(),

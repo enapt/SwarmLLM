@@ -2784,7 +2784,9 @@ message rather than the chat page.
   publicly reachable node donates relay capacity by DEFAULT and nothing said so
   anywhere a person looks; and, once any gossip has been sent,
   `gossip_sent_bytes` / `gossip_recv_bytes` / `gossip_by_topic` with
-  `other_out_bytes` / `other_in_bytes` as the explicit remainder. ⚠ The gossip
+  `other_out_bytes` / `other_in_bytes` as the explicit remainder;
+  `gossip_recv_by_kind` and `gossip_published_by_kind` (each message this node
+  published, once, by `SwarmMessage` variant — #91 (2n)) split it by variant. ⚠ The gossip
   figures come from GossipSub's own per-topic counters and measure MESSAGE
   LENGTH, so they are a floor — the framing and encryption around each message
   land in `other_*`, which is named for what it is rather than presented as a
