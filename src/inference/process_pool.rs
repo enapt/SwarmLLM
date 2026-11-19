@@ -1272,6 +1272,17 @@ struct WorkerHandle {
     /// A pass whose sender or coordinator has left the swarm is released
     /// ([`ModelProcessPool::release_abandoned_prompt_passes`], #448 (d)).
     awaiting_first_step: std::sync::Mutex<std::collections::HashMap<Uuid, AwaitedPass>>,
+    /// The ranges each request's passes from position 0 were sent for on this
+    /// worker since its pass began (#481 (5)). A chain sends each layer to one
+    /// machine once, so a pass from 0 OVERLAPPING one of them is a new pass of
+    /// the request — a re-plan keeps its id (#448) — while one beside them is
+    /// the same pass's other range here (a split that starts and finishes
+    /// here), whose hold is use (#93). Written by
+    /// [`WorkerHandle::note_pass_range`], read and cleared by
+    /// [`WorkerHandle::release_an_earlier_pass`], dropped with the
+    /// conversation; an entry whose request holds nothing here goes when a
+    /// range is noted. Lock order: `kv_holders` first.
+    pass_ranges: std::sync::Mutex<std::collections::HashMap<Uuid, Vec<(u32, u32)>>>,
     /// Why this node put this worker on the processor — `None` means it was
     /// spawned for the graphics card.
     ///
@@ -2362,20 +2373,59 @@ impl WorkerHandle {
             .insert(request_id, std::time::Instant::now());
     }
 
-    /// A new pass of `request_id` from its first position replaces the
-    /// earlier attempt's conversation here (a re-plan keeps its id, #448), so
-    /// that attempt's hold is no use by anyone else (#481 (5)). Only the hold:
-    /// a reply of it still in flight is still use.
-    fn release_an_earlier_pass(&self, request_id: Uuid) {
-        self.kv_holders
+    /// A new pass of `request_id` from its first position over `range`
+    /// replaces the earlier attempt's conversation here (a re-plan keeps its
+    /// id, #448), so that attempt's hold is no use by anyone else (#481 (5)) —
+    /// but only where `range` overlaps a range a pass of the request was sent
+    /// for here ([`Self::pass_ranges`]): one beside them is the SAME pass's
+    /// other range, and its hold stands, or the worker serving the pass's first
+    /// range is retired mid-request for its last (2026-11-19, the 27B's
+    /// [0,21) + [63,64)). Only the hold: a reply of it still in flight is still
+    /// use. `true` where it released one.
+    fn release_an_earlier_pass(&self, request_id: Uuid, range: (u32, u32)) -> bool {
+        let mut holders = self
+            .kv_holders
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&request_id);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut passes = self
+            .pass_ranges
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let earlier = passes
+            .get(&request_id)
+            .is_some_and(|sent| sent.iter().any(|r| r.0 < range.1 && range.0 < r.1));
+        if earlier {
+            passes.remove(&request_id);
+            holders.remove(&request_id);
+        }
+        earlier
+    }
+
+    /// A pass of `request_id` from its first position was sent for `range` on
+    /// this worker ([`Self::pass_ranges`]).
+    fn note_pass_range(&self, request_id: Uuid, range: (u32, u32)) {
+        let holders = self
+            .kv_holders
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut passes = self
+            .pass_ranges
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        passes.retain(|r, _| *r == request_id || holders.contains_key(r));
+        let sent = passes.entry(request_id).or_default();
+        if !sent.contains(&range) {
+            sent.push(range);
+        }
     }
 
     /// `request_id` released its cache here, or was cancelled.
     fn forget_conversation(&self, request_id: Uuid) {
         self.kv_holders
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&request_id);
+        self.pass_ranges
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&request_id);
@@ -12303,6 +12353,7 @@ impl ModelProcessPool {
             asked_to_load,
             kv_holders: std::sync::Mutex::new(std::collections::HashMap::new()),
             awaiting_first_step: std::sync::Mutex::new(std::collections::HashMap::new()),
+            pass_ranges: std::sync::Mutex::new(std::collections::HashMap::new()),
             placed_on_cpu_because,
             charged_mb: AtomicU64::new(charge.mb),
             charged_segments: std::sync::Mutex::new(Vec::new()),
@@ -12507,13 +12558,15 @@ impl ModelProcessPool {
         // forward sent on its behalf, which is where the memory would have
         // gone.
         crate::inference::cancel::bail_if_cancelled(cancel.as_ref())?;
-        // A pass from the first position replaces this request's earlier
-        // attempt here (a re-plan keeps its id, #448): that attempt's hold is
-        // not use that may keep the worker from growing or being replaced for
-        // it (#481 (5)).
-        if starts_a_pass(&forward) {
+        // A pass from the first position over layers an earlier pass of this
+        // request was sent for here replaces that attempt (a re-plan keeps its
+        // id, #448): its hold is not use that may keep the worker from growing
+        // or being replaced for it (#481 (5)). Beside them, it is the same
+        // pass's other range, and the hold stands.
+        let starts_a_pass = starts_a_pass(&forward);
+        if starts_a_pass {
             if let Some(h) = self.live_worker(&model_id) {
-                h.release_an_earlier_pass(forward.request_id);
+                h.release_an_earlier_pass(forward.request_id, forward.layer_range);
             }
         }
         let handle = self
@@ -12527,6 +12580,9 @@ impl ModelProcessPool {
             .await;
         self.note_load_refusal(forward.request_id, &model_id, forward.layer_range, &handle);
         let handle = handle?;
+        if starts_a_pass {
+            handle.note_pass_range(forward.request_id, forward.layer_range);
+        }
         crate::inference::cancel::bail_if_cancelled(cancel.as_ref())?;
 
         // Destructure to avoid cloning activations (can be large tensor data)
@@ -18054,10 +18110,21 @@ mod tests {
             p.weigh_peer_prompt(&model, vec![asked], 64, earlier).await,
             PeerPromptWeight::Fits
         ));
-        // And the pass that follows releases that attempt's hold before it
-        // asks for the worker: no longer in use by anyone.
-        assert!(h.in_use(p.conversation_window()), "control: held");
-        h.release_an_earlier_pass(earlier);
+        // A pass that follows over a range beside the one that attempt's pass
+        // was sent for is the SAME pass's other range here (a split that
+        // starts and finishes here): its hold stands, or the worker serving
+        // the first range is retired mid-request (the 27B's [0,21) + [63,64),
+        // 2026-11-19).
+        h.note_pass_range(earlier, held);
+        assert!(!h.release_an_earlier_pass(earlier, (held.1, held.1 + 2)));
+        assert!(
+            h.in_use(p.conversation_window()),
+            "the same pass's hold stands"
+        );
+        // The re-plan's pass over layers that attempt's pass was sent for
+        // releases its hold before it asks for the worker: no longer in use by
+        // anyone.
+        assert!(h.release_an_earlier_pass(earlier, asked));
         assert!(!h.in_use(p.conversation_window()));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -19524,6 +19591,7 @@ mod tests {
             asked_to_load: Arc::new(AtomicBool::new(false)),
             kv_holders: std::sync::Mutex::new(std::collections::HashMap::new()),
             awaiting_first_step: std::sync::Mutex::new(std::collections::HashMap::new()),
+            pass_ranges: std::sync::Mutex::new(std::collections::HashMap::new()),
             charged_mb: AtomicU64::new(0),
             charged_segments: std::sync::Mutex::new(Vec::new()),
             placed_on_cpu_because,

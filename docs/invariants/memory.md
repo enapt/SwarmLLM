@@ -3345,6 +3345,17 @@ the hold only — a reply in flight is still use) before `get_or_spawn`. It name
 a `CancelInference` from any authenticated peer already reaches. Tests: the `own-attempt` case of the peer-weighing
 test, `only_a_pass_from_its_first_position_releases_its_requests_earlier_hold`.
 
+**Only over layers that request's earlier pass was sent for (same evening).** The first version released the hold on
+ANY pass from position 0, and a split that starts and finishes here sends two: `~/swarmllm-gate/split27_1119q`
+(17:16Z, the 27B forced here `[0,21)` + AU `[21,63)` + here `[63,64)`) loaded `[0,21)` on the card, then the tail's
+pass released the request's own hold, its growth fell 261 MB short and the pool retired the card worker
+mid-request ("nothing is using it — replacing it") — both ranges reloaded on the processor and the split ran at
+2.6-4.0 tok/s, the #93 failure a hold exists to stop. A chain sends each layer to one machine once, so the worker now
+records the ranges each request's passes from 0 were sent for (`WorkerHandle::pass_ranges`, noted on the handle that
+serves the forward, `note_pass_range`) and releases only where the new pass OVERLAPS one — a re-plan re-sends its layers
+(Australia's `[21,63)` then `[21,64)`); a pass beside them is the same pass's other range and its hold stands. Test: the
+`own-attempt` case (beside: held; overlapping: released).
+
 ## A model process holds one copy of the output head (2026-11-16, FUTURE_WORK #458)
 
 ### What it replaced
@@ -4293,6 +4304,19 @@ size. A/B `SWARMLLM_FORWARD_RERUN=0` (both (3b) and (3c)).
 
 **Not covered.** A half that still fails fails the whole tick (`decode tick failed`, every slot
 answered with the error) — a request is never shed from the batch as SGLang's `retract_decode` would.
+
+**And a load hands back what it freed as it ends (2026-11-19).** The pool keeps a load's freed
+memory as it keeps a forward's, and the daemon reads the card from outside the process, so what a
+worker holds unused reads as ANOTHER program's. `~/swarmllm-gate/split27_1119q` (17:16Z, the 27B
+forced here `[0,21)` + AU + here `[63,64)`): the first range read the output head (994 MB) for the
+guess head beside it, refused it (`budget_left_mb=594`) and dropped it; the worker measured 6,538 MB
+after the load against a 5,900 MB charge, and the tail range's growth beside it fell 261 MB short —
+the spawn had left the tail's room (`leaving_mb=261`), and the pool's hold took it. Now
+`model_worker::give_back_what_the_load_freed` trims the pool once a load (and the drafters it
+attaches) is done, BEFORE the worker measures what the load cost — vLLM empties torch's cache before
+it measures memory (`gpu_worker`'s `init_device` and `determine_available_memory`). It costs the
+first forward the driver's allocations a trimmed pool would have reused; the idle trim stays.
+DIAG `card memory the load freed handed back to the driver`. A/B `SWARMLLM_TRIM_AFTER_LOAD=0`.
 
 ## The daemon holds no CUDA context (2026-10-05)
 

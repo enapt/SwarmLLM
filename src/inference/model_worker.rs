@@ -824,6 +824,35 @@ fn argmax_walk(drafts: &[u32], picks: &[u32]) -> Vec<u32> {
     kept
 }
 
+/// Hand what a load freed on the card back to the driver as the load ends —
+/// a borrowed output head no guesser kept (`SplitModel::drop_drafter_head`),
+/// the load's staging — not at the idle trim. The pool keeps freed memory
+/// (`cuda_pool::keep_freed_memory`) and the daemon reads the card from outside
+/// this process, so memory held unused here reads as ANOTHER program's and
+/// shrinks the budget the plan's next range here is weighed by: the 27B's
+/// first range kept a refused guess head's 994 MB in its pool, and the tail
+/// range's growth beside it fell 261 MB short (2026-11-19,
+/// `~/swarmllm-gate/split27_1119q`). Prior art: vLLM empties torch's cache
+/// before it measures memory (`gpu_worker`'s `init_device` and
+/// `determine_available_memory`). A/B `SWARMLLM_TRIM_AFTER_LOAD=0`.
+fn give_back_what_the_load_freed(device: &candle_core::Device) {
+    if !device.is_cuda() || std::env::var("SWARMLLM_TRIM_AFTER_LOAD").as_deref() == Ok("0") {
+        return;
+    }
+    let started = std::time::Instant::now();
+    if let Some((before, after)) = crate::inference::cuda_pool::trim(device) {
+        if before.reserved > after.reserved {
+            tracing::info!(
+                reserved_before_mb = before.reserved >> 20,
+                reserved_after_mb = after.reserved >> 20,
+                in_use_mb = after.used >> 20,
+                took_ms = started.elapsed().as_millis() as u64,
+                "DIAG: card memory the load freed handed back to the driver"
+            );
+        }
+    }
+}
+
 /// Hand the card memory this worker's pool keeps unused back to the driver,
 /// once it has been idle for `cuda_pool::IDLE_TRIM` — so another worker, or a
 /// model the daemon wants to load, sees the room (`docs/FUTURE_WORK.md` #146).
@@ -1511,6 +1540,7 @@ fn ensure_model_loaded(
         // a split whose first segment this is, beside the head's part (#428).
         model.attach_block_drafter(&model_dir);
     }
+    give_back_what_the_load_freed(model.device());
 
     // Report what this load ACTUALLY cost on the GPU, not what we guessed.
     //

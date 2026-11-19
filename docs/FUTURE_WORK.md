@@ -910,12 +910,18 @@ frame, then add a receipt ACK or a per-frame read deadline mirroring request-res
 > pays it once (`docs/invariants/scheduling.md` § "A whole hand-off is priced off our link"). Prior art: Petals
 > keeps server throughput and client ping as separate terms (`sequence_manager.py`).
 >
-> (2) **Open: a range warm for a split charges the whole model's reload on every request.** Australia's split
-> worker holds [14,40), so its whole run is charged `cold_load_ms` 32.3 s each time (26 layers it would add) and the
-> split, warm, is kept as long as it is used — a ratchet. Design to try: ski rental (Karlin et al. 1988) — per
-> (peer, model), credit the warm cost the chosen plan paid over the cheapest cold-charged alternative, and discount
-> that alternative's `cold_load_ms` by the credit at its one choke point, so the load is bought once the rent has
-> covered it; reset when it is bought.
+> (2) **Measured and set aside 2026-11-19 evening — the load was not what passed Australia's whole run over.**
+> Australia's split worker held [14,40) (again [12,40), then [8,40)), so its whole run carried `cold_load_ms` (19,820 of
+> 27,017 ms at 16:31Z). A ski-rental credit (Karlin et al. 1988: each request passing the run over pays the gap toward
+> its load) was built and run on the live swarm (split27_1119q, 17:2x-17:41Z): by the fourth ask it covered the load
+> (`cold_load_ms=0`, the whole run priced 7.6 s against the chosen split's 14.6 s) and the split was STILL chosen. The
+> whole vertex never reached the search: a range strictly containing a peer's held range is charged its width less
+> that range's `releasable_layers`, ZERO for the range a worker was spawned with — 40 layers against Australia's 22.5
+> of published new room — so it fails `fits` on the `Everyone` rung, though the peer would serve it by replacing its
+> worker once nothing holds it (`a_fresh_spawn_fits_in_place_of_the_worker`, #350). Not shipped: it paid toward a load
+> that was not the obstacle, and a split route is not a routing bug — the split is what to make fast (user, 11-08).
+> Left, only if a case needs it: a peer's idle worker of the SAME model (`ResidentModelLayers::gives_way` is `Some`
+> only while nothing holds it) counted as giving its layers to a range containing them, in `capacity_charge`.
 >
 > (3) **The split was priced 4x optimistic** — 9.4-10.3 s predicted, 37.3-38.5 s measured: 2.30 tokens a round
 > (`split_tokens_per_round_far_tail`) where the reply ran **159 rounds for 160 tokens**. (3a) **FIXED on main — the
@@ -957,7 +963,11 @@ frame, then add a receipt ACK or a per-frame read deadline mirroring request-res
 > by its OWN earlier attempt's hold on a peer's worker (Australia `[21,64)` "do not fit beside the copy this node is
 > running for a conversation now") — a question is weighed beside the request it names (`busy_beside`, the #448
 > rule: a re-plan keeps its id) and a pass from position 0 releases that request's earlier hold before it asks for the
-> worker (`starts_a_pass`, `release_an_earlier_pass`). Prior art: vLLM frees an aborted or preempted sequence's
+> worker (`starts_a_pass`, `release_an_earlier_pass` — only over layers that request's earlier pass was sent for here,
+`pass_ranges`: the first version also released a chain's OTHER range here and retired the 27B's card worker
+mid-request, split27_1119q 17:16Z; its growth fell 261 MB short because the first range's worker held a refused
+guess head's 994 MB in its card pool, read as another program's — a load now trims the pool as it ends,
+`give_back_what_the_load_freed`). Prior art: vLLM frees an aborted or preempted sequence's
 > blocks before it is rescheduled, never counting them against itself. Left: a worker already RESIDENT whole for the
 > first range (an earlier request of another shape) still refuses the tail's growth; the router's re-plan with fewer
 > layers here then routes elsewhere where the swarm has a route.
@@ -2217,10 +2227,23 @@ relay, `~/swarmllm-gate/idle301/`): **in 9.8 / 6.9 / 7.1, out 14.9 / 15.2 / 5.3 
 **Read further 2026-11-19 15:50-16:05Z (idle sampler `~/swarmllm-gate/idle301b/`)**: "the rest forwarded" was a
 misreading — `sent` is ≈ this node's own publishes × its ~9 peers (`flood_publish` sends each of OUR publishes to every
 peer on the topic, not only the mesh), so the upload is this node's own publishing: ~62 publishes in the first 14 min
-after a start, then ~1 a minute of 4-10 KB. Which message kinds is not readable from the topic totals, so `/api/stats`
-now says what this node PUBLISHED by kind (`gossip_published_by_kind`: messages and wire bytes, beside
-`gossip_recv_by_kind`; `GossipKindMeter::note_published`, written only by `publish_to_gossip`). Next: read it over an
-idle 20 min and fix whichever kind repeats.
+after a start, then ~1 a minute of 4-10 KB. Which message kinds is not readable from the topic totals, so `network_traffic` (in
+`/api/admin/stats` and `/v1/status`; the commit said `/api/stats`, which does not exist) now says what this node
+PUBLISHED by kind (`gossip_published_by_kind`: messages and wire bytes, beside
+`gossip_recv_by_kind`; `GossipKindMeter::note_published`, written only by `publish_to_gossip`).
+**Read over an idle 18.9 min 2026-11-19 (17:41:44-18:00:36Z, ~30 min after a start): no kind of ours repeats.** This
+node PUBLISHED 46 KB (capability 4 × 3.9 KB, health pings 39, one parts list 10.8 KB, pool and credit gossip; no
+manifest — the 22 × 56 KB in its first half hour were the start's round, each once), ~0.15 MB an hour. The upload was
+11.3 MB an hour (download 14.0), by protocol: gossip 5.0 MB/h (meshsub sent 1.59 MB — `swarm/models` 627 KB of the
+topics' 1.16 MB, ~5x what our own publishes reach at ~9 peers, so mostly FORWARDING) and Kademlia ANSWERS 4.8 MB/h
+(566 streams peers opened, `find_node` 29.6 a minute at ~2.7 KB — 3.6x the 8.3 a minute of 2026-10-19, against our own
+126 lookups — 6.7 a minute, our own 10-min refresh's share, so the askers refresh ~4x as often as this node). Not the
+lost-peer lookups (#465): this node started ~1 an hour (`DIAG: looking a lost peer up`, 11-17..19). The lead:
+libp2p-kad 0.48 bootstraps whenever a NEW peer enters a table under k (20) entries (`bootstrap_on_low_peers`, 500 ms
+throttle), and every table here is under k (answers list ~6 peers) — so each peer a node newly inserts, or re-inserts
+after taking it out (`cut_off_peer` and `leave_the_table_if_out_of_reach` drop entries), costs every node an answer
+to ~5 lookups. Next: count, per node, the bootstraps that were not the periodic one (`kad::Event::OutboundQueryProgressed`
+for `Bootstrap`), then why `swarm/models` is forwarded at that rate.
 
 #### #169 — Connection churn on multi-interface hosts: only the LAN dial is deterministic
 `P3` · network · **PARTIAL** — 2026-07-25 · history: archive § "Connection churn on multi-interface hosts — deterministic dialer partial", gotcha #353
