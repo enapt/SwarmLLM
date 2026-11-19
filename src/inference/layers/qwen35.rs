@@ -2157,13 +2157,38 @@ mod tests {
     /// dot-product kernel, which serves both on x86, is `H_M = 0` for NEON),
     /// and the two add in different orders — so a check's rows part from the
     /// same rows read one at a time in the last bit (CI's macOS job,
-    /// 2026-10-25).
+    /// 2026-10-25). The convolution's taps are multiples of 1/32 too, and
+    /// `ssm_out` — which reads the delta rule's output, no multiple of
+    /// anything — sums exactly two inner channels into each output at
+    /// power-of-two weights: every product exact and one addition that
+    /// rounds, the same in any order. With a dense `ssm_out` a tree's row and
+    /// the same row read alone parted in the last bit on ARM (5.96e-8, CI's
+    /// macOS job, 2026-11-19, `a_tree_checks_rows_are_their_lines_read_alone`).
     fn weights_of(device: &Device, exact_projections: bool) -> DeltaNetWeights {
         let (hidden, nk, kd, nv, vd, k) = (8usize, 2usize, 4usize, 4usize, 4usize, 4usize);
         let c = 2 * nk * kd + nv * vd;
         let mm = |o: usize, i: usize| {
             let w = Tensor::randn(0f32, 0.3, (o, i), device).unwrap();
             super::super::QMatMul::from_dense(if exact_projections { exact(w, 32.0) } else { w })
+        };
+        let ssm_out = if exact_projections {
+            assert_eq!(nv * vd, 2 * hidden, "two inner channels an output");
+            let mut pairs = vec![0f32; hidden * nv * vd];
+            for o in 0..hidden {
+                pairs[o * nv * vd + 2 * o] = 0.5;
+                pairs[o * nv * vd + 2 * o + 1] = 0.25;
+            }
+            super::super::QMatMul::from_dense(
+                Tensor::from_vec(pairs, (hidden, nv * vd), device).unwrap(),
+            )
+        } else {
+            mm(hidden, nv * vd)
+        };
+        let conv1d = Tensor::randn(0f32, 0.3, (c, k), device).unwrap();
+        let conv1d = if exact_projections {
+            exact(conv1d, 32.0)
+        } else {
+            conv1d
         };
         DeltaNetWeights {
             wqkv: mm(c, hidden),
@@ -2177,7 +2202,7 @@ mod tests {
                 .unwrap()
                 .neg()
                 .unwrap(),
-            conv1d: Tensor::randn(0f32, 0.3, (c, k), device).unwrap(),
+            conv1d,
             ssm_norm: crate::inference::residual_norm::RmsNorm::from_qtensor(
                 candle_core::quantized::QTensor::quantize(
                     &Tensor::ones((vd,), DType::F32, device).unwrap(),
@@ -2187,7 +2212,7 @@ mod tests {
                 1e-6,
             )
             .unwrap(),
-            ssm_out: mm(hidden, nv * vd),
+            ssm_out,
             n_k_heads: nk,
             k_head_dim: kd,
             n_v_heads: nv,
