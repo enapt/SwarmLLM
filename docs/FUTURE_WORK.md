@@ -908,7 +908,9 @@ Proxmox, Italy, here); main restarted (`m`) did no better on Gemma 4 31B (0.9-1.
 the 27B. Every candidate read `observed_*=None` in the plan. Prior art (#91 (2k)'s, read 2026-11-01): Ledlie,
 Gardner and Seltzer advise beginning "where it left off"; Serf persisted its coordinates and stopped
 (hashicorp/serf#489-#490) after a stale one stuck "essentially forever" (#487) — so a restore validates, keeps a
-figure only with its age and sample count, and lets a fresh measurement replace it at once. Next: which figures
+figure only with its age and sample count, and lets a fresh measurement replace it at once. Tor keeps its circuit-build-time histogram (`CircuitBuildTimeBin`) in its state file across
+restarts, RESETS it when the loaded count disagrees with `TotalBuildTimes` (a corrupt file), and shuffles the loaded
+times so old ones still expire in order (`circuitstats.c`, read 2026-11-19) — a restored figure ages as a live one. Next: which figures
 to keep (per peer and model: warm decode, delegated runs, prompt rates; never a failure streak), where (redb
 beside the trust table), how old a figure may be, and a rig that restarts the node between two identical runs.
 
