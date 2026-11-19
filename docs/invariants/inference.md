@@ -4154,6 +4154,22 @@ pool; nothing that changes a bit may.
 
 **Moved from `arch-inference.md` (trimmed 2026-11-17):** A prompt-cache hit runs the last prompt token as a decode step, so two arithmetics gave a different greedy reply on every repeat. `prefill_attn::gqa_prefill_attention_cpu` runs before any matmul path; the `[rows, kv_len]` matrix is never written. Each (block, chunk) of a split-keys check is a job, then each row's chunks are folded in chunk order - the same partials, the same bits; only the PATH reads the pool. Sizes stay constants.
 
+## A test across forward widths is exact only where every matmul is (2026-11-19)
+
+Twice a Qwen 3.5 test that compared a forward of several rows with the same rows read one at a time went red on CI's
+macOS job only. On 2026-10-25 `a_check_rewound_into_its_middle_is_where_its_kept_rows_lead` was fixed by making the
+test layer's INPUT projections exact (multiples of 1/32 fed multiples of 1/8). On 2026-11-19
+`a_tree_checks_rows_are_their_lines_read_alone` (#437) failed five commits running (`7174118e6` → `b5febee6a`, 5.96e-8 at
+row 0, a 7-row tree against a 1-row step), because the layer's OUTPUT projection `ssm_out` reads the delta rule's output,
+which no rounding scheme makes a multiple of anything. Cause, read in the pinned gemm-f32 0.19.0: NEON's small-size
+kernel table is empty (`H_M = 0`), so one row goes to the matrix-vector kernel and several to the blocked one, and the
+two add in different orders; x86's small-size kernel serves both, so the bits agreed there by luck. Fix `f261d977e`:
+`ssm_out` sums exactly two inner channels into each output at power-of-two weights (each product exact, one addition
+rounds: the same in any order), and the conv taps are multiples of 1/32. Null control: a branching row's delta rule
+started from the previous row's state still reds the test (row 3, line [0, 3]). What a change must keep: an
+equal-bits test across widths routes every matmul through weights that make it order-free, and nothing local builds
+for macOS (gotcha #1063, #1145), so CI's macOS job is part of the test.
+
 ## A model's RoPE frequency factors are applied — and reach a node without shard 0 (2026-09-27, #124)
 
 **The defect.** Llama 3.1/3.2 GGUFs carry `rope_freqs.weight`: 64 per-pair

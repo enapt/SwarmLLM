@@ -162,6 +162,12 @@ Every CPU decode fast path was once gated on `q_len == 1` exactly (#369). Four h
 
 → `docs/invariants/inference.md` § "A row's attention on the processor does not depend on the forward it is in" (supersedes § "Several query positions on the processor: tiled over the keys")
 
+## A test comparing bits between forwards of different WIDTHS makes every matmul on its path exact (2026-11-19)
+
+On ARM the `gemm` crate multiplies one row and several rows with different kernels, adding in different orders (`H_M = 0` for NEON); on x86 one kernel serves both, so such a test passes locally and fails only on CI's macOS job. Make EVERY matmul it reaches order-free — each product exact, at most one rounding addition an output (`qwen35::tests::weights_of`) — not only the first; and a new such test is done only once CI's macOS job has run it.
+
+→ `docs/invariants/inference.md` § "A test across forward widths is exact only where every matmul is"
+
 ## Local speculative decoding — `inference::model_worker::ngram_spec_eligible`
 
 The single answer to "may this request be speculated?", consulted by BOTH the
