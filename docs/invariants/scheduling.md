@@ -2099,6 +2099,17 @@ carries the trip), nor for a prompt-pass or a hop's own figure (neither carried 
 Test `a_whole_hand_off_is_not_priced_by_the_round_trips_of_a_split` (red with the
 helper answering `None`: 5.86 a layer again).
 
+**Measured on the request, 2026-11-19 21:12-21:21Z (`~/swarmllm-gate/tier_1119r`, main's card build)**: one
+split forced here `[0,14)` + Australia (5.22 tok/s, as v0.3.300's warm-up), then three asks by main's own
+routes. The price fired — Australia whole at `cost_compute_ms=7134` from `observed_ms_per_layer=6.09`
+`DecodeSteps` — and every ask still took a split (4.50, 4.25, 4.24 tok/s; v0.3.300 4.32-4.45). So this
+rule fixes the price only. ⚠ A fresh start is no test of it: with no split run first there is no
+decode figure to correct, and v0.3.300 hands the 35B over whole too (27-34 tok/s, `tier_1119p`). The
+other contributors, read off the plan: the split's yield was priced at 1.86 tokens a round for a first
+segment whose worker had loaded without the drafter (159 rounds for 160 tokens; 12.8 s predicted, 36.9
+measured), and Australia's whole run carried its cold load (~20 s of 28.2, FUTURE_WORK #481 (2)); a
+prose ask took a 4-part chain priced 13.2 s over Australia whole at 7.7 under the optimistic split prior.
+
 ⚠ **This is not deriving a visit's fixed cost from ping** (§ above): what is left
 after the trip comes out still holds the peer's own per-visit work, spread over the
 width. It removes the one part a hand-off provably does not pay per step — our own

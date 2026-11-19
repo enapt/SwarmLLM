@@ -24,14 +24,15 @@ every 30 seconds for hours after a single request, although the figure only chan
 sends a model's figure when it is new, has moved by a tenth, or 10 minutes have passed: about 20 times fewer
 messages, carrying the same information. Computers on the previous release are read as before (#91).
 
-**A computer that holds a large model whole is used whole, not as half of a slower split.** After one split
-through a far computer, this computer priced a whole hand-off to it from the split's step time, which is mostly
-the trip there and back on every token — a hand-off pays that trip once per reply. On Qwen3.6-35B-A3B with the
-other half in Australia that priced a hand-off running 35 tokens a second as about 4, and every reply took the
-split at 4.3-4.5 tokens a second. The trip is now taken out of that figure before it prices a hand-off; the same
-model was then handed over whole and wrote 23-31 tokens a second. The peer list (`/api/admin/peers`) also says
-whether each computer reports that it can take work now and, from this release on, why not when it cannot: cooling
-down, on a metered connection, updating, its graphics stack stopped, or no longer hearing the swarm (#481).
+**The peer list says whether each computer can take work now, and why not.** `/api/admin/peers` carries whether
+each computer reports that it can take work and, from this release on, why not when it cannot: cooling down, on a
+metered connection, updating, its graphics stack stopped, or no longer hearing the swarm. Underneath, a computer that
+holds a large model whole is priced more fairly after a split has run through it: this computer priced handing it the
+whole reply from the split's step time, which is mostly the trip there and back on every token, and a hand-off pays
+that trip once. On Qwen3.6-35B-A3B with the other half in Australia that price fell from 26 seconds to 7 for a reply
+Australia writes in about 6. Replies there still take the split after such a split for now (4.2-4.5 tokens a second,
+as in 0.3.300): Australia would load the model again first, and the split is priced as if it guessed ahead when its
+first part has no room left for the guesser (#481).
 
 **A split of a Qwen 3.5, 3.6 or 3.8 model leaves room beside its first part for the small model that guesses ahead
 for it.** These models take their guesses from a block drafter loaded beside the first part of a split. The plan

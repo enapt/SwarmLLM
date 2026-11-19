@@ -915,7 +915,7 @@ to keep (per peer and model: warm decode, delegated runs, prompt rates; never a 
 beside the trust table), how old a figure may be, and a rig that restarts the node between two identical runs.
 
 #### #481 — A peer that holds a popular model whole was passed over for a split through it 8x slower
-`P1` · routing · **PARTIAL: (1), (3a) fixed on main 2026-11-19; (5) partly (every request answered, an 8 GB card's tail still on the processor); (4) diagnosable; (2), (3b), (3c) open** — 2026-11-19 · history: #3 (j3), #3 (j4), #469, #10, #458
+`P1` · routing · **PARTIAL: (1) priced on main 2026-11-19 but the hand-off still not chosen after a split; (3a) fixed on main; (5) partly (every request answered, an 8 GB card's tail still on the processor); (4) diagnosable; (2), (3b), (3c) open** — 2026-11-19 · history: #3 (j3), #3 (j4), #469, #10, #458
 
 > Seen on the live node 2026-11-19 14:54-15:00Z (v0.3.300, overnight tier run `~/swarmllm-gate/tier_1119n`):
 > Qwen3.6-35B-A3B, the Australian RTX 3060 `aa3d1e66` (132 ms) holds it whole and ran it whole at 35-36 tok/s
@@ -927,7 +927,16 @@ beside the trust table), how old a figure may be, and a rig that restarts the no
 > 234 ms a token where it delivers ~28. `NodeCandidate::decode_figure_off_our_link` takes the trip out over the
 > width the steps were timed at (`TimedOn::DecodeSteps { layers }`), floored at the per-device prior; the hand-off
 > pays it once (`docs/invariants/scheduling.md` § "A whole hand-off is priced off our link"). Prior art: Petals
-> keeps server throughput and client ping as separate terms (`sequence_manager.py`).
+> keeps server throughput and client ping as separate terms (`sequence_manager.py`). **Measured in its own case
+> 2026-11-19 21:12-21:21Z (`~/swarmllm-gate/tier_1119r`, main's card build, one split FORCED here `[0,14)` + Australia,
+> then three asks by main's own routes): the price fired — Australia whole at `cost_compute_ms` 7,134 off the same
+> ~6 ms a layer that priced it 26,262 on v0.3.300 — and the hand-off STILL lost: code 4.50, prose 4.25, code 4.24 tok/s
+> over the split (v0.3.300 4.32-4.45). Code: the split priced at 12.8 s (1.86 tokens a round assumed; 159 rounds for 160
+> tokens measured, the first segment's worker loaded with no room for the drafter, 430 MB against 1,172, and reused) ran
+> 36.9 s; Australia whole at 28.2 s, ~20 s of it its cold load (it holds the split's range, (2)). Prose: a 4-part chain
+> here + Thailand + here + Australia at 13.2 s was chosen over Australia whole at 7.7 under the optimistic split prior
+> (`split_rounds::prior_for_request`). Next: a split's yield read off what its first segment's WORKER holds (no guesser
+> loaded → a token a round), then (2)'s load.
 >
 > (2) **Measured and set aside 2026-11-19 evening — the load was not what passed Australia's whole run over.**
 > Australia's split worker held [14,40) (again [12,40), then [8,40)), so its whole run carried `cold_load_ms` (19,820 of
