@@ -1,4 +1,5 @@
 #!/bin/bash
+. "$(dirname "${BASH_SOURCE[0]}")/test_models.sh"  # models_dir_for: the test set, else the node's folder
 # N-node sharded cluster — forces a pipeline with N distinct segment holders.
 #
 # Generalises examples/3node_sharded_setup.sh, which splits a model across
@@ -40,7 +41,7 @@ HOLDERS="${HOLDERS:-3}"
 BASE_PORT="${BASE_PORT:-8890}"
 GPU_LAYERS="${GPU_LAYERS:-0}"
 MODEL_NAME="${SWARM_BENCH_MODEL:-llama-3.2-3b-instruct-q4-k-m}"
-SRC_MODEL=~/.local/share/swarmllm/models/$MODEL_NAME
+SRC_MODEL="$(models_dir_for "$MODEL_NAME")/$MODEL_NAME"
 . "$(dirname "${BASH_SOURCE[0]}")/rig_share.sh"  # the asking node must share (swarm_use)
 rig_share_init "$MODEL_NAME" "$(dirname "$SRC_MODEL")"
 BINARY="${BINARY:-$(cd "$(dirname "$0")/.." && pwd)/target/release/swarmllm}"

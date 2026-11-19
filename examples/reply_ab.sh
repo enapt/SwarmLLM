@@ -1,4 +1,5 @@
 #!/bin/bash
+. "$(dirname "${BASH_SOURCE[0]}")/test_models.sh"  # models_dir_for: the test set, else the node's folder
 # Greedy replies from one binary, one JSON line per (model, prompt).
 #
 # usage: examples/reply_ab.sh <binary> <port> <out.jsonl> [models...]
@@ -26,7 +27,7 @@
 # you WANT a split (memory/release_gate.md).
 BIN="$1"; PORT="$2"; OUT="$3"; shift 3
 MODELS="${*:-llama-3.2-3b-instruct-q4-k-m qwen3-1.7b-q8-0 phi-3.5-mini-instruct.q4-k-m microsoft-phi-4-mini-instruct-q4-k-m qwen2.5-coder-7b-instruct-q4-k-m gemma-2-2b-it-q4-k-m tinyllama-1.1b-chat-v1.0.q4-k-m thudm-glm-4-9b-0414-q4-k-m mistral-7b-instruct-v0.3-q4-k-m}"
-MODELS_DIR="$HOME/.local/share/swarmllm/models"
+MODELS_DIR="$(models_dir_for "${MODELS%% *}")"
 [ -x "$BIN" ] || { echo "not executable: $BIN"; exit 2; }
 
 D=$(mktemp -d)

@@ -1,4 +1,5 @@
 #!/bin/bash
+. "$(dirname "${BASH_SOURCE[0]}")/test_models.sh"  # models_dir_for: the test set, else the node's folder
 # A SMALL node, reproduced locally.
 #
 # Every memory defect reported from the field since #452 — #454-#457, #461-#468
@@ -28,12 +29,12 @@
 set -u
 BIN="${1:-./target/debug/swarmllm}"
 MODEL=llama-3.2-3b-instruct-q4-k-m
-SRC="$HOME/.local/share/swarmllm/models/$MODEL"
+SRC="$(models_dir_for "$MODEL")/$MODEL"
 # A SECOND, smaller model, for the case the field report actually describes: a
 # dead worker refusing a DIFFERENT model. Optional — that check is skipped if
 # it is not on this machine.
 MODEL2=qwen2.5-0.5b-instruct-fp16
-SRC2="$HOME/.local/share/swarmllm/models/$MODEL2"
+SRC2="$(models_dir_for "$MODEL2")/$MODEL2"
 PORT=8866
 # Sized from the model: too small to admit it, then comfortably large enough.
 TIGHT_MB=2200

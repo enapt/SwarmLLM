@@ -1,4 +1,5 @@
 #!/bin/bash
+. "$(dirname "${BASH_SOURCE[0]}")/test_models.sh"  # models_dir_for: the test set, else the node's folder
 # Long-running soak: drive an ISOLATED node with sustained inference and sample
 # the things that leak, so growth over hours is visible rather than inferred.
 #
@@ -48,7 +49,7 @@ PORT="${PORT:-8895}"
 MODEL="${MODEL:-tinyllama-1.1b-chat-v1.0.q4-k-m}"
 CONCURRENCY="${CONCURRENCY:-2}"
 SAMPLE_SECS="${SAMPLE_SECS:-60}"
-SRC=~/.local/share/swarmllm/models/$MODEL
+SRC="$(models_dir_for "$MODEL")/$MODEL"
 # Per-PORT so two soaks can run side by side. It used to be one fixed path for
 # every run, and `stop_ours` + the `rm -rf` below are scoped to it — so starting
 # a second soak silently killed the first one's node and deleted its data dir

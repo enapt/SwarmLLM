@@ -17,6 +17,8 @@
 #   rig_share_init <model under test> <models dir>   # once; exits 2 if unusable
 #   rig_share <node data dir>                        # links SHARE_MODEL whole into its models/
 
+. "$(dirname "${BASH_SOURCE[0]}")/test_models.sh"  # models_dir_for: the test set, else the node's folder
+
 # Test nodes: no heat hold refuses their work (#440) — the safety kit guards this machine.
 export SWARMLLM_HEAT_GUARD="${SWARMLLM_HEAT_GUARD:-0}"
 
@@ -30,6 +32,8 @@ rig_share_init() {
     esac
   fi
   [ "$SHARE_MODEL" = none ] && return 0
+  # The share model may sit in the test set while the model under test does not.
+  [ -d "$RIG_SHARE_MODELS_DIR/$SHARE_MODEL" ] || RIG_SHARE_MODELS_DIR="$(models_dir_for "$SHARE_MODEL")"
   if [ "$SHARE_MODEL" = "$target" ]; then
     echo "rig: SHARE_MODEL must differ from the model under test ($target)" >&2
     exit 2

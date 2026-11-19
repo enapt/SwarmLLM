@@ -1,4 +1,5 @@
 #!/bin/bash
+. "$(dirname "${BASH_SOURCE[0]}")/test_models.sh"  # models_dir_for: the test set, else the node's folder
 # FUTURE_WORK #129 end to end: a requester hands a whole model to a peer that
 # must first LOAD it, and the load takes longer than the old flat 120 s
 # first-token budget (fault injection on the server:
@@ -39,7 +40,7 @@ fi
 ip link set lo up || { echo "cannot bring up loopback"; exit 2; }
 
 MODEL="${MODEL:-tinyllama-1.1b-chat-v1.0.q4-k-m}"
-SRC="$HOME/.local/share/swarmllm/models/$MODEL"
+SRC="$(models_dir_for "$MODEL")/$MODEL"
 . "$(dirname "${BASH_SOURCE[0]}")/rig_share.sh"  # the asking node must share (swarm_use)
 rig_share_init "$MODEL" "$(dirname "$SRC")"
 DELAY="${DELAY:-200}"

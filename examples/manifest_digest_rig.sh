@@ -1,4 +1,5 @@
 #!/bin/bash
+. "$(dirname "${BASH_SOURCE[0]}")/test_models.sh"  # models_dir_for: the test set, else the node's folder
 # FUTURE_WORK #91 (2): a newcomer advertising `features::MANIFEST_DIGESTS` is
 # caught up with a `ManifestDigest` (the version of each manifest, ~200 bytes a
 # model) and pulls (`ManifestPull`) only the versions it lacks, where it was
@@ -41,7 +42,7 @@ if [ -z "${DIGEST_RIG_IN_NETNS:-}" ]; then
 fi
 BIN="$(readlink -f "$1")"; OUT="${2:-./manifest_digest_out}"
 BIN_A="$(readlink -f "${BIN_A:-$BIN}")"; BIN_C="$(readlink -f "${BIN_C:-$BIN}")"
-MODEL_DIR="${MODEL_DIR:-$HOME/.local/share/swarmllm/models/tinyllama-1.1b-chat-v1.0.q4-k-m}"
+MODEL_DIR="${MODEL_DIR:-$(models_dir_for tinyllama-1.1b-chat-v1.0.q4-k-m)/tinyllama-1.1b-chat-v1.0.q4-k-m}"
 MODEL="$(basename "$MODEL_DIR")"
 mkdir -p "$OUT"
 ip link set lo up || { echo "cannot bring up loopback"; exit 2; }

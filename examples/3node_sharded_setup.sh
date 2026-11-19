@@ -1,4 +1,5 @@
 #!/bin/bash
+. "$(dirname "${BASH_SOURCE[0]}")/test_models.sh"  # models_dir_for: the test set, else the node's folder
 # SWARM-SPEC 3-node sharded cluster — forces distributed pipeline.
 #
 # Layout:
@@ -31,7 +32,7 @@ set -e
 # Model under test. Defaults to the Smoke tier (2 shards); override with
 # SWARM_BENCH_MODEL for a deeper split. See docs/REFERENCE_MODELS.md.
 MODEL_NAME="${SWARM_BENCH_MODEL:-tinyllama-1.1b-chat-v1.0.q4-k-m}"
-SRC_MODEL=~/.local/share/swarmllm/models/$MODEL_NAME
+SRC_MODEL="$(models_dir_for "$MODEL_NAME")/$MODEL_NAME"
 . "$(dirname "${BASH_SOURCE[0]}")/rig_share.sh"  # the asking node must share (swarm_use)
 rig_share_init "$MODEL_NAME" "$(dirname "$SRC_MODEL")"
 

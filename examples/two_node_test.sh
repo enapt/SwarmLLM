@@ -1,4 +1,5 @@
 #!/bin/bash
+. "$(dirname "${BASH_SOURCE[0]}")/test_models.sh"  # models_dir_for: the test set, else the node's folder
 # Two nodes, isolated from the public swarm, on ports that cannot collide with
 # a real one. One holds the models, the other holds nothing — so a request to
 # the empty node MUST be served by its peer, exercising the cross-node path
@@ -27,7 +28,7 @@ set -u
 
 BIN="${1:-./target/release/swarmllm}"
 MODEL="${SWARM_TWONODE_MODEL:-llama-3.2-3b-instruct-q4-k-m}"
-MODELS_DIR="${SWARM_TWONODE_MODELS_DIR:-$HOME/.local/share/swarmllm/models}"
+MODELS_DIR="${SWARM_TWONODE_MODELS_DIR:-$(models_dir_for "$MODEL")}"
 . "$(dirname "${BASH_SOURCE[0]}")/rig_share.sh"  # the asking node must share (swarm_use)
 rig_share_init "$MODEL" "$MODELS_DIR"
 SERVER_PORT="${SWARM_TWONODE_SERVER_PORT:-8894}"

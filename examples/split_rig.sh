@@ -1,4 +1,5 @@
 #!/bin/bash
+. "$(dirname "${BASH_SOURCE[0]}")/test_models.sh"  # models_dir_for: the test set, else the node's folder
 # Two nodes on this machine, each holding a CHOSEN subset of one model's shards,
 # so the planner has to split a request between them — then either ask through
 # the split, or break one side of it mid-reply and see what the client gets.
@@ -529,7 +530,7 @@ elif [ "$MODE" = layerprice ]; then
 else
   MODEL="${MODEL:-llama-3.2-3b-instruct-q4-k-m}"
 fi
-MODELS_DIR="${MODELS_DIR:-$HOME/.local/share/swarmllm/models}"
+MODELS_DIR="${MODELS_DIR:-$(models_dir_for "$MODEL")}"
 SRC="$MODELS_DIR/$MODEL"
 [ -f "$SRC/manifest.json" ] || { echo "no manifest for $MODEL in $MODELS_DIR"; exit 2; }
 SHARDS=$(ls "$SRC" | sed -n 's/^shard_\([0-9]*\)\.bin$/\1/p' | sed 's/^0*\([0-9]\)/\1/' | sort -n)

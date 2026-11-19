@@ -1,9 +1,10 @@
 #!/bin/bash
+. "$(dirname "${BASH_SOURCE[0]}")/test_models.sh"  # models_dir_for: the test set, else the node's folder
 # SWARM-SPEC 3-node local cluster setup for benchmarking.
 
 set -e
 
-SRC_MODEL=~/.local/share/swarmllm/models/tinyllama-1.1b-chat-v1.0.q4-k-m
+SRC_MODEL="$(models_dir_for tinyllama-1.1b-chat-v1.0.q4-k-m)/tinyllama-1.1b-chat-v1.0.q4-k-m"
 # Resolve binary relative to this script (repo_root/target/release/swarmllm)
 # so the cluster works regardless of clone path. Override BINARY=... to
 # point at a different build (e.g. CUDA, llama feature).

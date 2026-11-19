@@ -1,4 +1,5 @@
 #!/bin/bash
+. "$(dirname "${BASH_SOURCE[0]}")/test_models.sh"  # models_dir_for: the test set, else the node's folder
 # #436 end-to-end: a segment's peer is killed mid-request; the coordinator must
 # Passed 2026-09-02 against the v0.3.147 fix (clean 503 in 10.4 s); see
 # docs/DIAGNOSTICS.md § Benchmarks and gotcha #436 for what it verifies.
@@ -9,7 +10,7 @@
 set -u
 BIN="${1:-./target/debug/swarmllm}"
 MODEL=llama-3.2-3b-instruct-q4-k-m
-SRC="$HOME/.local/share/swarmllm/models/$MODEL"
+SRC="$(models_dir_for "$MODEL")/$MODEL"
 SP=8894; CP=8893
 BASE=$(mktemp -d); S="$BASE/server"; C="$BASE/client"
 mkdir -p "$S/models/$MODEL" "$C/models/$MODEL"

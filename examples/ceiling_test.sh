@@ -1,4 +1,5 @@
 #!/bin/bash
+. "$(dirname "${BASH_SOURCE[0]}")/test_models.sh"  # models_dir_for: the test set, else the node's folder
 # A tester's report, 2026-10-07 (v0.3.229): a coordinator handed a whole model to
 # a processor-only peer whose memory cap could never hold it (6688 MB needed,
 # 5200 MB allowed), and the peer refused it 8.8 s later from another continent.
@@ -32,7 +33,7 @@ fi
 ip link set lo up || { echo "cannot bring up loopback"; exit 2; }
 
 MODEL="${MODEL:-tinyllama-1.1b-chat-v1.0.q4-k-m}"
-SRC="$HOME/.local/share/swarmllm/models/$MODEL"
+SRC="$(models_dir_for "$MODEL")/$MODEL"
 . "$(dirname "${BASH_SOURCE[0]}")/rig_share.sh"  # the asking node must share (swarm_use)
 rig_share_init "$MODEL" "$(dirname "$SRC")"
 SP=8895; CP=8896

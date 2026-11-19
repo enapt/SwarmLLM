@@ -1,4 +1,5 @@
 #!/bin/bash
+. "$(dirname "${BASH_SOURCE[0]}")/test_models.sh"  # models_dir_for: the test set, else the node's folder
 # Gotcha #438 end-to-end: one content token of a fast-path reply is LOST on the
 # serving side (fault injection: SWARMLLM_FAULT_DROP_STREAM_TOKEN=5) and the
 # reply must still arrive whole — the requester notices the hole, asks the
@@ -14,7 +15,7 @@
 set -u
 BIN="${1:-./target/debug/swarmllm}"
 MODEL=llama-3.2-3b-instruct-q4-k-m
-SRC="$HOME/.local/share/swarmllm/models/$MODEL"
+SRC="$(models_dir_for "$MODEL")/$MODEL"
 . "$(dirname "${BASH_SOURCE[0]}")/rig_share.sh"  # the asking node must share (swarm_use)
 rig_share_init "$MODEL" "$(dirname "$SRC")"
 SP=8895; CP=8896

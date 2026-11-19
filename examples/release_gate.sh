@@ -1,4 +1,5 @@
 #!/bin/bash
+. "$(dirname "${BASH_SOURCE[0]}")/test_models.sh"  # models_dir_for: the test set, else the node's folder
 # The release gate: what only the DOWNLOADED artifact can show, in under an hour.
 #
 # usage: examples/release_gate.sh <candidate binary> <previous release binary> <outdir>
@@ -140,7 +141,7 @@ if [ "${SPEED:-1}" != 0 ]; then
   PROMPT_FILE=$OUT/speed_prompt.txt
   { echo "Summarise the following document in three short paragraphs."; echo; head -c 7000 "$REPO/docs/ARCHITECTURE.md"; } > "$PROMPT_FILE"
   arm() { # binary label model extra_toml
-    local D; D=$(mktemp -d); ln -s "$HOME/.local/share/swarmllm/models" "$D/models"
+    local D; D=$(mktemp -d); ln -s "$(models_dir_for "$3")" "$D/models"
     # Off the swarm by the pool scope, which is what the planner reads — the gossip id alone
     # leaves a node that times a PEER's card wherever a peer is faster (gotcha #536). Updates
     # off: an older binary than the latest PUBLISHED release installs it over its own file

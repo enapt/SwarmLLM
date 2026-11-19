@@ -150,6 +150,10 @@ swarmllm/
 │                 rig_share.sh — sourced by every multi-node rig: a node that asks holds a
 │                 small model of another vocabulary whole, so it SHARES 2+ parts (`swarm_use`,
 │                 v0.3.271) and is not refused before any peer is asked (gotcha #1030);
+│                 test_models.sh — sourced by every test script: `models_dir_for <id>` is the
+│                 test set (`~/.local/share/swarmllm-test-models`, hard links) where it holds the
+│                 model, else the node's own folder — so a node may give back the older models
+│                 the release check runs on;
 │                 split_rig.sh — two isolated nodes holding chosen shards of one model, so a
 │                 request MUST split; `split` asks through it, `kill` breaks one side
 │                 mid-reply (KILL=A|B|B_UNLOAD) — the release gate's split check (#93);

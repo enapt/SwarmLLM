@@ -1,4 +1,5 @@
 #!/bin/bash
+. "$(dirname "${BASH_SOURCE[0]}")/test_models.sh"  # models_dir_for: the test set, else the node's folder
 # FUTURE_WORK #231 end to end: a model its holders cannot run is fetched by a
 # machine that can, and then served. A tester's report (2026-10-07, v0.3.229):
 # the only holder of a whole Qwen 3.5 9B was a peer whose memory cap could never
@@ -38,7 +39,7 @@ fi
 ip link set lo up || { echo "cannot bring up loopback"; exit 2; }
 
 MODEL="${MODEL:-tinyllama-1.1b-chat-v1.0.q4-k-m}"
-SRC="$HOME/.local/share/swarmllm/models/$MODEL"
+SRC="$(models_dir_for "$MODEL")/$MODEL"
 . "$(dirname "${BASH_SOURCE[0]}")/rig_share.sh"  # the asking node must share (swarm_use)
 rig_share_init "$MODEL" "$(dirname "$SRC")"
 WAIT_SECS="${WAIT_SECS:-1200}"

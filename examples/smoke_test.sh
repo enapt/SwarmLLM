@@ -1,4 +1,5 @@
 #!/bin/bash
+. "$(dirname "${BASH_SOURCE[0]}")/test_models.sh"  # models_dir_for: the test set, else the node's folder
 # Smoke-test a SwarmLLM binary end to end, on an isolated node.
 #
 # Tests pass and the daemon still has to start, serve and apply settings —
@@ -22,7 +23,7 @@ set -u
 BIN="${1:-./target/release/swarmllm}"
 PORT="${2:-8807}"
 MODEL="${SWARM_SMOKE_MODEL:-llama-3.2-3b-instruct-q4-k-m}"
-MODELS_DIR="${SWARM_SMOKE_MODELS_DIR:-$HOME/.local/share/swarmllm/models}"
+MODELS_DIR="${SWARM_SMOKE_MODELS_DIR:-$(models_dir_for "$MODEL")}"
 
 [ -x "$BIN" ] || { echo "not executable: $BIN"; exit 1; }
 

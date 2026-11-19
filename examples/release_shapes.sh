@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/test_models.sh"  # models_dir_for: the test set, else the node's folder
 # Exercise the REQUEST SHAPES that smoke_test.sh cannot.
 #
 # Why this exists: every defect found on 2026-08-26 — foreign peers adopted as
@@ -24,7 +25,7 @@ set -u
 BIN="${1:-./target/release/swarmllm}"
 PORT="${2:-8819}"
 MODEL="${3:-llama-3.2-3b-instruct-q4-k-m}"
-MODELS_DIR="${SWARM_SHAPES_MODELS_DIR:-$HOME/.local/share/swarmllm/models}"
+MODELS_DIR="${SWARM_SHAPES_MODELS_DIR:-$(models_dir_for "$MODEL")}"
 [ -x "$BIN" ] || { echo "not executable: $BIN"; exit 1; }
 
 D=$(mktemp -d)

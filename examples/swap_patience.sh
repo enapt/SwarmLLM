@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/test_models.sh"  # models_dir_for: the test set, else the node's folder
 # What does the GPU swap floor cost, in CONVERSATION?
 #
 # Two models that each fit the card but not together, alternating turns, each
@@ -54,8 +55,8 @@ req() { # model, conversation-json  -> seconds
 run_arm() { # floor_secs, label
   local floor="$1" label="$2"
   rm -rf "$DIR/data"; mkdir -p "$DIR/data/models"
-  cp -al ~/.local/share/swarmllm/models/"$A" "$DIR/data/models/"
-  cp -al ~/.local/share/swarmllm/models/"$B" "$DIR/data/models/"
+  cp -al "$(models_dir_for "$A")/$A" "$DIR/data/models/"
+  cp -al "$(models_dir_for "$B")/$B" "$DIR/data/models/"
   cp "$DIR/config.toml" "$DIR/data/config.toml"
 
   if [ -n "$floor" ]; then export SWARMLLM_VRAM_SWAP_MIN_IDLE_SECS="$floor"; else unset SWARMLLM_VRAM_SWAP_MIN_IDLE_SECS; fi

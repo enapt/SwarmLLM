@@ -1,4 +1,5 @@
 #!/bin/bash
+. "$(dirname "${BASH_SOURCE[0]}")/test_models.sh"  # models_dir_for: the test set, else the node's folder
 # A node that cannot reach HuggingFace, holding a part that is not the upload's
 # bytes, beside two nodes that can — does it replace the part from them?
 #
@@ -74,7 +75,7 @@ case "$ORDER" in first|late) ;; *) echo "ORDER must be first or late"; exit 2 ;;
 [ "$ORDER" = late ] && [ "$HFLESS" = offline ] && { echo "ORDER=late needs a B that dials: HFLESS=proxy or none"; exit 2; }
 [ -x "$BIN_AC" ] && [ -x "$BIN_B" ] || { echo "binary not executable"; exit 2; }
 MODEL="${MODEL:-tinyllama-1.1b-chat-v1.0.q4-k-m}"
-MODELS_DIR="${MODELS_DIR:-$HOME/.local/share/swarmllm/models}"
+MODELS_DIR="${MODELS_DIR:-$(models_dir_for "$MODEL")}"
 SRC="$MODELS_DIR/$MODEL"
 [ -f "$SRC/manifest.json" ] && [ -f "$SRC/hf_source.json" ] || { echo "no manifest/hf_source for $MODEL in $MODELS_DIR"; exit 2; }
 SHARDS=$(ls "$SRC" | sed -n 's/^shard_\([0-9]*\)\.bin$/\1/p' | sed 's/^0*\([0-9]\)/\1/' | sort -n)
