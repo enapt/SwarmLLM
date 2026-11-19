@@ -563,6 +563,28 @@ plan that left the drafter no room is never again priced at the drafter's yield.
 (one conversation beside it) keeps the last word. Test
 `room_is_left_on_the_card_beside_the_layers_for_their_block_drafter`.
 
+**With no block drafter held, the file's own guess head gets no room — measured, the room NOT shipped**
+(2026-11-19, #481 (3c)). A Qwen 3.5-family split's other guesser is the next-token block the file carries
+(#425 (a)); `split_yield_prior` prices every split at its yield once `split_guess_head_here` (the file and
+its parts), whatever room the plan leaves it, and `block_drafter_room_mb` answers `None` without a block
+drafter on disk — so no cut, no plain-plan pricing. **Main, fresh start, 19:20-19:26Z
+(`~/swarmllm-gate/tier_1119m`)**: Qwen3.8-27B planned `[0,21)` here + Proxmox `[21,24)` + Australia
+`[24,64)`; the 227 MB block was refused at the load (`next-token-prediction block (a guess head) …
+on_card=true loaded=false`: the card's conversation budget beside 21 layers was ~166 MB, the load takes the
+block only up to a quarter of it), the guesser stopped (`no block drafter or guess head beside this
+segment`), and the replies ran **129 and 134 rounds for 160 tokens** (1.2 a round) against the **2.16 /
+1.97** priced — 17.0 s predicted, 45.3 s measured — at 3.3-3.5 tok/s, one attempt each.
+
+**The room, tried (`tier_1119q`, 20:07-20:18Z, patch `~/swarmllm-gate/tier_1119q/guess_head_room_aside.patch`)**:
+the same cut for the head (four times its block's card bytes, the load's own rule shared by both ends) fired
+(`guesser_mb=912 room_for=17 room_without_it=24`), and the plain plan, priced unguessed past the room, won
+54.5 s against 59.1 — `[0,21)` here + Australia `[21,61)` + Proxmox `[61,63)` + `[63,64)` HERE. That tail is
+#481 (5)'s open failure (`1 layers 63..64 … need about 261 MB more`); the re-plans then met Australia (on
+v0.3.300, without `busy_beside`) refusing this request's own earlier attempt as "a conversation now", and
+the first request FAILED after five; the next two answered at **0.96 and 1.0 tok/s, five attempts each**,
+through Italy. Honest pricing alone moves the 27B onto routes the tail problem breaks, so it waits for
+#481 (5)'s tail (a card worker's charge reconciled, then the honest tail price) — and is measured again then.
+
 ## Room for more layers is not room for the layers already held (2026-09-24, #95)
 
 **`NodeCandidate::held_ranges` + `layers_it_would_add` — the local node is

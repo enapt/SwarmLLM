@@ -935,7 +935,16 @@ frame, then add a receipt ACK or a per-frame read deadline mirroring request-res
 > target (`common_fit_extra_model`); SpecExec sizes the draft budget to the memory beside the target. Test
 > `room_is_left_on_the_card_beside_the_layers_for_their_block_drafter`. (3b) **Open**: a thinking-on reply may still
 > keep fewer tokens a round than the code/prose prior measured with thinking off — `pipeline::reply_kind` reads the
-> request alone, not whether the template opens a scratchpad. Measure once (3a) has run.
+> request alone, not whether the template opens a scratchpad. Measure once (3a) has run. (3c) **Open — the guess
+> head gets no room**: with no block drafter held the split's guesser is the file's own head, priced in every split
+> (`split_guess_head_here`) but left no room — Qwen3.8-27B `[0,21)` here + Proxmox + Australia refused its 227 MB
+> block at the load and ran 1.2 tokens a round against 2.0-2.2 priced, 3.3-3.5 tok/s (`tier_1119m`, 2026-11-19).
+> The room was built and measured (`tier_1119q`, patch `~/swarmllm-gate/tier_1119q/guess_head_room_aside.patch`):
+> the plain plan, priced unguessed, then ran a tail `[63,64)` HERE — #481 (5)'s open failure — and the first request
+> failed, the next two ran 0.96-1.0 tok/s over five attempts. NOT shipped; it lands after (5)'s tail
+> (`docs/invariants/scheduling.md` § "A model with no engine drafter leaves room for its BLOCK drafter"). Prior art:
+> llama.cpp counts the next-token block among the model's layers (`n_layer_all`), placed and charged with the
+> weights before any context is sized.
 >
 > (4) **Diagnosable on main: a US RTX 5080 (`5bfbd36e`, 16 GB, holds the Gemma 4s and gpt-oss) is never a
 > candidate.** Read 2026-11-19 15:30Z from `/api/admin/peers`: `can_serve_inference: false`, `healthy: true`, 6.7 of
