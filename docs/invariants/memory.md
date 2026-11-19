@@ -3316,7 +3316,7 @@ the spawn's (`partial_gpu_layers`) and then its refit by the load's reading (#36
 so the growth found the card full. **Measured** (`~/swarmllm-gate/split27_1119n`, main at 79d5f182e, live node
 stopped, 2026-11-19 15:32-15:47Z): Qwen3.8-27B planned `[0,21)` + `[63,64)` here and `[21,63)` in Australia;
 17 of 21 layers split onto the 8 GB card, the load read 6,994 MB free and refitted 20, the budget held 6,351 of
-~6,366 MB, and `[63,64)` asked 261 MB (one layer at growth's rate — the head is lent, #458): refused at the daemon
+~6,366 MB, and `[63,64)` asked 261 MB (one MEAN layer at growth's rate; that the head was lent, #458, was assumed, not read — see "A growth is priced as the range it loads" below): refused at the daemon
 (`charge_additional_segment`), the worker in use so no retirement — **5 of 6 requests failed**.
 
 **Now**: `ModelProcessPool::admit_prompt` (the up-front admission, asked with every range the plan gives this
@@ -3355,6 +3355,26 @@ records the ranges each request's passes from 0 were sent for (`WorkerHandle::pa
 serves the forward, `note_pass_range`) and releases only where the new pass OVERLAPS one — a re-plan re-sends its layers
 (Australia's `[21,63)` then `[21,64)`); a pass beside them is the same pass's other range and its hold stands. Test: the
 `own-attempt` case (beside: held; overlapping: released).
+
+**The tail's growth is priced at the mean layer, and the honest price is not yet shippable (same evening, measured,
+NOT shipped).** With the hold and the trim in, `~/swarmllm-gate/split27_1119s` (18:16Z, the same forced 27B, main at
+6b17f2c95) kept the first range's worker, the trim handed back 992 MB, and the tail's 261 MB growth was admitted with
+36 MB to spare — then the loader put 1,336 MB of weights on the card for `[63,64)`: the layer (342 MB, a full-attention
+layer, against the mean 261) and the 994 MB output head, which that first range had read for its guess head and dropped
+for want of room (a head is lent, #458, only while the process still holds one). The cache found nothing left
+(`gpu-kv-budget-exhausted`), the worker was ended and the retry pinned the WHOLE model to the processor for 120 s: every
+request answered, at 4.4-7.5 tok/s. Growth is priced off `segment_cost_curve`, a line through the whole model with
+`head_bytes = 0` — both ends' tables spread over every layer: right on average, wrong at the ends.
+Priced instead as the estimator prices the range itself (`footprint_inputs(Some(range))` less the curve's fixed term;
+llama.cpp places the head as a layer of its own, `dev_output = get_layer_buft_list(n_layer)`), the spawn left 1,405 MB
+(13 of 21 layers on the card, refitted to 14, charged 4,732 MB) — and `~/swarmllm-gate/split27_1119t` (18:44Z) was
+refused at the growth, **4 of 4 requests failed**: the first range's worker used ~5,359 MB (its pool's in-use at the idle
+trim; 5,664-5,888 reserved) against its 4,732 MB charge, and the live budget reads that excess as ANOTHER program's
+(`compute_vram_budget`: used − committed), so the room was gone before the growth asked; the re-plan found no route
+("room for about 63 of its 64 layers"). A slow answer had become none, so it was set aside (patch:
+`~/swarmllm-gate/split27_1119t/growth_price_aside.patch`). What it needs: a worker's charge reconciled to what it really
+holds on the card (the estimate missed ~630 MB at 14 card layers of a Qwen 3.5 first range and over-counted ~380 MB at
+19), so its own excess never reads as another program's; then the honest price can ship, with the room it leaves.
 
 ## A model process holds one copy of the output head (2026-11-16, FUTURE_WORK #458)
 

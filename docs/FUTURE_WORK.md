@@ -964,13 +964,21 @@ frame, then add a receipt ACK or a per-frame read deadline mirroring request-res
 > running for a conversation now") — a question is weighed beside the request it names (`busy_beside`, the #448
 > rule: a re-plan keeps its id) and a pass from position 0 releases that request's earlier hold before it asks for the
 > worker (`starts_a_pass`, `release_an_earlier_pass` — only over layers that request's earlier pass was sent for here,
-`pass_ranges`: the first version also released a chain's OTHER range here and retired the 27B's card worker
-mid-request, split27_1119q 17:16Z; its growth fell 261 MB short because the first range's worker held a refused
-guess head's 994 MB in its card pool, read as another program's — a load now trims the pool as it ends,
-`give_back_what_the_load_freed`). Prior art: vLLM frees an aborted or preempted sequence's
+> `pass_ranges`: the first version also released a chain's OTHER range here and retired the 27B's card worker
+> mid-request, split27_1119q 17:16Z; its growth fell 261 MB short because the first range's worker held a refused
+> guess head's 994 MB in its card pool, read as another program's — a load now trims the pool as it ends,
+> `give_back_what_the_load_freed`). Prior art: vLLM frees an aborted or preempted sequence's
 > blocks before it is rescheduled, never counting them against itself. Left: a worker already RESIDENT whole for the
 > first range (an earlier request of another shape) still refuses the tail's growth; the router's re-plan with fewer
-> layers here then routes elsewhere where the swarm has a route.
+> layers here then routes elsewhere where the swarm has a route. **And the tail's growth is priced at the MEAN layer** (measured 2026-11-19, split27_1119s
+> 18:16Z): `[63,64)` was charged 261 MB and its load put the layer and the 994 MB output head on the card, 1,336 MB;
+> the cache found no room, the worker was ended and the retry ran the whole 27B on the processor (every request
+> answered, 4.4-7.5 tok/s). Pricing the range as it loads (llama.cpp places the head as a layer of its own,
+> `dev_output`) left the right room at the spawn, but the first range's worker then held ~630 MB more than its charge,
+> the live budget read it as another program's (`compute_vram_budget`: used − committed), and the growth was refused
+> with no route — 4 of 4 failed (split27_1119t 18:44Z), so it was set aside (`docs/invariants/memory.md` § "The tail's
+> growth is priced at the mean layer"). Next: reconcile a worker's charge to what it holds on the card (its pool's
+> in-use, reported after a load and a prompt pass), then ship the honest price.
 
 #### #452 — Full computers keep parts of models the swarm never runs, so the models people use find no room
 `P1` · placement · **BUILT, field check (a) as designed on the two computers we can read (2026-11-19); other computers open** — 2026-11-14 · history: #389 (d), #400, #401, #246
