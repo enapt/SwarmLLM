@@ -936,7 +936,15 @@ beside the trust table), how old a figure may be, and a rig that restarts the no
 > 36.9 s; Australia whole at 28.2 s, ~20 s of it its cold load (it holds the split's range, (2)). Prose: a 4-part chain
 > here + Thailand + here + Australia at 13.2 s was chosen over Australia whole at 7.7 under the optimistic split prior
 > (`split_rounds::prior_for_request`). Next: a split's yield read off what its first segment's WORKER holds (no guesser
-> loaded → a token a round), then (2)'s load.
+> loaded → a token a round), then (2)'s load. Where that goes (mapped 2026-11-19, read-only): `pipeline::split_yield_prior`
+> (`pipeline/mod.rs` ~1783) asks config, the header and the parts on disk — `drafter_may_guess_for`,
+> `drafter_to_leave_room_for`, `split_guess_head_here` — never the live worker; `the_plan_beside_the_drafter` judges
+> room by a layer count. The worker KNOWS: `try_attach_block_drafter` → `SplitModel::block_drafter_state`
+> (`BlockDrafterState::NoRoom` …), logged at load and sent only per reply (`HowGuessed.block_drafter` on
+> `GenerateDone`); `WorkerHandle` and `HeldRange` carry nothing of it. So: the worker reports its guesser state once
+> loaded, the pool keeps it beside the held range, and a plan whose first segment that worker serves prices
+> `YieldPrior::None` — which also ends the optimistic exploration (`SplitRounds::prior_for_request` explores only from
+> `YieldPrior::Drafter`). Prior art: not yet searched.
 >
 > (2) **Measured and set aside 2026-11-19 evening — the load was not what passed Australia's whole run over.**
 > Australia's split worker held [14,40) (again [12,40), then [8,40)), so its whole run carried `cold_load_ms` (19,820 of
