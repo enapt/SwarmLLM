@@ -479,6 +479,9 @@ Microsoft WDDM/TDR docs, Apple developer docs; issue trackers of Ollama, LM Stud
   (`#[ignore]`, run on this WSL2 host: 73.05 °C in 0.76 s; red with the WSL branch off). Prior art: windows_exporter's
   `thermalzone` collector and Citrix uberAgent's guide read this class; no WSL-side reader found (searched
   2026-11-18); `daemon::metered` already asks Windows through `powershell.exe` from WSL2.
+  **Seen on the released build** (v0.3.300, this project's WSL2 node, 2026-11-19 ~02:20Z): the diagnostics report's
+  `heat:` line reads `card 62 C … processor 75 C` (before: no processor figure under WSL2), from ONE long-lived
+  `powershell.exe` reader.
 
 **Done (2026-11-11, steps 1, 2, 5, 6 of stage A — `daemon::host_heat`):**
 - The reading and the stop/start rule as designed (card at its target 120 s, hardware protection or a stuck
@@ -893,7 +896,7 @@ frame, then add a receipt ACK or a per-frame read deadline mirroring request-res
 ### Routing and placement
 
 #### #452 — Full computers keep parts of models the swarm never runs, so the models people use find no room
-`P1` · placement · **BUILT, field check open** — 2026-11-14 · history: #389 (d), #400, #401, #246
+`P1` · placement · **BUILT, field check (a) as designed on the two computers we can read (2026-11-19); other computers open** — 2026-11-14 · history: #389 (d), #400, #401, #246
 
 > **Done on main (2026-11-14), all three defects and both follow-ups.** (1) The swarm-use pool:
 > `AutoShardManager::unused_verdict` reads the swarm's advertised use (`NodeCapability::models_served`), never
@@ -1033,6 +1036,23 @@ falling below ~0.5 in one pass (the 10-min `DIAG: models held here` lines and `s
 `/api/admin/peers`), or a model given back under pressure requested within its 14 days with no holder
 left. The stop: a model `Unused` only under the pressed window (quiet 2-7 days) goes least recently used
 first and only while the pass's running pressure stays ≥ 0.8; one quiet past 7 days goes as now.
+**Field read 2026-11-19 (v0.3.299-.300)** — field check (a) on the two computers whose logs we can read:
+- **An auto-managed computer prunes as designed** (the project's Proxmox node, 44 GB limit, no models its owner chose;
+  `journalctl -u swarmllm` since 11-14): spare copies given back for a wanted part's room 18 / 9 / 52 / 27 / 49 a day
+  (11-14 → 11-18; mostly 70B copies for room for ornith-1.5-9b, gpt-oss-20b and gemma-4-12b parts), copies over the
+  count 69; **given back for want of use since 11-16: 28 parts of 6 models** — the cooled ornith-1.5-35b with
+  `copies_stay=true` (two copies kept), the others `copies_stay=false`. Its pressure stayed 0.90-1.00 in every 10-min
+  `DIAG: models held here` line since 11-15, so no pass fell anywhere near ~0.5: **the low-water stop above is not
+  needed**. Rooms it cannot complete are refused whole (`a part asks for room and prune gave none back`, 51-114 a
+  day): what is left is kept by rules (cooled copies, models on trial, served for another computer, run here).
+- **A computer full of its owner's downloads gives back nothing, as designed** (this project's own node, 100 GB limit):
+  139 GB held, 153 of 250 parts pinned by the owner (21 models), the rest run here within the window or the last two
+  copies of cooled models; only 3 copies over the count went (11-17, 11-19). Every pass since 11-18 asks room for a
+  wanted part it cannot complete (it lacks the 39 GB overage first), so the hourly over-budget WARN stays quiet; the
+  owner hears the 6-hourly `activity.storage_full_part_wanted` toast instead, which says their downloads are kept.
+- Across the swarm, peers retract parts every day (`Peer retracted shards it no longer hosts`: the Australian
+  computer 22-43 parts a day, Proxmox 39-67), and two of six peers advertise `storage_full`. Still open: the other
+  computers' own logs (their give-backs are only seen as retractions, which deletions and replacements also cause).
 
 #### #250 — A model held whole here, which the card holds only part of, can be routed through peers at a fraction of local speed
 `P3` · routing · **NARROWED** — 2026-11-06 (was P1 PARTIAL since 2026-10-12; every contributor named below is fixed or the setting working as designed, the prompt price since 10-25) · history: report #035 (a tester, RTX 3060 12 GB, v0.3.232-.234)
