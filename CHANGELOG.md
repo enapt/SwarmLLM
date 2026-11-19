@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.3.301-alpha] — 2026-11-19
+
+**"Stop keeping it for me": let use decide whether a model stays.** A model you downloaded, or set to "Keep on this
+computer", now has a second way out beside Delete. It deletes nothing: from then on the computer keeps the model only
+while people use it, gives its parts back when nobody does, and fetches them again if the model is asked for. Delete
+stays the way to say "do not download its parts again", and its confirmation now says so; "Stop keeping it for me"
+is also the way back from a Delete. In all 21 languages (#452).
+
+**A model downloaded again after a Delete is no longer held back for good.** The dashboard's Download button
+brought the parts back but left the earlier Delete on record, so once nobody used the model and its parts were given
+back, this computer would never fetch them again. Downloading a model now forgets its earlier Delete, as a download
+from HuggingFace already did.
+
+**The models page says how much of the graphics card other programs held.** When a model loads partly or wholly
+on the processor for want of graphics memory, the page told its owner to free some but never how much other programs
+were using. It now says so, from 256 MB, with a hint to close unused ones. A field report traced a 14B's lost speed
+(15.3 against 26.1 tokens a second) to a chat app holding 630 MB of a 12 GB card, found by hand. In all 21 languages.
+
+**Much less background traffic while a computer is idle.** The largest part of what an idle computer received was
+other computers' demand figures (4.6 of 10.3 MB an hour on 2026-11-18): each one re-sent every model's request rate
+every 30 seconds for hours after a single request, although the figure only changes every 10 minutes. A computer now
+sends a model's figure when it is new, has moved by a tenth, or 10 minutes have passed: about 20 times fewer
+messages, carrying the same information. Computers on the previous release are read as before (#91).
+
+**For testers: Qwen 3.5 and 3.6 splits can check a tree of their helper's guesses (off by default).** Where one of
+these models is split and this computer holds its block helper (the DFlash drafter), `SWARMLLM_BLOCK_TREE=1` sends
+the helper's guesses as a small tree (the likeliest word and its strongest alternatives at each position, at most 32)
+instead of a single line. It is off because on two graphics cards it wrote code 21-68% slower than a single line,
+though a story came out 12-30% faster; on two processors both were about 5% faster (#437).
+
 ## [0.3.300-alpha] — 2026-11-19
 
 **Replies on a graphics card no longer stall now and then.** About one reply in three from a model on the
