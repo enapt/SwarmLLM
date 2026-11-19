@@ -784,6 +784,16 @@ pub struct NodeCapability {
     #[serde(default = "serving_inference_unless_told_otherwise")]
     pub can_serve_inference: bool,
 
+    /// WHY [`Self::can_serve_inference`] is false, as a short key —
+    /// `graphics_gone`, `stalled`, `metered`, `cooling` or `updating` — and
+    /// absent while it is true (or from an older build). Shown, never planned
+    /// by. A 16 GB card holding the swarm's popular models was no candidate
+    /// on 2026-11-19 and nothing on this side of the wire could say which of
+    /// the five it was (Kubernetes' pod condition carries a `reason` beside
+    /// its status for the same need).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inference_held_because: Option<String>,
+
     /// Does this node fetch parts for the swarm on its own (auto-manage on)?
     ///
     /// A peer list shows "Auto-manage off" so a computer that shares only
@@ -1628,6 +1638,7 @@ mod version_compat_tests {
         // A speed that is not a number a processor could run at states nothing.
         let mut card = NodeCapability {
             issued_at_ms: 0,
+            inference_held_because: None,
             ram_model_budget_mb: None,
             ..cap
         };

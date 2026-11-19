@@ -735,6 +735,14 @@ impl InferenceOutage {
             Self::DispatcherStalled => "the node stopped receiving from the swarm",
         }
     }
+
+    /// The key a peer reads in `NodeCapability::inference_held_because`.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::GraphicsRuntimeGone => "graphics_gone",
+            Self::DispatcherStalled => "stalled",
+        }
+    }
 }
 
 pub struct SharedState {

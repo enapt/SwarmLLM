@@ -6632,11 +6632,34 @@ impl PipelineScheduler {
         let local = candidates
             .iter()
             .position(|c| c.node_id == *local_node_id)?;
-        let drafter =
-            crate::inference::pipeline::drafter_to_leave_room_for(&self.shared_state, model_id)?;
         let requester = crate::inference::pipeline::requester_for_override(
             self.shared_state.route_plan_override(request_id).as_ref(),
         );
+        let Some(drafter) =
+            crate::inference::pipeline::drafter_to_leave_room_for(&self.shared_state, model_id)
+        else {
+            // No engine drafter for it — Qwen 3.5's families take none — so the
+            // split's guesser is the BLOCK drafter beside its first segment,
+            // loaded into that segment's worker (#481 (3)): the same cut, its
+            // charge in bytes, priced against the plan without it as an engine
+            // drafter's is (`the_plan_beside_the_drafter`), which prices a
+            // plan leaving it no room at a token a round.
+            let mb =
+                crate::inference::pipeline::block_drafter_room_mb(&self.shared_state, model_id)?;
+            let room = self
+                .shared_state
+                .model_process_pool
+                .max_hostable_layers_beside_bytes(model_id, requester, mb)?;
+            let cut = leaving_room_here(candidates, local, room)?;
+            tracing::debug!(
+                model = %model_id,
+                block_drafter_mb = mb,
+                room_for = ?cut[local].max_hostable_layers,
+                room_without_it = ?candidates[local].max_hostable_layers,
+                "Leaving room beside this node's first layers for the model's block drafter"
+            );
+            return Some(cut);
+        };
         // Room for THIS request's drafter cache, as its spawn will be charged
         // (#275): the prompt and a whole reply quantum — the reply's budget is
         // not known here, so never less than the spawn takes. A plan with no

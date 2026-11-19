@@ -1361,6 +1361,7 @@ mod tests {
     fn a_capability(node: &NodeId) -> crate::types::NodeCapability {
         crate::types::NodeCapability {
             issued_at_ms: 0,
+            inference_held_because: None,
             coord: None,
             node_id: node.clone(),
             gpu: None,

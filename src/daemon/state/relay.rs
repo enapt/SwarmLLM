@@ -1424,6 +1424,7 @@ mod tests {
     ) -> crate::types::NodeCapability {
         crate::types::NodeCapability {
             issued_at_ms: 0,
+            inference_held_because: None,
             coord: None,
             node_id: crate::types::NodeId([0u8; 32]),
             gpu: None,

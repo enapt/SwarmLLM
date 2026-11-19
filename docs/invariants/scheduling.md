@@ -540,6 +540,29 @@ reservation against the plan without it.
 
 **Moved from `arch-scheduling.md` § "A split leaves room for the model that guesses for it (2026-10-14, #275)" (rules-file trim):** **A route that way is PRICED against the plan without the cut on the same rung** (**`scheduler::the_plan_beside_the_drafter`**, #463): the cheaper runs, a plain plan charging this node past the room priced at a token a round — the candidates' split yield is the drafter's whatever the room (`split_yield_prior` asks only that one is held); taken because it routed, the cut sent ONE layer through a computer 263 ms away and back.
 
+### A model with no engine drafter leaves room for its BLOCK drafter (2026-11-19, #481 (3))
+
+The cut was only ever for an ENGINE drafter — a separate model, `pipeline::drafter_to_leave_room_for`.
+Qwen 3.5's families take none (their recurrent state cannot be taken back by one), so their split's
+guesser is the block drafter (DFlash) loaded INTO the first segment's worker, and nothing in the plan
+left it room. **Measured on the live node 2026-11-19 14:57Z (v0.3.300, `~/swarmllm-gate/tier_1119n`)**:
+Qwen3.6-35B-A3B split here `[0,14)` + Australia `[14,40)`; the 8 GB card held 547 MB of budget beside
+the 14 layers, the drafter takes 1,172 MB with its cache and borrowed head — `block drafter not
+attached: it does not fit beside one conversation`; the reply ran **159 rounds for 160 tokens** while
+the plan was priced at **2.30 tokens a round** (the far tail's code figure, kept by splits WITH the
+drafter that morning): 9.4 s predicted, 37.3 measured.
+
+**Now**: where no engine drafter is chosen, `candidates_leaving_room_for_the_drafter` cuts this node's
+bound by the block drafter's charge — **`pipeline::block_drafter_room_mb`** (its weights and whole
+cache off its header, `split::block_drafter_charged_beside_a_first_segment`, plus `output.weight`'s size,
+0 where the head is the token table) through **`ModelProcessPool::max_hostable_layers_beside_bytes`**
+(the device the layers are planned on, the first range as its spawn charges it). Everything after is
+the engine drafter's: the cut's plan is priced against the plain plan on the same rung, and a plain plan
+charging this node past the room is priced at a token a round (`the_plan_beside_the_drafter`) — so the
+plan that left the drafter no room is never again priced at the drafter's yield. The worker's own check
+(one conversation beside it) keeps the last word. Test
+`room_is_left_on_the_card_beside_the_layers_for_their_block_drafter`.
+
 ## Room for more layers is not room for the layers already held (2026-09-24, #95)
 
 **`NodeCandidate::held_ranges` + `layers_it_would_add` — the local node is

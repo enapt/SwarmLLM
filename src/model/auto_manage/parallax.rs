@@ -332,6 +332,7 @@ mod tests {
                 addresses: vec![],
                 capability: Some(crate::types::NodeCapability {
                     issued_at_ms: 0,
+                    inference_held_because: None,
                     coord: None,
                     cpu: None,
                     node_id: remote.clone(),

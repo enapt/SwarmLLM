@@ -1053,6 +1053,21 @@ fn charged_in(path: &Path) -> Option<u64> {
     Some(charged(&ct, &shape))
 }
 
+/// What the block drafter in `dir` takes off the device of a split's first
+/// segment, for the PLANNER (#481 (3)): [`charged`] off its header, plus the
+/// output head it borrows there (`head_bytes`: `output.weight`'s size, 0 where
+/// the head is the token table the segment holds) — the figure
+/// `SplitModel::attach_block_drafter` weighs, so a plan leaving this room is
+/// one the worker attaches the drafter beside. `None` where there is no
+/// drafter, it is switched off ([`block_drafter_on`]) or its header cannot be
+/// read.
+pub(crate) fn charged_beside_a_first_segment(dir: &Path, head_bytes: u64) -> Option<u64> {
+    if !block_drafter_on() {
+        return None;
+    }
+    charged_in(&dir.join(BLOCK_DRAFTER_FILE)).map(|b| b.saturating_add(head_bytes))
+}
+
 /// May a drafter taking `takes` bytes come off a conversation `budget`?
 /// Only while one conversation of the model's whole context
 /// (`one_conversation`) still fits in what is left; an unknown budget refuses

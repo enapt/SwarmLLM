@@ -297,6 +297,20 @@ pub fn serialize_peer_to_json(
             crate::types::features::supports(c.features, crate::types::features::HOW_SERVED)
         }),
     });
+    if let Some(o) = obj.as_object_mut() {
+        // WHY it takes no work, in its own word, beside `can_serve_inference`
+        // (`NodeCapability::inference_held_because`): `graphics_gone`,
+        // `stalled`, `metered`, `cooling` or `updating`; `null` while it
+        // serves, or from an older build. Inserted here: one more key inside
+        // the `json!` above passes the macro's recursion limit.
+        o.insert(
+            "inference_held_because".into(),
+            serde_json::json!(peer
+                .capability
+                .as_ref()
+                .and_then(|c| c.inference_held_because.clone())),
+        );
+    }
     if include_addresses {
         if let Some(o) = obj.as_object_mut() {
             o.insert("addresses".into(), serde_json::json!(peer.addresses));

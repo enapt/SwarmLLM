@@ -4480,6 +4480,60 @@ impl LongPrompts {
     }
 }
 
+/// How long the ranges a plan gives this node are kept for its spawns
+/// ([`PlannedHere`]): the up-front admission runs just before the first
+/// segment's forward, whose spawn follows within a second; a minute covers a
+/// spawn behind a retiring worker's card memory coming back (#3 (j13), 5 s).
+const PLANNED_HERE_FOR: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Every range the latest plan gives this node, per model, while it has two
+/// or more (#481 (5)) — so the first range's spawn leaves the card room the
+/// others will be grown into. Written ONLY by [`ModelProcessPool::admit_prompt`]
+/// (the up-front admission, which every plan with a peer in it asks before its
+/// first forward), read ONLY by [`ModelProcessPool::room_for_the_plans_other_ranges`].
+///
+/// Measured on this node's 8 GB card, 2026-11-19 (`~/swarmllm-gate/split27_1119n`,
+/// main at 79d5f182e, Qwen3.8-27B planned `[0..21)` + `[63..64)` here, `[21..63)`
+/// in Australia): the first range's spawn split 17 of 21 layers onto the card,
+/// its load read more free memory and refitted it to 20 (#365), filling the
+/// budget; the last layer's growth then asked for 261 MB the card no longer had,
+/// and 5 of 6 requests failed with "1 layers 63..64 … need about 261 MB more" —
+/// the plan only ever fitted with the room for that layer left.
+#[derive(Default)]
+struct PlannedHere(DashMap<ModelId, (Vec<(u32, u32)>, std::time::Instant)>);
+
+impl PlannedHere {
+    fn note(&self, model: &ModelId, ranges: &[(u32, u32)], now: std::time::Instant) {
+        if ranges.len() < 2 {
+            self.0.remove(model);
+        } else {
+            self.0.insert(model.clone(), (ranges.to_vec(), now));
+        }
+    }
+
+    /// The plan's ranges here that a spawn of `segment` does not load, if the
+    /// plan is recent and `segment` is one of its ranges.
+    fn beside(
+        &self,
+        model: &ModelId,
+        segment: (u32, u32),
+        now: std::time::Instant,
+    ) -> Vec<(u32, u32)> {
+        let Some(entry) = self.0.get(model) else {
+            return Vec::new();
+        };
+        let (ranges, at) = &*entry;
+        if now.saturating_duration_since(*at) >= PLANNED_HERE_FOR || !ranges.contains(&segment) {
+            return Vec::new();
+        }
+        ranges
+            .iter()
+            .copied()
+            .filter(|&r| !(segment.0 <= r.0 && r.1 <= segment.1))
+            .collect()
+    }
+}
+
 /// Whose memory cap a drafter's load is weighed against
 /// ([`ModelProcessPool::draft`], [`ModelProcessPool::guest_fit`],
 /// the planner's room beside it): that of the request it guesses for. A
@@ -4577,6 +4631,8 @@ pub struct ModelProcessPool {
     /// placement fitted to a shorter conversation, so its next loads keep room
     /// for one as long (#454).
     long_prompts: LongPrompts,
+    /// The ranges the latest plan gives this node (#481 (5), [`PlannedHere`]).
+    planned_here: PlannedHere,
     data_dir: PathBuf,
     /// Each model's header, parsed once while its file is unchanged — read
     /// ONLY by `segment_geometry`, which every footprint estimate goes through
@@ -4965,6 +5021,7 @@ impl ModelProcessPool {
             layers_refused: DashMap::new(),
             layers_fitting: DashMap::new(),
             long_prompts: LongPrompts::default(),
+            planned_here: PlannedHere::default(),
             data_dir,
             header_cache: crate::inference::split::HeaderCache::default(),
             active_shard_windows: DashMap::new(),
@@ -5557,6 +5614,31 @@ impl ModelProcessPool {
         budget: u64,
     ) -> Option<CardSplit> {
         self.split_against(model_id, segment, estimated_mb, budget, None)
+    }
+
+    /// The card memory a spawn of `segment` leaves for the other ranges the
+    /// plan gives this node ([`PlannedHere`], #481 (5)): what growing the
+    /// worker by each will charge the card — its layers at growth's per-layer
+    /// rate ([`Self::growth_figures`]). 0 with no such plan, for a processor
+    /// plan, or with `SWARMLLM_SPAWN_LEAVES_PLANNED=0` (the A/B: the spawn
+    /// fills the card as before).
+    fn room_for_the_plans_other_ranges(&self, model_id: &ModelId, segment: (u32, u32)) -> u64 {
+        if std::env::var("SWARMLLM_SPAWN_LEAVES_PLANNED").as_deref() == Ok("0") {
+            return 0;
+        }
+        let others = self
+            .planned_here
+            .beside(model_id, segment, std::time::Instant::now());
+        if others.is_empty() {
+            return 0;
+        }
+        let Some((_, card_per_layer_mb)) = self.segment_cost_curve(model_id, true) else {
+            return 0;
+        };
+        others
+            .iter()
+            .map(|r| u64::from(r.1.saturating_sub(r.0)).saturating_mul(card_per_layer_mb))
+            .fold(0, u64::saturating_add)
     }
 
     /// [`Self::partial_gpu_layers`] for a spawn whose worker read the card
@@ -7692,6 +7774,33 @@ impl ModelProcessPool {
         self.local_layers_leaving(model_id, false, requester, Some(guest_mb))
     }
 
+    /// [`Self::max_hostable_layers_beside_guest`] for a guest that is not a
+    /// model of its own but a file loaded INTO the worker of `model_id` — a
+    /// block drafter beside a split's first segment (#481 (3)), `guest_mb` its
+    /// charge there (`pipeline::block_drafter_room_mb`). It comes off the
+    /// budget of the device the segment's layers are planned on (the drafter
+    /// runs on the target's device), weighed on this node's first range as its
+    /// spawn charges it ([`Self::local_layers_leaving`]). `None` when there is
+    /// nothing to leave or a size or budget cannot be read. The worker's own
+    /// check (`SplitModel::attach_block_drafter`, one conversation beside it)
+    /// keeps the last word.
+    pub fn max_hostable_layers_beside_bytes(
+        &self,
+        model_id: &ModelId,
+        requester: Requester,
+        guest_mb: u64,
+    ) -> Option<u32> {
+        if guest_mb == 0 {
+            return None;
+        }
+        self.local_layers_leaving(
+            model_id,
+            self.planning_on_card(model_id),
+            requester,
+            Some(guest_mb),
+        )
+    }
+
     /// [`Self::guest_fit`] once the layers a plan gives this node
     /// of `target` — `ranges`, loaded for `requester` — are loaded too: the
     /// planner's own question ([`Self::max_hostable_layers_beside_guest`] over
@@ -8128,14 +8237,21 @@ impl ModelProcessPool {
         };
         let (charged_vram_mb, charged_ram_mb) = charged;
         let read_mb = refit.load_reads_free_bytes / (1024 * 1024);
+        // The plan's other ranges here are grown into what the load leaves,
+        // so their room comes off the reading as it came off the budget
+        // (#481 (5)): refitted onto the whole reading, the 27B's first range
+        // took the last layer's 261 MB.
+        let beside_mb = self.room_for_the_plans_other_ranges(model_id, segment);
         self.release_vram_charge(model_id, charged_vram_mb);
         let sized = self
             .split_fitted_to_the_load(
                 model_id,
                 segment,
                 refit.estimated_mb,
-                refit.budget_mb,
-                refit.load_reads_free_bytes,
+                refit.budget_mb.saturating_sub(beside_mb),
+                refit
+                    .load_reads_free_bytes
+                    .saturating_sub(beside_mb.saturating_mul(1024 * 1024)),
             )
             .filter(|&sized| sized != first)
             .map(|sized| {
@@ -10094,6 +10210,10 @@ impl ModelProcessPool {
         };
         let request_id = admit.request_id;
         let model_id = admit.model_id.clone();
+        // Every range the plan gives this node, for the spawn that follows
+        // (#481 (5)): the first range's worker leaves the others room.
+        self.planned_here
+            .note(&model_id, &admit.layer_ranges, std::time::Instant::now());
         let replaced = crate::inference::executor::without_starving_the_runtime(|| {
             self.live_worker(&model_id).is_some_and(|h| {
                 admit
@@ -11083,9 +11203,14 @@ impl ModelProcessPool {
                 if freed > 0 && self.admit_to_gpu(model_id, estimated) {
                     charged_vram_mb = estimated;
                     admitted = true;
-                } else if let Some(split) =
-                    self.partial_gpu_layers(model_id, Some(segment), estimated, budget)
-                {
+                } else if let Some(split) = self.partial_gpu_layers(
+                    model_id,
+                    Some(segment),
+                    estimated,
+                    // The plan's other ranges here are grown into what this
+                    // leaves (#481 (5)).
+                    budget.saturating_sub(self.room_for_the_plans_other_ranges(model_id, segment)),
+                ) {
                     match split {
                         CardSplit::Layers { on_card, total } => {
                             let (from, to) = split
@@ -16744,6 +16869,44 @@ mod tests {
                 "the drafter beside the first {layers} layers, charged {spawn_mb} MB (room {room})"
             );
         }
+    }
+
+    /// A block drafter is loaded INTO the target's worker beside its first
+    /// segment, so its room is its charge in bytes off the same device the
+    /// layers are planned on (#481 (3)): a Qwen3.6-35B-A3B split's 1,172 MB
+    /// drafter found 547 MB beside 14 layers on an 8 GB card and was not
+    /// attached, with nothing in the plan leaving it room.
+    #[test]
+    fn room_is_left_on_the_card_beside_the_layers_for_their_block_drafter() {
+        let target = ModelId("qwen3.6-35b-a3b".into());
+        let (fixed, per_layer) = (500, 170);
+        let pool = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-beside-block"));
+        pool.test_card_in_play.store(true, Ordering::Relaxed);
+        pool.set_gpu_layers(-1);
+        pool.set_vram_budget_mb(7_000);
+        pool.test_cost_curve
+            .insert(target.clone(), (fixed, per_layer));
+        assert!(pool.planning_on_card(&target), "fixture: a card plan");
+        let alone = pool
+            .max_hostable_layers_for_planning(&target, Requester::Swarm)
+            .expect("a bound");
+        let beside = pool
+            .max_hostable_layers_beside_bytes(&target, Requester::Swarm, 1_172)
+            .expect("room is left on the card");
+        assert!(
+            beside < alone,
+            "{beside} beside the block drafter, {alone} alone"
+        );
+        assert_eq!(
+            Some(beside),
+            layers_that_fit(7_000 - 1_172, fixed, per_layer),
+            "the block drafter's whole charge is left free on the card"
+        );
+        assert_eq!(
+            pool.max_hostable_layers_beside_bytes(&target, Requester::Swarm, 0),
+            None,
+            "nothing to leave room for"
+        );
     }
 
     /// **On a card the room is left on the card** (#275 (4), 2026-10-22). A card
@@ -22468,6 +22631,82 @@ mod admission_tests {
             assert_eq!(p.ram_reserved_mb.get(&m).map(|v| *v), Some(charged.1));
             p.after_worker_gone_charge(&m, DepartedWorker::from(&h), "test");
         }
+    }
+
+    /// **A spawn leaves the card the room the plan's other ranges here will be
+    /// grown into** (#481 (5)). On 2026-11-19 Qwen3.8-27B was planned `[0..21)`
+    /// + `[63..64)` on this node's 8 GB card; the first range's spawn split it
+    /// to the budget, its load's reading refitted 20 of 21 layers onto the card,
+    /// and the last layer's growth — 261 MB at growth's rate — was refused in
+    /// 5 of 6 requests. With the plan's ranges noted by the up-front admission,
+    /// the spawn and its refit leave that room, and the growth is admitted; with
+    /// nothing noted (the control, and the behaviour before) the refit fills the
+    /// card and the growth is refused.
+    #[tokio::test]
+    async fn a_split_spawn_leaves_room_for_the_plans_other_ranges_here() {
+        let p = pool();
+        p.test_card_in_play.store(true, Ordering::Relaxed);
+        p.set_gpu_layers(-1);
+        p.set_vram_budget_mb(6_600);
+        p.set_ram_budget_mb(100_000);
+        let m = ModelId("seventy-b-planned-here".into());
+        p.test_footprint_inputs
+            .insert(m.clone(), super::tests::seventy_b_inputs());
+        let (first_range, last_range) = ((0, 60), (79, 80));
+        let per_layer = p.segment_cost_curve(&m, true).expect("fixture: a curve").1;
+
+        for noted in [true, false] {
+            if noted {
+                p.planned_here
+                    .note(&m, &[first_range, last_range], std::time::Instant::now());
+            } else {
+                p.planned_here
+                    .note(&m, &[first_range], std::time::Instant::now());
+            }
+            let beside = p.room_for_the_plans_other_ranges(&m, first_range);
+            assert_eq!(beside, if noted { per_layer } else { 0 });
+            // As the spawn sizes it: the budget less the room, and the refit
+            // handed the budget as read.
+            let (mut h, _worker_end, _first, refit, charged) =
+                split_spawned(&p, &m, first_range, 6_600 - beside).await;
+            let _ = p
+                .refit_split_to_the_load(
+                    &m,
+                    first_range,
+                    &mut h,
+                    SplitRefit {
+                        budget_mb: 6_600,
+                        load_reads_free_bytes: 7_300 * MIB,
+                        ..refit
+                    },
+                    charged,
+                )
+                .await;
+            let left = 6_600u64.saturating_sub(p.vram_committed_mb());
+            assert_eq!(
+                p.growth_would_be_admitted(&m, last_range, &h, Requester::Owner),
+                noted,
+                "{left} MB left for a {per_layer} MB layer, plan noted: {noted}"
+            );
+            p.after_worker_gone_charge(&m, DepartedWorker::from(&h), "test");
+        }
+
+        // A plan with one range here, an old plan, and a spawn of a range the
+        // plan does not name leave nothing.
+        let now = std::time::Instant::now();
+        p.planned_here.note(&m, &[first_range, last_range], now);
+        assert_eq!(p.planned_here.beside(&m, (0, 30), now), Vec::new());
+        assert_eq!(
+            p.planned_here
+                .beside(&m, first_range, now + PLANNED_HERE_FOR),
+            Vec::new()
+        );
+        assert_eq!(
+            p.planned_here.beside(&m, last_range, now),
+            vec![first_range]
+        );
+        p.planned_here.note(&m, &[first_range], now);
+        assert_eq!(p.planned_here.beside(&m, first_range, now), Vec::new());
     }
 
     /// The same for a mixture-of-experts model kept whole on the card with

@@ -404,6 +404,15 @@ pub enum PeerWorkHold {
 }
 
 impl PeerWorkHold {
+    /// The key a peer reads in `NodeCapability::inference_held_because`.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Metered => "metered",
+            Self::Heat { .. } => "cooling",
+            Self::Updating => "updating",
+        }
+    }
+
     /// Does work a peer ALREADY has running here stop?
     pub fn stops_running_work(self) -> bool {
         matches!(

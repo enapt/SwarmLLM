@@ -1628,6 +1628,8 @@ impl HealthMonitor {
             // worker starting again, the dispatcher resuming, the connection
             // no longer metered, the computer cool, an update abandoned.
             can_serve_inference: outage.is_none() && peer_work_hold.is_none(),
+            // And why not, from the same two answers — shown, never planned by.
+            inference_held_because: inference_held_because(outage, peer_work_hold),
             // Shown in peer lists, and a peer hands this node no part to fetch
             // while it is off (`NodeCapability::auto_manage`, #400): the live
             // switch, which `--anchor` holds off.
@@ -3162,9 +3164,62 @@ impl HealthMonitor {
     }
 }
 
+/// Why this node takes no inference work, as the key its capability carries
+/// (`NodeCapability::inference_held_because`): an outage before a hold, as
+/// the log line above says it; `None` exactly when `can_serve_inference` is
+/// true.
+fn inference_held_because(
+    outage: Option<crate::daemon::state::InferenceOutage>,
+    hold: Option<crate::daemon::host_heat::PeerWorkHold>,
+) -> Option<String> {
+    outage
+        .map(|o| o.key())
+        .or(hold.map(|h| h.key()))
+        .map(str::to_owned)
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// A peer that will not serve says which of the five reasons it is
+    /// (2026-11-19: a 16 GB card was no candidate and nothing said why), and a
+    /// peer that serves says nothing.
+    #[test]
+    fn a_node_that_takes_no_inference_work_says_why() {
+        use crate::daemon::host_heat::PeerWorkHold;
+        use crate::daemon::state::InferenceOutage;
+        assert_eq!(inference_held_because(None, None), None);
+        let cases = [
+            (
+                Some(InferenceOutage::GraphicsRuntimeGone),
+                None,
+                "graphics_gone",
+            ),
+            (Some(InferenceOutage::DispatcherStalled), None, "stalled"),
+            (None, Some(PeerWorkHold::Metered), "metered"),
+            (
+                None,
+                Some(PeerWorkHold::Heat {
+                    stops_running: false,
+                }),
+                "cooling",
+            ),
+            (None, Some(PeerWorkHold::Updating), "updating"),
+            (
+                Some(InferenceOutage::GraphicsRuntimeGone),
+                Some(PeerWorkHold::Metered),
+                "graphics_gone",
+            ),
+        ];
+        for (outage, hold, key) in cases {
+            assert_eq!(
+                inference_held_because(outage, hold).as_deref(),
+                Some(key),
+                "{outage:?} / {hold:?}"
+            );
+        }
+    }
 
     /// #91 (2m): a model's demand goes on gossip when it is new, when it moved
     /// 10% since it last went, or when the decay tick's ten minutes have passed
@@ -3305,6 +3360,7 @@ pub(crate) mod tests {
     pub(crate) fn capability_for_test() -> crate::types::NodeCapability {
         crate::types::NodeCapability {
             issued_at_ms: 0,
+            inference_held_because: None,
             coord: Some(swarmllm_types::netcoord::NetworkCoord {
                 x: 10.0,
                 y: -4.0,

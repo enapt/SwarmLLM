@@ -1808,6 +1808,30 @@ pub(crate) fn split_yield_prior(
         .prior_for_request(&model_id.0, request_id, YieldPrior::Drafter)
 }
 
+/// The room, in MB, a split of `model_id` from here leaves beside its first
+/// segment for the model's BLOCK drafter (#481 (3)) — its weights, its whole
+/// cache and the output head it borrows there
+/// (`split::block_drafter_charged_beside_a_first_segment`), the figure its
+/// worker weighs before it attaches it. `None` where no block drafter is held
+/// beside the model here, it is switched off, or its header cannot be read.
+///
+/// The planner leaves this room only where no ENGINE drafter is chosen
+/// ([`drafter_to_leave_room_for`]): Qwen 3.5's families take none (recurrent
+/// state), so their block drafter is the one guesser a split's FAR tail has.
+/// Without it a Qwen3.6-35B-A3B split here [0,14) + Australia [14,40) left the
+/// 8 GB card 547 MB beside its layers; the 1,172 MB drafter was not attached,
+/// the reply ran 159 rounds for 160 tokens, and the plan had been priced at the
+/// 2.30 tokens a round its splits WITH the drafter kept (2026-11-19).
+pub(crate) fn block_drafter_room_mb(state: &SharedState, model_id: &ModelId) -> Option<u64> {
+    let meta = state.gguf_meta_for(model_id)?;
+    let head_bytes = meta.tensors.get("output.weight").map_or(0, |t| t.size);
+    crate::inference::split::block_drafter_charged_beside_a_first_segment(
+        &state.model_dir(&model_id.0),
+        head_bytes,
+    )
+    .map(|bytes| bytes.div_ceil(1 << 20))
+}
+
 /// Would a split of `model_id` driven from here guess with the model file's
 /// own guess head beside its first segment (#425 (a))? The file carries one in
 /// the shape the head runs (`block_draft::head_planned`, the worker's own
@@ -3826,6 +3850,7 @@ mod tests {
             addresses: vec![],
             capability: Some(NodeCapability {
                 issued_at_ms: 0,
+                inference_held_because: None,
                 coord: None,
                 node_id: node.clone(),
                 gpu: None,

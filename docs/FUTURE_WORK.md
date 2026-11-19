@@ -896,7 +896,7 @@ frame, then add a receipt ACK or a per-frame read deadline mirroring request-res
 ### Routing and placement
 
 #### #481 — A peer that holds a popular model whole was passed over for a split through it 8x slower
-`P1` · routing · **PARTIAL: (1) fixed on main 2026-11-19; (2)-(4) open** — 2026-11-19 · history: #3 (j3), #3 (j4), #469, #10
+`P1` · routing · **PARTIAL: (1), (3a), (5) fixed on main 2026-11-19; (4) diagnosable; (2), (3b) open** — 2026-11-19 · history: #3 (j3), #3 (j4), #469, #10, #458
 
 > Seen on the live node 2026-11-19 14:54-15:00Z (v0.3.300, overnight tier run `~/swarmllm-gate/tier_1119n`):
 > Qwen3.6-35B-A3B, the Australian RTX 3060 `aa3d1e66` (132 ms) holds it whole and ran it whole at 35-36 tok/s
@@ -917,14 +917,44 @@ frame, then add a receipt ACK or a per-frame read deadline mirroring request-res
 > that alternative's `cold_load_ms` by the credit at its one choke point, so the load is bought once the rent has
 > covered it; reset when it is bought.
 >
-> (3) **Open: the split was priced 4x optimistic for a reasoning reply** — 9.4-10.3 s predicted, 37.3-38.5 s
-> measured: 2.30 tokens a round (`split_tokens_per_round_far_tail`, from code replies with thinking OFF) where
-> these thinking-on replies kept ~1.2. `pipeline::reply_kind` reads the request alone; whether the template will
-> open a scratchpad (`enable_thinking`, a family that thinks by default) is not part of the kind.
+> (3) **The split was priced 4x optimistic** — 9.4-10.3 s predicted, 37.3-38.5 s measured: 2.30 tokens a round
+> (`split_tokens_per_round_far_tail`) where the reply ran **159 rounds for 160 tokens**. (3a) **FIXED on main — the
+> cause was no guesser at all**: the block drafter (1,172 MB with its cache and borrowed head) found 547 MB beside
+> `[0,14)` on the 8 GB card (`block drafter not attached: it does not fit beside one conversation`), and the
+> drafter-room cut (#275) only ever left room for an ENGINE drafter, which Qwen 3.5's families never take. Now the
+> same cut leaves the block drafter's charge (`pipeline::block_drafter_room_mb` →
+> `ModelProcessPool::max_hostable_layers_beside_bytes`), and a plain plan leaving it no room is priced at a token a
+> round (`the_plan_beside_the_drafter`) — `docs/invariants/scheduling.md` § "A model with no engine drafter leaves
+> room for its BLOCK drafter". Prior art: llama.cpp's `--fit` counts a draft model's memory before placing the
+> target (`common_fit_extra_model`); SpecExec sizes the draft budget to the memory beside the target. Test
+> `room_is_left_on_the_card_beside_the_layers_for_their_block_drafter`. (3b) **Open**: a thinking-on reply may still
+> keep fewer tokens a round than the code/prose prior measured with thinking off — `pipeline::reply_kind` reads the
+> request alone, not whether the template opens a scratchpad. Measure once (3a) has run.
 >
-> (4) **Open: a US RTX 5080 (`5bfbd36e`) holding Qwen3.8-27B whole and connected was never a candidate.** Most
-> likely its `can_serve_inference` was false; nothing showed it — `/api/admin/peers` now carries
-> `can_serve_inference` (2026-11-19). Read it there before guessing further.
+> (4) **Diagnosable on main: a US RTX 5080 (`5bfbd36e`, 16 GB, holds the Gemma 4s and gpt-oss) is never a
+> candidate.** Read 2026-11-19 15:30Z from `/api/admin/peers`: `can_serve_inference: false`, `healthy: true`, 6.7 of
+> 16 GB of its card free, storage at its limit. One of five reasons and none crossed the wire, so its capability now
+> says which (`NodeCapability::inference_held_because`: `graphics_gone`, `stalled`, `metered`, `cooling`,
+> `updating`; absent while it serves; shown at `/api/admin/peers`, never planned by; test
+> `a_node_that_takes_no_inference_work_says_why`). Prior art: Kubernetes' pod conditions carry a `reason` beside
+> `status`. Read it once that computer runs a release with it.
+>
+> (5) **FIXED on main: a split that starts and finishes here failed outright when the first range's spawn filled
+> the card** (#458's residual (2), with a new contributor). `~/swarmllm-gate/split27_1119n` (main at 79d5f182e,
+> 2026-11-19 15:32-15:47Z, live node stopped): Qwen3.8-27B planned here `[0,21)` + `[63,64)`, Australia `[21,63)`;
+> the spawn split 17 of 21 onto the card, its load read 6,994 MB free and refitted 20 (#365), filling the budget; the
+> last layer's growth asked 261 MB (one layer at growth's rate; the head is lent, #458) and was refused — **5 of 6
+> requests failed** ("1 layers 63..64 … need about 261 MB more"), the sixth re-planned through Thailand and Italy at
+> 1.89 tok/s. Now the up-front admission notes every range the plan gives this node (`PlannedHere`, written only by
+> `ModelProcessPool::admit_prompt`), and a split spawn of one of them — its first sizing AND its refit — leaves the
+> others' growth charge free (`room_for_the_plans_other_ranges`; A/B `SWARMLLM_SPAWN_LEAVES_PLANNED=0`). Test
+> `a_split_spawn_leaves_room_for_the_plans_other_ranges_here` (the growth is refused with nothing noted). Prior art:
+> llama.cpp places every layer of a model in ONE pass over the devices (`llama_model::load_tensors`' `dev_layer`), so
+> no layer is placed after the card is full; here the ranges arrive one by one, so the first leaves the others'
+> share. Left: a first range that fits WHOLE still takes the card before the growth (the whole admission does not
+> read the plan); the same request's earlier attempt holds its peer's worker "for a conversation", so a re-plan that
+> asks that peer for a wider range is refused by its own request (seen in the same run, Australia `[21,64)` "do
+> not fit beside the copy this node is running for a conversation now").
 
 #### #452 — Full computers keep parts of models the swarm never runs, so the models people use find no room
 `P1` · placement · **BUILT, field check (a) as designed on the two computers we can read (2026-11-19); other computers open** — 2026-11-14 · history: #389 (d), #400, #401, #246

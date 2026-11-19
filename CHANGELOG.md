@@ -34,8 +34,23 @@ though a story came out 12-30% faster; on two processors both were about 5% fast
 through a far computer, this computer priced a whole hand-off to it from the split's step time, which is mostly
 the trip there and back on every token — a hand-off pays that trip once per reply. On Qwen3.6-35B-A3B with the
 other half in Australia that priced a hand-off running 35 tokens a second as about 4, and every reply took the
-split at 4.3-4.5 tokens a second. The trip is now taken out of that figure before it prices a hand-off. The peer list
-(`/api/admin/peers`) also says whether each computer reports that it can take work now (#481).
+split at 4.3-4.5 tokens a second. The trip is now taken out of that figure before it prices a hand-off; the same
+model was then handed over whole and wrote 23-31 tokens a second. The peer list (`/api/admin/peers`) also says
+whether each computer reports that it can take work now and, from this release on, why not when it cannot: cooling
+down, on a metered connection, updating, its graphics stack stopped, or no longer hearing the swarm (#481).
+
+**A split of a Qwen 3.5, 3.6 or 3.8 model leaves room beside its first part for the small model that guesses ahead
+for it.** These models take their guesses from a block drafter loaded beside the first part of a split. The plan
+filled this computer's graphics card with layers and left the drafter no room, so it was never loaded — while the
+plan was still priced as if it guessed 2.3 words a round. On Qwen3.6-35B-A3B the reply took 159 rounds for 160 words
+and arrived four times later than predicted. The plan now keeps the drafter's room, and a plan that leaves none is
+priced as one that guesses nothing (#481).
+
+**A split that starts and finishes on this computer no longer fails when its first part fills the graphics card.**
+With Qwen3.8-27B planned as this computer's first 21 layers and its last one, the first part's load found a little
+more free memory than planned and took it, and the last layer then had no room: five of six requests failed with
+"1 layers 63..64 … need about 261 MB more". The first part now leaves the room the plan's other part here will
+need (#481).
 
 ## [0.3.300-alpha] — 2026-11-19
 

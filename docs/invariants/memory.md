@@ -3308,6 +3308,28 @@ for them, and the guard has nothing to refuse there (`a_far_range_widened_at_its
 It still refuses a range widened at its END (`[2..5)` asked as `[2..8)`: the processor-first run is the held
 layers) and a card too short for the held layers beside a split's own costs — the guard test's fixture now.
 
+### A spawn leaves the card the room the plan's other ranges here will be grown into (2026-11-19, #481 (5))
+
+A split that starts and finishes here gives this node two ranges, and they arrive one by one: the first range's
+forward spawns its worker, the last range's forward grows it. Every split sizing fills the card to the budget —
+the spawn's (`partial_gpu_layers`) and then its refit by the load's reading (#365, only ever more on the card) —
+so the growth found the card full. **Measured** (`~/swarmllm-gate/split27_1119n`, main at 79d5f182e, live node
+stopped, 2026-11-19 15:32-15:47Z): Qwen3.8-27B planned `[0,21)` + `[63,64)` here and `[21,63)` in Australia;
+17 of 21 layers split onto the 8 GB card, the load read 6,994 MB free and refitted 20, the budget held 6,351 of
+~6,366 MB, and `[63,64)` asked 261 MB (one layer at growth's rate — the head is lent, #458): refused at the daemon
+(`charge_additional_segment`), the worker in use so no retirement — **5 of 6 requests failed**.
+
+**Now**: `ModelProcessPool::admit_prompt` (the up-front admission, asked with every range the plan gives this
+node before the first forward wherever a peer takes part) notes them in `PlannedHere` (kept `PLANNED_HERE_FOR`,
+60 s; a plan of one range here clears it), and a split spawn of one of those ranges sizes its card share in the
+budget less `room_for_the_plans_other_ranges` — each other range's layers at growth's per-layer card rate, the
+figure the growth will be charged — in BOTH sizings: `partial_gpu_layers`' budget and the refit's budget and
+reading. Nothing else reads it (the planner's own room questions are unchanged). A/B
+`SWARMLLM_SPAWN_LEAVES_PLANNED=0`. Test `a_split_spawn_leaves_room_for_the_plans_other_ranges_here`: with the plan
+noted the growth is admitted after a refit onto a 7,300 MB reading, with nothing noted (the behaviour before) it is
+refused. **Not covered**: a first range that fits the card WHOLE (the whole admission does not read the plan) and
+a worker already resident for the first range (no spawn to size).
+
 ## A model process holds one copy of the output head (2026-11-16, FUTURE_WORK #458)
 
 ### What it replaced
