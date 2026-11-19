@@ -599,6 +599,43 @@ impl NodeCandidate {
             .map_or(stated_speed, |timed| timed.max(stated_speed))
     }
 
+    /// This peer's decode figure for a run that does NOT cross this node's
+    /// link a step — a whole-model hand-off, a later segment of a led chain —
+    /// where the only figure is a split's decode steps, which crossed it every
+    /// step: the round trip (`latency_ms`) taken back out over the width those
+    /// steps were timed at (`TimedOn::DecodeSteps`'s `layers`), never under
+    /// `floor` (the per-device prior of the range priced: a split's figure
+    /// describes ITS layers' devices, and a whole run may put more of them on
+    /// the processor), never over the figure itself. `None` where the figure
+    /// is not that shape: a fit with a visit term already holds the trip apart
+    /// (`observed_fixed_ms_per_visit`), and a prompt-pass or a hop's own
+    /// figure never carried it.
+    ///
+    /// Without it the split's figure was the hand-off's price "as an upper
+    /// bound" until a hand-off was timed — and the bound kept the hand-off from
+    /// ever being chosen to be timed: Qwen3.6-35B-A3B on a 3060 132 ms away
+    /// read 5.86 ms a layer off a 26-layer split (152 ms a step, 132 of it the
+    /// link), so its whole run was priced 234 ms a token where it delivers ~28
+    /// (35 tok/s, 2026-11-19), and every request went to the 4.5 tok/s split.
+    /// Prior art: Petals keeps a server's compute throughput and the client's
+    /// ping as separate terms (`sequence_manager.py`), never one end-to-end
+    /// figure.
+    pub(super) fn decode_figure_off_our_link(&self, figure: f32, floor: f32) -> Option<f32> {
+        if self.observed_fixed_ms_per_visit.is_some() || self.latency_ms == 0 {
+            return None;
+        }
+        let Some(crate::daemon::state::TimedOn::DecodeSteps { layers, .. }) =
+            self.observed_latency_timed_on
+        else {
+            return None;
+        };
+        if layers == 0 || !figure.is_finite() {
+            return None;
+        }
+        let off_the_link = figure - self.latency_ms as f32 / layers as f32;
+        Some(off_the_link.max(floor).min(figure))
+    }
+
     /// The same prior for a layer this candidate runs on its PROCESSOR beside a
     /// card ([`Self::card_layers`]), from `processor_tokens_per_sec`; its own
     /// timing is a floor here too.

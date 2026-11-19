@@ -150,6 +150,12 @@ Under `SharedState::local_embedding_privacy` token ids never reach another compu
 
 → `docs/invariants/scheduling.md` § "What a peer costs per VISIT is not what it costs per layer"
 
+## A whole hand-off is priced off our link, not by a split's round trips (2026-11-19)
+
+Where a peer has no delegated figure, its whole-model vertex (and a led chain's) is priced from its split decode figure with OUR round trip taken out over the width it was timed at — **`NodeCandidate::decode_figure_off_our_link`** (`TimedOn::DecodeSteps { layers }`), floored at the range's per-device prior, capped at the figure — and pays the trip once. Never leave the split figure as the hand-off's price "until it is timed": it keeps the hand-off from ever being timed (Qwen3.6-35B-A3B: a 4.4 tok/s split kept over a 35 tok/s hand-off).
+
+→ `docs/invariants/scheduling.md` § "A whole hand-off is priced off our link, not by a split's round trips"
+
 ## A reply is priced for no more passes than it may take (2026-10-18, #3)
 
 **`NodeCandidate::forward_passes` is the single answer to "how many passes are the per-token costs charged for"**: this model's mean recent reply length (`ReplyLengths::expected`, written ONLY by `publish_request_trace` from finished replies, #3 (b)) — the prior counted as ONE more reply until four have finished (`PRIOR_REPLY_TOKENS`) — else `ASSUMED_FORWARD_PASSES`; then lowered, never raised, by the request's `max_tokens` (`PromptPlan::with_reply_of_at_most`, set once in `distributed_exec`). `vertex_cost`, greedy's spread of the once-per-request terms and the recorded `assumed_forward_passes` all read it; never the bare constant. `None` (preview, tests) prices as before.

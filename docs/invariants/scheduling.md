@@ -2017,6 +2017,58 @@ model alone.
 
 → `docs/invariants/scheduling.md`
 
+## A whole hand-off is priced off our link, not by a split's round trips (2026-11-19)
+
+**Rule**: `.claude/rules/arch-scheduling.md` § "A whole hand-off is priced off our link".
+
+`parallax::vertex_cost_as` prices a whole-model hand-off (and a led chain's head
+and later segments) from the peer's DELEGATED figure — what its whole replies
+delivered. Where it had none, it fell back to the split's decode figure "as an
+UPPER BOUND", on the argument that the overcharge "applies only until this peer
+serves one delegated request". That argument is circular: the bound is what keeps
+the hand-off from being chosen, so it is never timed, and the figure is memory
+only, so every restart starts the loop again.
+
+**Measured on the live node, 2026-11-19 14:54-15:00Z (v0.3.300, the overnight
+tier run `~/swarmllm-gate/tier_1119n`)**: Qwen3.6-35B-A3B; the Australian RTX 3060
+`aa3d1e66` (132 ms) holds it whole and ran it whole at 35-36 tok/s that morning
+(field run #428). The first request (a 32-token warm-up) went to a split here
+[0,14) + Australia [14,40) by 2 s of cold load (31.3 s against 29.4 s). Its 26
+decode steps put Australia at `observed_ms_per_layer=5.86`, `DecodeSteps`, no visit
+term (one width): 152 ms a step, 132 of it our round trip. From then on the whole
+hand-off was priced 5.86 × 40 layers = 234 ms a token (`cost_compute_ms=26262` for
+112 passes) where it delivers ~28, and the next two replies took the split: 4.45
+and 4.32 tok/s, 37-38 s for 160 tokens.
+
+**The fix**: `NodeCandidate::decode_figure_off_our_link` takes our round trip
+(`latency_ms`, the AckRttEstimator's) back out of a `DecodeSteps` figure over the
+width those steps were timed at (`TimedOn::DecodeSteps { layers }`, the decode fit's
+weighted mean width — the same samples as the EMA), never under the per-device
+prior of the range priced (a split's figure describes ITS layers' devices; a whole
+run may put more on the processor), never over the figure itself; the hand-off then
+pays its one round trip once. On the case above: 5.86 − 132/26 = 0.78 ms a layer,
+floored at the prior's ~1.54 (13 of 40 layers on the card, 6.5 tok/s processor) →
+~62 ms a token, against ~28 delivered — still pessimistic, 4x less wrong. Not where
+a fit holds the visit apart (`observed_fixed_ms_per_visit`: its fixed term already
+carries the trip), nor for a prompt-pass or a hop's own figure (neither carried it).
+Test `a_whole_hand_off_is_not_priced_by_the_round_trips_of_a_split` (red with the
+helper answering `None`: 5.86 a layer again).
+
+⚠ **This is not deriving a visit's fixed cost from ping** (§ above): what is left
+after the trip comes out still holds the peer's own per-visit work, spread over the
+width. It removes the one part a hand-off provably does not pay per step — our own
+measured round trip — and nothing the peer spends.
+
+Prior art: Petals keeps a server's compute throughput (self-reported, timed with
+`torch.cuda.synchronize`) and the client's own ping as SEPARATE terms
+(`sequence_manager.py`, #362), never one end-to-end figure.
+
+What it does not fix (other contributors, diagnosis rule 6): the split's own price
+was 4x optimistic (9.4 s predicted, 37.3 measured — 2.3 tokens a round from code
+replies with thinking off, 1.2 with thinking on), and a peer warm with a split's
+range is charged the rest of the model's load (32 s) on every later request, so the
+split is kept while it stays warm.
+
 ## A reply is priced for no more passes than it may take
 
 **Rule (2026-10-18, FUTURE_WORK #3, #3 (b)).** `NodeCandidate::forward_passes` is the

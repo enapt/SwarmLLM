@@ -30,6 +30,13 @@ the helper's guesses as a small tree (the likeliest word and its strongest alter
 instead of a single line. It is off because on two graphics cards it wrote code 21-68% slower than a single line,
 though a story came out 12-30% faster; on two processors both were about 5% faster (#437).
 
+**A computer that holds a large model whole is used whole, not as half of a slower split.** After one split
+through a far computer, this computer priced a whole hand-off to it from the split's step time, which is mostly
+the trip there and back on every token — a hand-off pays that trip once per reply. On Qwen3.6-35B-A3B with the
+other half in Australia that priced a hand-off running 35 tokens a second as about 4, and every reply took the
+split at 4.3-4.5 tokens a second. The trip is now taken out of that figure before it prices a hand-off. The peer list
+(`/api/admin/peers`) also says whether each computer reports that it can take work now (#481).
+
 ## [0.3.300-alpha] — 2026-11-19
 
 **Replies on a graphics card no longer stall now and then.** About one reply in three from a model on the

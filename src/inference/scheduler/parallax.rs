@@ -603,8 +603,26 @@ fn vertex_cost_as(
     // a 14B's run here at ~4.2 tok/s where it ran 11-15, and twelve of twelve
     // requests went to a 3060 abroad delivering 5.4 (2026-11-13).
     let own_whole_run = is_local && covers_whole_model && role == ChainRole::DrivenFromHere;
+    // ...and the bound is not left as the price where our own figures can
+    // take the link out of it: a split's decode steps crossed our round trip
+    // each step, a hand-off crosses it once a reply
+    // (`NodeCandidate::decode_figure_off_our_link`; without it the bound kept
+    // Qwen3.6-35B-A3B off a 3060 that runs it whole 8x faster than the split,
+    // and nothing ever timed the hand-off that would have corrected it).
+    let off_our_link =
+        if (delegated_whole_model || in_led_chain) && c.observed_delegated_ms_per_layer.is_none() {
+            c.observed_latency_ms_per_layer.and_then(|figure| {
+                c.decode_figure_off_our_link(
+                    figure,
+                    DecodePrice::Prior { range, ahead }.ms_per_layer(c),
+                )
+            })
+        } else {
+            None
+        };
     let observation = if delegated_whole_model || in_led_chain || own_whole_run {
         c.observed_delegated_ms_per_layer
+            .or(off_our_link)
             .or(c.observed_latency_ms_per_layer)
     } else {
         c.observed_latency_ms_per_layer
@@ -681,7 +699,17 @@ fn vertex_cost_as(
         } else {
             0.0
         };
-        (per_visit + round_trip_not_in_the_figure, obs_per_layer)
+        // The hand-off's one trip, where the figure it is priced by was taken
+        // off our link above: it is still crossed, once a reply.
+        let hand_off_trip = if delegated_whole_model && off_our_link.is_some() {
+            round_trip_a_pass
+        } else {
+            0.0
+        };
+        (
+            per_visit + round_trip_not_in_the_figure + hand_off_trip,
+            obs_per_layer,
+        )
     } else {
         let network = round_trip_a_pass;
         // The static prior, priced as one of THIS model's layers (#250), on
@@ -3551,13 +3579,80 @@ mod tests {
         );
         assert_eq!(v.compute_ms, 3.0 * 48.0 * ASSUMED_FORWARD_PASSES);
 
-        c.observed_latency_timed_on = Some(TimedOn::DecodeSteps { samples: 4 });
+        c.observed_latency_timed_on = Some(TimedOn::DecodeSteps {
+            samples: 4,
+            layers: 48,
+        });
         let d = vertex_cost(&c, (1, 49), &local, 60, None);
         assert_eq!(
             d.network_ms, 0.0,
             "a decode-timed figure already carries it"
         );
         assert_eq!(d.compute_ms, v.compute_ms);
+    }
+
+    /// A peer timed only as a split's segment is handed the WHOLE model at
+    /// what it costs without our link a step: the split's steps crossed the
+    /// round trip each time, a hand-off crosses it once a reply. The live
+    /// case (2026-11-19): Qwen3.6-35B-A3B, a 3060 132 ms away, 5.86 ms a layer
+    /// off 26-layer steps — priced 234 ms a token whole where it delivers ~28,
+    /// so every request took the 8x slower split and the hand-off was never
+    /// timed to correct it. Red with `decode_figure_off_our_link` answering
+    /// `None`: the whole run's compute is 5.86 a layer again.
+    #[test]
+    fn a_whole_hand_off_is_not_priced_by_the_round_trips_of_a_split() {
+        use crate::daemon::state::TimedOn;
+        let local = NodeId([9u8; 32]);
+        let mut c = cand(2, vec![(0, 40)], 132, 0.0, true, true, 45.0);
+        c.layer_work = 0.41;
+        c.stated_ms_per_layer = Some(0.639);
+        c.observed_latency_ms_per_layer = Some(5.86);
+        c.observed_latency_timed_on = Some(TimedOn::DecodeSteps {
+            samples: 26,
+            layers: 26,
+        });
+
+        let whole = vertex_cost(&c, (0, 40), &local, 40, None);
+        let per_layer = 5.86 - 132.0 / 26.0;
+        assert!(
+            (whole.compute_ms - per_layer * 40.0 * ASSUMED_FORWARD_PASSES).abs() < 1.0,
+            "the whole run pays its layers without our link: {}",
+            whole.compute_ms
+        );
+        assert_eq!(whole.network_ms, 132.0, "and the hand-off's one trip");
+
+        // A segment is still entered every step: the figure as it was timed.
+        let segment = vertex_cost(&c, (14, 40), &local, 40, None);
+        assert!((segment.compute_ms - 5.86 * 26.0 * ASSUMED_FORWARD_PASSES).abs() < 1.0);
+        assert_eq!(segment.network_ms, 0.0);
+
+        // Never under the per-device prior of what the whole run would load:
+        // a link figure as large as the step leaves nothing to price it by.
+        c.observed_latency_ms_per_layer = Some(132.0 / 26.0 + 0.01);
+        let floored = vertex_cost(&c, (0, 40), &local, 40, None);
+        let prior = DecodePrice::Prior {
+            range: (0, 40),
+            ahead: 0,
+        }
+        .ms_per_layer(&c);
+        assert!(
+            (floored.compute_ms - prior * 40.0 * ASSUMED_FORWARD_PASSES).abs() < 1.0,
+            "{} vs prior {prior}",
+            floored.compute_ms
+        );
+
+        // A timed hand-off is still the hand-off's own figure, and a fit that
+        // holds the visit apart is read as before.
+        c.observed_delegated_ms_per_layer = Some(1.5);
+        let timed = vertex_cost(&c, (0, 40), &local, 40, None);
+        assert!((timed.compute_ms - 1.5 * 40.0 * ASSUMED_FORWARD_PASSES).abs() < 1.0);
+        assert_eq!(timed.network_ms, 0.0);
+        c.observed_delegated_ms_per_layer = None;
+        c.observed_latency_ms_per_layer = Some(5.86);
+        c.observed_fixed_ms_per_visit = Some(140.0);
+        let fitted = vertex_cost(&c, (0, 40), &local, 40, None);
+        assert!((fitted.compute_ms - 5.86 * 40.0 * ASSUMED_FORWARD_PASSES).abs() < 1.0);
+        assert_eq!(fitted.network_ms, 140.0);
     }
 
     /// A remote segment starting at layer 0 but NOT covering the whole model is

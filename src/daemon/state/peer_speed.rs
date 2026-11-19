@@ -216,6 +216,14 @@ impl LinearFit {
         }
         Some((fixed.max(0.0) as f32, slope as f32))
     }
+
+    /// The samples' mean width in layers, weighted as every figure beside it
+    /// is — the width the proportional decode figure was timed at, which is
+    /// what a reader needs to take a round trip back OUT of it
+    /// ([`TimedOn::DecodeSteps`]'s `layers`). `None` before any sample.
+    fn mean_layers(&self) -> Option<f64> {
+        (self.w > 0.0 && self.samples > 0).then(|| self.wx / self.w)
+    }
 }
 
 /// Observed compute speed of one peer on ONE model (#250).
@@ -600,6 +608,10 @@ impl ModelSpeed {
                     ms_per_layer: d,
                     timed_on: TimedOn::DecodeSteps {
                         samples: self.decode_samples,
+                        layers: self
+                            .decode_fit
+                            .mean_layers()
+                            .map_or(0, |l| l.round().max(1.0) as u32),
                     },
                 });
             }
@@ -1037,8 +1049,11 @@ pub struct Ranking {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimedOn {
     /// Decode steps this node timed end to end: each crossed the round trip
-    /// once, so the figure carries it.
-    DecodeSteps { samples: u32 },
+    /// once, so the figure carries it — spread over `layers`, the steps' mean
+    /// width (0 = unknown). A price that must not pay that trip per layer — a
+    /// whole-model hand-off, which crosses it once a reply — takes it back out
+    /// over that width (`NodeCandidate::decode_figure_off_our_link`).
+    DecodeSteps { samples: u32, layers: u32 },
     /// Warm prompt passes, scaled to one position: the round trip was crossed
     /// once for EVERY position, so the figure carries almost none of it. A
     /// peer that only ever runs chained (it hands the next computer every
@@ -1186,7 +1201,13 @@ mod tests {
 
         s.observe(WorkKind::Decode, 150, 8, 16_384, None, true);
         let r = s.ranking().unwrap();
-        assert_eq!(r.timed_on, TimedOn::DecodeSteps { samples: 1 });
+        assert_eq!(
+            r.timed_on,
+            TimedOn::DecodeSteps {
+                samples: 1,
+                layers: 8
+            }
+        );
         assert!(r.timed_on.carries_the_round_trip());
         assert_eq!(Some(r.ms_per_layer), s.ranking_ms_per_layer());
     }
@@ -1237,7 +1258,10 @@ mod tests {
         s.observe(WorkKind::Decode, 30, 10, 16_384, None, true);
         assert_eq!(
             s.ranking().unwrap().timed_on,
-            TimedOn::DecodeSteps { samples: 1 }
+            TimedOn::DecodeSteps {
+                samples: 1,
+                layers: 10
+            }
         );
         assert_eq!(s.ranking_ms_per_layer(), Some(3.0));
 

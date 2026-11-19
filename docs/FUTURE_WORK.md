@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #481**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #482**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -894,6 +894,37 @@ frame, then add a receipt ACK or a per-frame read deadline mirroring request-res
 § 4 item 7); with V1Lazy (#136) request-response is as fast, so there is no speed reason to.
 
 ### Routing and placement
+
+#### #481 — A peer that holds a popular model whole was passed over for a split through it 8x slower
+`P1` · routing · **PARTIAL: (1) fixed on main 2026-11-19; (2)-(4) open** — 2026-11-19 · history: #3 (j3), #3 (j4), #469, #10
+
+> Seen on the live node 2026-11-19 14:54-15:00Z (v0.3.300, overnight tier run `~/swarmllm-gate/tier_1119n`):
+> Qwen3.6-35B-A3B, the Australian RTX 3060 `aa3d1e66` (132 ms) holds it whole and ran it whole at 35-36 tok/s
+> that morning. Every request went to a split here [0,14) + Australia [14,40): 4.3-4.5 tok/s. Four contributors
+> (diagnosis rule 6):
+>
+> (1) **FIXED on main** — the whole hand-off had no delegated figure, so it was priced from the split's decode
+> figure, 152 ms a step of which 132 was our own round trip, spread as 5.86 ms over 26 layers and charged on all 40:
+> 234 ms a token where it delivers ~28. `NodeCandidate::decode_figure_off_our_link` takes the trip out over the
+> width the steps were timed at (`TimedOn::DecodeSteps { layers }`), floored at the per-device prior; the hand-off
+> pays it once (`docs/invariants/scheduling.md` § "A whole hand-off is priced off our link"). Prior art: Petals
+> keeps server throughput and client ping as separate terms (`sequence_manager.py`).
+>
+> (2) **Open: a range warm for a split charges the whole model's reload on every request.** Australia's split
+> worker holds [14,40), so its whole run is charged `cold_load_ms` 32.3 s each time (26 layers it would add) and the
+> split, warm, is kept as long as it is used — a ratchet. Design to try: ski rental (Karlin et al. 1988) — per
+> (peer, model), credit the warm cost the chosen plan paid over the cheapest cold-charged alternative, and discount
+> that alternative's `cold_load_ms` by the credit at its one choke point, so the load is bought once the rent has
+> covered it; reset when it is bought.
+>
+> (3) **Open: the split was priced 4x optimistic for a reasoning reply** — 9.4-10.3 s predicted, 37.3-38.5 s
+> measured: 2.30 tokens a round (`split_tokens_per_round_far_tail`, from code replies with thinking OFF) where
+> these thinking-on replies kept ~1.2. `pipeline::reply_kind` reads the request alone; whether the template will
+> open a scratchpad (`enable_thinking`, a family that thinks by default) is not part of the kind.
+>
+> (4) **Open: a US RTX 5080 (`5bfbd36e`) holding Qwen3.8-27B whole and connected was never a candidate.** Most
+> likely its `can_serve_inference` was false; nothing showed it — `/api/admin/peers` now carries
+> `can_serve_inference` (2026-11-19). Read it there before guessing further.
 
 #### #452 — Full computers keep parts of models the swarm never runs, so the models people use find no room
 `P1` · placement · **BUILT, field check (a) as designed on the two computers we can read (2026-11-19); other computers open** — 2026-11-14 · history: #389 (d), #400, #401, #246

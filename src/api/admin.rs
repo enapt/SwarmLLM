@@ -248,6 +248,13 @@ pub fn serialize_peer_to_json(
         "releases_behind": peer_version
             .as_deref()
             .and_then(|v| state.releases_known().behind(v)),
+        // Whether it says it can run a request now — `false` while its card's
+        // stack is down, it hears no swarm, it is too hot or it drains for an
+        // update (`NodeCapability::can_serve_inference`). The planner leaves
+        // such a peer out of every plan, and nothing else showed it: a 16 GB
+        // card holding a 27B whole was never a candidate and no surface said
+        // why (2026-11-19). `null` before its first capability.
+        "can_serve_inference": peer.capability.as_ref().map(|c| c.can_serve_inference),
         // Its own settings, for display only; `null` from an older build.
         "auto_manage": peer.capability.as_ref().and_then(|c| c.auto_manage),
         "updates_itself": peer.capability.as_ref().and_then(|c| c.updates_itself),

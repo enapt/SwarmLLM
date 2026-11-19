@@ -2942,7 +2942,10 @@ User guide: `docs/book/src/api/claude-subscription.md` (configuration, setup, re
   display only, the WebSocket `peer_list` carries the same, 2026-11-04),
   `storage` (its storage limit, what it holds and what its prune would give back for a
   part asked for more — `StorageRoom`, `null` from an older build) and `storage_full`
-  (no room for a part under its limit, #400, 2026-11-14), `models_served` (its
+  (no room for a part under its limit, #400, 2026-11-14), `can_serve_inference` (its own
+  word that it can run a request now — false while its card is down, it hears no swarm, it
+  is too hot or it drains for an update; the planner leaves such a peer out of every plan,
+  2026-11-19), `models_served` (its
   advertised word on what it served for other computers, model by model — `{count,
   entries}` of `ModelServed` day stamps, `null` from an older build; only on this
   listing, never the WebSocket's `peer_list`: the input every "nobody runs it"
