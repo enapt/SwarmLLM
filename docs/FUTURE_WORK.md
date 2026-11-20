@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #489**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #490**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -4404,6 +4404,30 @@ the measurement that can kill it), `docs/plans/split_speculation.md` (guess-and-
 `docs/plans/wan_parallel.md` (parallelise the reply, not the token), `docs/plans/regional_pipelines.md`
 (placement by distance, #192), `docs/plans/faster_than_local.md` (the ranked list).
 
+#### #489 — The card clock hold slows a split whose drafter model shares the card, so it is off by default
+
+`P1` · perf-split · **OPEN** — 2026-11-20 evening · history: #487 (built and closed the same day), gotcha #1149
+
+The hold (#487, `inference::clock_hold`) keeps a card's clocks up between a split's forwards with a 2 ms piece every
+4 ms. It is bounded by its length only on its OWN stream: the card time-slices between PROCESSES (no MPS on a consumer
+card). On the README's headline shape — the 14B half here, half in Australia, its 0.5B drafter in a second process on
+this card (`~/swarmllm-gate/deep/fr/real_link_readme303`, main at `54876c4f9`, hold on/off/on/off/on) — code replies
+read 33.32, 33.64, 32.10 tok/s held against 36.81, 37.16 off, this side's forwards ~38 ms against ~27, drafting +15%.
+The 27B split gained (+13%, `split27_clock`; 25 vs 74-76 ms a forward) because its guesses run inside the segment's
+own worker. **Off by default** (`SWARMLLM_CARD_CLOCK_HOLD=1` turns it on); it never shipped on.
+
+**What is needed**: hold a card only where it would otherwise stand idle — no other process of this node working
+on it. A worker cannot see another process's stream; the daemon can (`WorkerHandle::in_use`, the drafter beside its
+target). Candidates: (a) a drafter model's worker never holds (`Draft` out of `starts_a_hold`) — removes the measured
+cost's likely half, leaves the target's pieces against the drafter's drafting; (b) the daemon tells each card
+worker when another worker on its card has work in flight (a `DaemonMsg`, internal: no wire change) and the hold
+pauses; (c) a run of `stream_busy` ends the hold — 19-34 a hold under contention vs 1-5 alone, but it fires only
+after the contention has cost a piece. Unmeasured, same mechanism: the owner's own reply on the card while a worker
+holds for a slice served to a peer — a change must measure that too. **Kill/keep line**: on, the 14B flow within 2%
+of off AND the 27B's forward ≤ 30 ms. Prior art: NVIDIA's time-slicing between contexts (MPS exists to share a card
+without it); filler work costs only up to its own length on its own stream ("Reducing GPU idle time").
+Evidence: `docs/invariants/inference.md` § "A card between a split's forwards keeps its clocks".
+
 #### #488 — A split's head that runs part of its layers on the processor puts its drafter in system memory, where a guess takes 54 ms
 
 **P3 (lowered the same evening by its probe, below); opened 2026-11-20 evening (Llama 3.3 70B, `~/swarmllm-gate/tier_1120c`).** The 70B ran here `[0,25)` (10 layers on
@@ -8180,6 +8204,8 @@ grep `^| N |`).
   held vs 74/186 off, 13,570 and 13,506 pieces with 5 and 1 turns found busy, 0 driver events; replies +6-8%
   (Australia served ~400 ms a step that hour against ~121 earlier: it held 29-30 of its 43 layers on its card against
   39 earlier, so the far side's processor layers set the pace — #3 (j13)'s field note).
+  **Turned off by default the same evening** — it slowed the 14B split whose drafter shares the card ~10%; the
+  idle-card condition it needs is open as #489.
   Evidence: `docs/invariants/inference.md` § "A card between a split's forwards keeps its clocks".
 - #485 — `P1` — **A split whose chain ended on another computer never guessed (the Qwen 3.5 family).** Filed as "the
   guesser should run where the last layers are"; that premise was WRONG: the file's guess head beside the FIRST

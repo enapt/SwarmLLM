@@ -9541,3 +9541,16 @@ times (49 ms in one run toward the US, 116-151 in another) are expected to fall 
   one block's time slices). Neither measured as a loss; a change that widens the hold re-measures both.
 - The processor-only work between forwards (the guess head in system memory, ~12 ms a guess) starts no piece,
   so the clock still dips there (p10 1035-1215 MHz in the A/B).
+
+**Off by default since the same evening (FUTURE_WORK #489): a piece is cheap only on its OWN stream.** The 14B
+split with its 0.5B drafter on this card (`~/swarmllm-gate/deep/fr/real_link_readme303`, the README's half-and-half
+shape here → the Australian 3060, arms on / off / on / off / on in one build): code replies 33.32, 33.64, 32.10 tok/s
+held against 36.81, 37.16 off; this side's forwards ~38 ms each held (`near_ms` / `forwards` of the code replies:
+3,099/81, 3,057/80, 3,225/84) against ~27 off (2,774/102, 2,779/102); drafting 1,614-1,668 ms against 1,392-1,478.
+Two processes held the card here — the target's worker and the drafter's (`Draft` starts a hold) — and the card
+time-slices between processes (no MPS on a consumer card), so one process's filler took the card from the other's
+real step; `stream_busy` read 19-34 a hold against 1-5 in the 27B's one-process split. The 27B gained because its
+guesses run inside the segment's own worker. Unmeasured and the same mechanism: the owner's own reply on the card
+while a worker holds for a slice served to a peer. **What a change must keep**: hold a card only where it would
+otherwise stand idle — no other process of this node working on it — and measure it on a shape with a second
+process (the 14B flow with its drafter) as well as the 27B's.

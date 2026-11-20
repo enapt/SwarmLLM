@@ -31,8 +31,17 @@
 //! fails. A piece starts only on an idle stream (`cuStreamQuery`, as
 //! PyTorch's `Stream.query()` asks): work still queued there — a piece of
 //! ours held up by another program sharing the card — already keeps the card
-//! busy, so at most one piece of ours is ever queued. A/B
-//! `SWARMLLM_CARD_CLOCK_HOLD=0`.
+//! busy, so at most one piece of ours is ever queued.
+//!
+//! **Off unless `SWARMLLM_CARD_CLOCK_HOLD=1`** (2026-11-20, FUTURE_WORK #489).
+//! A piece is bounded by its length only on its OWN stream: a second process
+//! on the card — a split's drafter model beside its target, or the owner's
+//! own reply beside a slice served for a peer — is time-sliced against it.
+//! The 14B split with its 0.5B drafter on this card
+//! (`~/swarmllm-gate/deep/fr/real_link_readme303`, hold on/off in one build)
+//! took ~38 ms a forward here held against ~27 ms off, its code replies
+//! 32.1-33.6 tok/s against 36.8-37.2. It holds a card only once it can tell
+//! the card would otherwise stand idle.
 
 use std::time::{Duration, Instant};
 
@@ -50,10 +59,16 @@ pub(crate) const PERIOD: Duration = PIECE.saturating_mul(2);
 /// that has ended stops holding the card within a second.
 pub(crate) const HOLD_FOR: Duration = Duration::from_secs(1);
 
-/// `SWARMLLM_CARD_CLOCK_HOLD=0` turns the hold off, for A/B inside one binary.
+/// `SWARMLLM_CARD_CLOCK_HOLD=1` turns the hold on; it is off otherwise (see
+/// the module's notes: a second process on the card pays for the pieces).
 pub(crate) fn enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("SWARMLLM_CARD_CLOCK_HOLD").as_deref() != Ok("0"))
+    *ON.get_or_init(|| on_by(std::env::var("SWARMLLM_CARD_CLOCK_HOLD").ok().as_deref()))
+}
+
+/// The switch's rule: on only where it is set to `1`.
+fn on_by(setting: Option<&str>) -> bool {
+    setting == Some("1")
 }
 
 /// One worker's hold on its card's clocks.
@@ -74,7 +89,7 @@ impl ClockHold {
     /// after its end — never after its arrival, which a long forward would
     /// leave behind with the hold already spent.
     pub(crate) fn note_handled(&mut self, step: bool, now: Instant) {
-        if step {
+        if step && enabled() {
             self.note_forward(now);
         }
     }
@@ -82,7 +97,7 @@ impl ClockHold {
     /// A step of such a reply was handed to this worker: hold the card's
     /// clocks until [`HOLD_FOR`] after it.
     fn note_forward(&mut self, now: Instant) {
-        if !enabled() || self.failed {
+        if self.failed {
             return;
         }
         self.until = Some(now + HOLD_FOR);
@@ -274,6 +289,16 @@ mod tests {
             None
         );
         assert!(hold.until.is_none() && hold.since.is_none());
+    }
+
+    /// Off unless asked for: a second process on the card pays for the
+    /// pieces (FUTURE_WORK #489).
+    #[test]
+    fn the_hold_is_off_unless_it_is_asked_for() {
+        assert!(!on_by(None));
+        assert!(!on_by(Some("0")));
+        assert!(!on_by(Some("")));
+        assert!(on_by(Some("1")));
     }
 
     /// A split's step starts a hold; housekeeping between replies does not.
