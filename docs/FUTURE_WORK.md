@@ -895,6 +895,50 @@ frame, then add a receipt ACK or a per-frame read deadline mirroring request-res
 
 ### Routing and placement
 
+#### #483 — A tester's nightly on 0.3.300: the owner's 14B at a quarter speed beside a peer's model on the card, and two error names new to it
+`P2` · field report · **OPEN** — 2026-11-20 · history: field report 2026-11-20 (a tester's RTX 3060 12 GB node, 0.3.300, 7 peers)
+
+The nightly (one-way, no reply): 9B whole 92 tok/s 4/4, 14B through the swarm 20.3 tok/s 4/4, known-answer and API
+checks pass. Four findings, each checked against the code on 2026-11-20 (three read-only agents; the claims acted on
+re-read at the lines named):
+
+(a) **The owner's 14B alone ran 5.1 tok/s (usually ~20), 4 of 4, with Gemma 4 12B on the card since 02:16.** The
+log's "VRAM budget full — skipping auto-load" is NOT the cause: it is auto-manage's scan (`model/auto_manage/scan.rs`
+~663), which only registers `split_models` metadata, off the request path. A request's admission reclaims an idle
+model's card memory (`free_vram_for_admission`, `free_vram_for_split`) and the planner counts it (`fits_in_budget` →
+`reclaimable_vram_mb`) — but only a worker idle 5 s or more and not `in_use` (`process_pool::vram_reclaim_eligible`,
+`vram_make_room_min_idle_secs`). A 12B serving a PEER's replies is never idle that long, so four asks in a row would
+each plan the 14B partly on the processor (INFERRED: that a peer was running the 12B through this node that night).
+`Requester` (owner or swarm) does not enter the card reclaim — it sets only the RAM cap — so the owner's own ask waits
+behind the swarm's work on the owner's card: the code as designed, against the intent of #266 ("the contribution level
+caps the SWARM's work, not the owner's"). Not yet confirmed from their log; the lines that would: "Model does not fit
+the card whole — placing {on_card} of {total} layers there …" for the 14B with no "Freeing graphics memory from an
+idle model …" naming the 12B. **Next: should an OWNER's ask take the card from a swarm tenant between its replies**
+(the peer's next forward refused and re-planned elsewhere; never mid-reply, #93)? Prior art to look up first: vLLM's
+priority scheduling and preemption, Ollama's eviction order. Closest rule here: #442 (a drafter holding the card kept
+the same 14B at 5.5 tok/s; a WHOLE placement may now take it).
+
+(b) **70B: 0 of 2, `LocalMemoryUnavailable`, with a laptop peer online.** By design the caller is told this node's own
+memory refused (`router::report_after_a_replan`: "our own memory shortfall is always reported" — its owner can act on
+it), after the one re-plan with fewer layers here found no other route. A 70B led from a 12 GB card with one peer is
+the shape #481 (5) narrowed in 0.3.301 (a split that starts and finishes here left its last part no room — `f127aee61`,
+`99b799480`, `6b17f2c95`; the 27B's 5-of-6 failures are answered since) — INFERRED, not read in their log. Their node
+updates itself to 0.3.301; the error's own text names the layers and MB ("layers A..B of M need about N MB more than
+this node has left …"). Next: reproduce the shape from this node on 0.3.301 — Llama 3.3 70B is held here and by four
+peers, one of them a 16 GB laptop card.
+
+(c) **The shared 14B: `ModelIncompleteInSwarm`.** No change in 0.3.298..0.3.301 found that makes a correctly announced
+split read as incomplete. Producers: `SharedState::no_route_error` (no reachable holder of ANY part),
+`scheduler::short_of_memory`'s `first_layers_held_by_nobody`, greedy's uncovered layer. A registry gap after a restart
+(#91 (2j): parts lists only by `ShardAnnounce` since 0.3.299) was checked on this node after its 0.3.301 restart:
+7 minutes in, every peer holding parts was credited them (the one at 0 holds nothing, auto-manage off). The release
+check's two-node 14B split passed on 0.3.301 the same night. The error's text names the span ("No reachable node holds
+{span} of {model}"): the whole model = no holder reachable, a layer span = a gap. UNDETERMINED.
+
+(d) **Gemma 4 12B's guesser on ONE card gains nothing**: 45-46 of 48 layers on the 3060, 256 tokens, prose 19.1 tok/s
+with it against 18.4 without, code 22.9 against 22.8 — inside each run's spread. Consistent with "speculation that
+does not pay steps aside"; untested split across machines, where the gains were measured.
+
 #### #482 — A restart forgets every peer's measured speed, and the first replies after it take routes through the slowest peers
 `P1` · speed · **OPEN** — 2026-11-19 · history: none
 
