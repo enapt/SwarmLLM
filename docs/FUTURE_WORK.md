@@ -895,33 +895,38 @@ frame, then add a receipt ACK or a per-frame read deadline mirroring request-res
 
 ### Routing and placement
 
-#### #484 — A model asked right after another on the same peer is not offered that peer's card for up to a minute
-`P1` · routing · **OPEN** — 2026-11-20 · history: #447, #479, #482 (whose measured case this is)
+#### #484 — For up to a minute after a peer's last reply of one model, the next model's plan prices that peer's room as still held
+`P2` · routing · **OPEN** — 2026-11-20 · history: #447, #479, #481 (5), #482 (whose measured case this is)
 
-Seen at `~/swarmllm-gate/tier_1119p` (v0.3.300, 2026-11-19 20:22-20:59Z), re-read 2026-11-20. Qwen3.6-35B-A3B ran
-WHOLE on the Australian RTX 3060 `aa3d1e66` (three asks, 27-34 tok/s on the two 160-token replies); 19 s after the
-last, the rig asked Qwen3.8-27B. Australia was offered as room for 42 of its 64 layers (64 at its ceiling) with 4 on
-the card (`max_hostable_layers=Some(42)`, `max_hostable_layers_at_ceiling=Some(64)`, `card_layers=Some(4)`), so the
-whole run was priced 17,754 ms; the 27B went as a split (here `[0,21)`, Australia `[21,61)`, Proxmox, here again,
-with a Mac mini's processor ~350 ms away among its standbys) at 1.2-1.25 tok/s on the 160-token replies. At
-`tier_1119n` (no restart, 14:54-15:18Z) the 35B had run as a split — Australia serving layers 14-40 — and Australia
-offered the 27B 26 card layers and room for all 64, priced 12,235, and ran it whole at 4.6-5.7 tok/s.
-Likely why (a hypothesis — the peer's advertisement was not logged): a peer says an idle worker of another model
-gives way (`ResidentModelLayers::gives_way`) only after `GIVES_WAY_AFTER_IDLE_SECS` (30 s) idle, and says it at its
-next capability round (every 30 s) — up to a minute after the last reply — while its own admission would reclaim the
-worker after 5 s (`VRAM_MAKE_ROOM_MIN_IDLE_SECS_DEFAULT`). ⚠ Not the whole account: the same run's Gemma 4 31B, asked
-17 s after Qwen3.6-27B ran whole on Australia, went five ways at 1.0-1.6 tok/s, while at `n` the same pair 20 s apart
-ran whole on Australia at 2.0-2.1 tok/s — what Australia's machine memory held differed too (UNDETERMINED). First step:
-log the room each peer's resident workers hold and give way at the plan (the DIAG candidate line), then re-run.
+Seen at `~/swarmllm-gate/tier_1119p` (v0.3.300 on every node, 2026-11-19 20:22-20:59Z), re-read 2026-11-20.
+Qwen3.6-35B-A3B ran WHOLE on the Australian RTX 3060 `aa3d1e66` (27-34 tok/s on the two 160-token replies); 19 s
+after the last, the rig asked Qwen3.8-27B. The first plan priced Australia at room for 42 of its 64 layers, 4 on the
+card (`max_hostable_layers=Some(42)`, `max_hostable_layers_at_ceiling=Some(64)`, `card_layers=Some(4)`, cost
+17,754 ms), and gave it `[21,61)` of a four-way split (here `[0,21)`, Proxmox `[61,63)`, here `[63,64)`). On
+arrival Australia did take the card: its own hop report held those 40 layers at 53 ms a step (1.3 ms a layer). At
+`tier_1119n` (no restart) the 27B came 2.3 min after the 35B, which had run as a split there (Australia `[14,40)`);
+Australia was priced at all 64 layers, 26 on the card (12,235 ms). ⚠ **The two 160-token asks that followed at `p` (1.2
+tok/s) are NOT this item**: each went through five plans — this node 261 MB short for its tail `[63,64)`, then
+Australia refusing to widen beside its copy "running for a conversation", which was the same request's first attempt
+— and ended with a Mac mini ~340 ms away holding `[61,64)`. That is #481 (5)'s failure on 0.3.300, fixed in 0.3.301
+(`busy_beside`, `give_back_what_the_load_freed`).
+Likely why the first plan priced the room as held (a hypothesis — the peer's advertisement was not logged): a peer
+says an idle worker of another model gives way (`ResidentModelLayers::gives_way`) only after
+`GIVES_WAY_AFTER_IDLE_SECS` (30 s) idle, at its next capability round (every 30 s), so up to a minute after the last
+reply, while its own admission reclaims the worker after 5 s (`VRAM_MAKE_ROOM_MIN_IDLE_SECS_DEFAULT`). What it costs
+is unmeasured: the split gave the peer fewer layers than its card took, so more hops. Every rig that asks models back
+to back pays it at each switch. **Logged on main 2026-11-20**: `DIAG: another model's worker holds room on this
+candidate and gives no way yet` names each such model, its layers, card layers and `gives_way`. Next: re-run `p`'s
+order (the 35B whole on Australia, then the 27B within 20 s) on a build carrying it.
 Prior art: Ollama's scheduler unloads an idle runner (no request in flight) the moment a new model needs the memory
-(`server/sched.go`, `findRunnerToUnload`); llama-swap swaps the running model out for the one a request names. Neither
-waits on a timer, and neither has a second party to tell. ⚠ The peer side stays as it is: a peer's give-way ignores
-who used the worker last (security review 2026-11-12). The answer is the ASKER's: this node knows when it last used
-that worker and that it has nothing in flight there, and a peer's capability issued before that worker could have
-been offered (`issued_at_ms` < our last use + 30 s) says nothing about it — so the planner may count the worker's
-room for a DIFFERENT model of its own, and the peer's arrival check (refused out loud, re-planned) stays the last word.
-It needs what the worker would give back while it is not yet offered: a new `ResidentModelLayers` field beside
-`gives_way` (additive, `#[serde(default)]`), since `gives_way`'s `Some` means "offered now" to every older receiver.
+(`server/sched.go`, `findRunnerToUnload`); llama-swap swaps the running model for the one a request names. Neither
+waits on a timer, and neither has a second party to tell. ⚠ The peer side stays as it is: its give-way ignores who
+used the worker last (security review 2026-11-12). A possible answer is the ASKER's: this node knows it alone sent
+that worker's last requests and has none in flight, and a capability that ARRIVED here within
+`GIVES_WAY_AFTER_IDLE_SECS` and one round of that use says nothing about it. Nothing keeps when a capability arrived
+today (`issued_at_ms` is the sender's own sequence, never a time; `last_seen` is any message), so it needs that
+too. The planner could then count that room from the model's own header, leaving the peer's up-front check
+(refused out loud, re-planned) as the last word.
 
 #### #483 — A tester's nightly on 0.3.300: the owner's 14B at a quarter speed beside a peer's model on the card, and two error names new to it
 `P2` · field report · **OPEN** — 2026-11-20 · history: field report 2026-11-20 (a tester's RTX 3060 12 GB node, 0.3.300, 7 peers)
@@ -1038,7 +1043,8 @@ does not pay steps aside"; untested split across machines, where the gains were 
 > so a node up for hours prices a model it has not run for ten minutes from the priors too: at `tier_1119n` (no
 > restart) the 27B's first plan read `observed_ms_per_layer=None` and `observed_delegated_ms_per_layer=None` for every
 > candidate, exactly as at `tier_1119p`. What differed was Australia's card: 26 of the 27B's layers offered at `n`, 4
-> at `p`, where the 35B-A3B had just run WHOLE there and, likely, its idle worker was not yet offered — FUTURE_WORK #484.
+> at `p`, where the 35B-A3B had just run WHOLE there and, likely, its idle worker was not yet offered (#484); the
+> slow 160-token asks after it were #481 (5)'s re-plan failures on 0.3.300, fixed in 0.3.301.
 > What is left of this item: a restart within ten minutes of a model's last reply (an update during use) loses
 > figures that would still price it — about one reply priced from the priors per model in use, per update.
 

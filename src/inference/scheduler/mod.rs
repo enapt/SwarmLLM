@@ -6328,6 +6328,34 @@ impl PipelineScheduler {
                             .as_ref()
                             .is_some_and(|c| c.room_held_by_other_models(&manifest.id.0))
                     });
+            // Which models hold it, and what each says it would give back
+            // (`None`: not offered yet) — the reading FUTURE_WORK #484 needs:
+            // a 27B planned 19 s after a 35B's reply on the same peer priced
+            // that peer at 42 of 64 layers, and nothing said why. Its own line:
+            // the candidate line is at tracing's 32-field cap.
+            if room_held_by_other_models {
+                let held_by: Vec<_> = self
+                    .shared_state
+                    .peer_registry
+                    .get(&node_id)
+                    .and_then(|p| {
+                        p.capability.as_ref().map(|c| {
+                            c.resident_layers
+                                .iter()
+                                .filter(|r| r.model_id != manifest.id.0 && r.layers > 0)
+                                .map(|r| (r.model_id.clone(), r.layers, r.card_layers, r.gives_way))
+                                .collect()
+                        })
+                    })
+                    .unwrap_or_default();
+                route_info!(purpose,
+                    node = %node_id,
+                    model = %manifest.id.0,
+                    // (model, layers, card layers, gives way)
+                    held_by = ?held_by,
+                    "DIAG: another model's worker holds room on this candidate and gives no way yet"
+                );
+            }
             candidates.push(
                 NodeCandidate {
                     // Measured on real forwards to this peer, like `ack_srtt_ms`

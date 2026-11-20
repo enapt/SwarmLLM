@@ -811,19 +811,57 @@ fn a_peer_running_another_model_is_a_candidate_whose_room_may_come_back() {
             .room_held_by_other_models
     };
 
+    // What the plan's log says of it (#484): the line naming the model that
+    // holds the room, only while that model gives no way.
+    #[derive(Clone, Default)]
+    struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let logged = |check: &dyn Fn() -> bool| {
+        let log = Captured::default();
+        let writer = log.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(move || writer.clone())
+            .finish();
+        let answer = tracing::subscriber::with_default(subscriber, check);
+        let text = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+        let line = text
+            .lines()
+            .find(|l| l.contains("gives no way yet"))
+            .map(str::to_owned);
+        (answer, line)
+    };
+
     install(None);
+    let (held, line) = logged(&busy);
     assert!(
-        busy(),
+        held,
         "another model's worker that gives no way: room that may come back"
+    );
+    let line = line.expect("the plan's log names the room another model holds");
+    assert!(
+        line.contains("thirty-a3b") && line.contains("None"),
+        "it names the model and that it gives no way: {line}"
     );
     install(Some(swarmllm_types::GivesWay {
         card_mb: 9_000,
         machine_mb: 0,
     }));
+    let (held, line) = logged(&busy);
     assert!(
-        !busy(),
+        !held,
         "once it gives way, its memory is room already, not a moment"
     );
+    assert_eq!(line, None, "and nothing is said of it");
 }
 
 /// **A run inside a range a peer has LOADED is charged no load where the peer
