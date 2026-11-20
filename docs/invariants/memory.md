@@ -3513,6 +3513,21 @@ included) if it is still refused; the refit (#365) put 20 of 21 layers on the ca
 20:07Z run and refused the guess head (Fix B: the refit keeps the guesser's room); and the next-token block's room on
 the card at the spawn (#481 (3c), `~/swarmllm-gate/tier_1119q/guess_head_room_aside.patch`).
 
+**Measured 2026-11-20 (`~/swarmllm-gate/split27_1120a`, forced 27B split, this 8 GB card): the charge fixes held
+and the tail was still refused.** The fold fired (`guessers_mb=995`, `worker_charged_mb=5727`) and the tail asked
+411 MB, refused 4 of 4: the card read 1,080-1,130 MB free mid-request (telemetry `gpu_mem_mb` 7,062-7,112) against
+the 1,231 MB the ask needed above the 820 MB reserve, and 1,399 between requests. The gap was the prompt pass's
+freed buffers (`last_forward_took_mb=388`, ~215-320 MB kept) in the first range's worker pool — the pool keeps
+freed memory by design (`cuda_pool::keep_freed_memory`), and the driver's free figure counts it as taken. **So a
+growth the card would refuse asks its live worker what that pool holds freed** (`WorkerHandle::pool_reusable_mb`:
+`DaemonMsg::ReadCardFree` → `WorkerMsg::CardFree::reusable_bytes`, routed by the reader through
+`card_free_asked`, 3 s, 0 without an answer) and weighs only the rest against the card
+(`admit_to_gpu_reusing`), charging the WHOLE growth, which is what the worker then holds. A growth that fits asks
+nothing; the dry run (`growth_would_be_admitted`) weighs whole, asked before the pass that fills the pool. Prior
+art: vLLM counts the memory its own PyTorch caching allocator reserved as its own; PyTorch serves an allocation
+from a reserved free block before asking the driver. Tests: `a_growth_loads_first_into_what_its_workers_pool_holds_freed`
+(red under `SWARMLLM_GROWTH_REUSES_POOL=0`), `a_growths_question_about_the_pool_is_answered_through_the_reader`.
+
 ## A model process holds one copy of the output head (2026-11-16, FUTURE_WORK #458)
 
 ### What it replaced

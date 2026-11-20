@@ -12757,13 +12757,21 @@ async fn handle_daemon_msg(
         }
         DaemonMsg::ReadCardFree => {
             // Before anything loads: the spawn of a card/processor split sizes
-            // it by what the load will read (#365).
+            // it by what the load will read (#365). And before a growth: what
+            // this worker's pool holds freed is room the range loads into
+            // (#481 (5)).
             let free_bytes = crate::inference::split::card_free_for_a_load();
+            let reusable_bytes = crate::inference::split::card_pool_reusable_for_a_load();
             tracing::info!(
                 free_mb = free_bytes.map(|b| b / (1024 * 1024)),
-                "model-worker: read the card's free memory for the daemon's split"
+                reusable_mb = reusable_bytes.map(|b| b / (1024 * 1024)),
+                "model-worker: read the card's free memory for the daemon"
             );
-            if let Err(e) = send_worker(writer, &WorkerMsg::CardFree { free_bytes }, &[]).await {
+            let answer = WorkerMsg::CardFree {
+                free_bytes,
+                reusable_bytes,
+            };
+            if let Err(e) = send_worker(writer, &answer, &[]).await {
                 tracing::warn!(error = %e, "model-worker: could not report the card's free memory");
             }
         }

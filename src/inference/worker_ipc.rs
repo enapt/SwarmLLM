@@ -322,7 +322,15 @@ pub enum WorkerMsg {
     /// The answer to `DaemonMsg::ReadCardFree`: the card's free memory as a
     /// load here reads it, in bytes; `None` without a card or a reading.
     /// Sent only in answer to that message, so only to a daemon that reads it.
-    CardFree { free_bytes: Option<u64> },
+    /// `reusable_bytes`: of that, what this worker's own memory pool holds
+    /// freed and hands its next allocation (`cuda_pool::reusable_bytes`) —
+    /// what a growth of this worker loads into before the driver gives it
+    /// any (#481 (5)); `None` from a worker older than the field.
+    CardFree {
+        free_bytes: Option<u64>,
+        #[serde(default)]
+        reusable_bytes: Option<u64>,
+    },
     /// A reply's prompt was refused because the conversation memory this
     /// worker's placement leaves could not hold `positions` — the prompt plus
     /// the reply's reserve, what its admission asked for. Sent just before
@@ -1537,8 +1545,12 @@ mod tests {
             WorkerMsg::ContextFits { tokens: None },
             WorkerMsg::CardFree {
                 free_bytes: Some(7_291 << 20),
+                reusable_bytes: Some(388 << 20),
             },
-            WorkerMsg::CardFree { free_bytes: None },
+            WorkerMsg::CardFree {
+                free_bytes: None,
+                reusable_bytes: None,
+            },
             WorkerMsg::CardBeside {
                 guessers_bytes: 994 << 20,
                 lends_head_bytes: 994 << 20,

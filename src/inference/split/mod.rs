@@ -73,7 +73,7 @@ pub(crate) use self::gguf_meta::{
     segment_tensor, SegmentTensor, SlidingWindow, PER_LAYER_TOKEN_TABLE,
 };
 pub use self::kv_cache::{KvCacheStore, KvHome, KvOccupancy};
-pub(crate) use self::loader::card_free_for_a_load;
+pub(crate) use self::loader::{card_free_for_a_load, card_pool_reusable_for_a_load};
 pub use self::model::SplitModel;
 pub(crate) use self::mtp::{head_in_shape, mtp_on, split_guess_head_on};
 pub(crate) use self::mtp::{

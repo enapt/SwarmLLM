@@ -1149,6 +1149,17 @@ pub(crate) fn card_free_for_a_load() -> Option<u64> {
     card_free_bytes(&device)
 }
 
+/// Of [`card_free_for_a_load`], what this worker's own memory pool holds
+/// freed for its next allocation (`cuda_pool::reusable_bytes`): the room a
+/// growth of this worker loads into before the driver gives it any (#481
+/// (5)). `None` without a card.
+pub(crate) fn card_pool_reusable_for_a_load() -> Option<u64> {
+    let device = load_device(false);
+    device
+        .is_cuda()
+        .then(|| crate::inference::cuda_pool::reusable_bytes(&device))
+}
+
 impl SplitModel {
     /// Load a partial model from a GGUF file, only loading the specified layer range.
     ///

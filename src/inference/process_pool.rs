@@ -147,6 +147,18 @@ const WORKER_CONNECT_TIMEOUT_SECS: u64 = 30;
 /// reads the card itself as it always has.
 const CARD_FREE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
+/// How long a growth waits for its live worker's reading of what its pool
+/// holds freed (`DaemonMsg::ReadCardFree` → `WorkerMsg::CardFree`, #481 (5)).
+/// The worker answers between messages, and a growth is asked between a
+/// request's forwards; past this the growth is weighed without the pool's
+/// room, as it was before.
+const GROWTH_CARD_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Where a live worker's answer to a growth's `DaemonMsg::ReadCardFree` goes:
+/// set by [`WorkerHandle::pool_reusable_mb`] before it asks, taken by the
+/// reader actor when `WorkerMsg::CardFree` arrives (its `reusable_bytes`).
+type CardFreeAsked = Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<Option<u64>>>>>;
+
 /// Ask a worker that has just connected for the card's free memory as its load
 /// will read it, and wait for the answer (#365). Run before the reader actor
 /// owns `reader`, so the answer comes straight back here. `Ok(None)`: the
@@ -165,7 +177,7 @@ where
     let answer = tokio::time::timeout(CARD_FREE_READ_TIMEOUT, async {
         loop {
             match recv_worker(reader).await {
-                Ok((WorkerMsg::CardFree { free_bytes }, _)) => return Ok(free_bytes),
+                Ok((WorkerMsg::CardFree { free_bytes, .. }, _)) => return Ok(free_bytes),
                 // Nothing is sent unasked before a load, but a side-band
                 // report is no reason to give up on the answer.
                 Ok((other, _)) => tracing::debug!(
@@ -1456,6 +1468,9 @@ struct WorkerHandle {
     /// much of the first `charged_mb` already counts ([`CardBeside`]). On the
     /// handle, so the figures die with the worker that holds the memory.
     card_beside: Arc<CardBeside>,
+    /// A growth's question about this worker's pool, awaiting its answer
+    /// ([`CardFreeAsked`]). On the handle, shared with the reader actor.
+    card_free_asked: CardFreeAsked,
     /// This worker's own decode speed ([`OwnDecodeSpeed`]), written by
     /// [`ModelProcessPool::note_decode_step`] and published by
     /// [`ModelProcessPool::resident_model_layers`]. On the handle for the
@@ -1651,8 +1666,8 @@ fn worker_msg_request_id(msg: &WorkerMsg) -> Option<Uuid> {
         | WorkerMsg::ModelLoadTimed { .. }
         | WorkerMsg::ContextFits { .. }
         | WorkerMsg::CardBeside { .. }
-        // Read by the spawn before the reader starts; one arriving here
-        // came after the spawn stopped waiting for it, and is dropped.
+        // Read by the spawn before the reader starts, or answered to a
+        // growth's question by the reader (`card_free_asked`).
         | WorkerMsg::CardFree { .. }
         | WorkerMsg::Ready
         | WorkerMsg::Bye => None,
@@ -1771,6 +1786,8 @@ struct SideBand {
     context_fits: Arc<std::sync::atomic::AtomicU32>,
     /// This worker's `WorkerHandle::card_beside`, its reported half.
     card_beside: Arc<CardBeside>,
+    /// This worker's `WorkerHandle::card_free_asked`.
+    card_free_asked: CardFreeAsked,
     /// This worker's `WorkerHandle::asked_to_load`, set on a reported load.
     asked_to_load: Arc<AtomicBool>,
     /// The daemon's stop signal ([`ModelProcessPool::watch_daemon_stop`]):
@@ -1823,6 +1840,7 @@ async fn reader_actor(
         load_rate,
         context_fits,
         card_beside,
+        card_free_asked,
         asked_to_load,
         daemon_stopping,
     } = side;
@@ -1916,6 +1934,16 @@ async fn reader_actor(
                         tokens = ?tokens,
                         "DIAG: the context the loaded model holds here"
                     );
+                    continue;
+                }
+                // A growth's question about this worker's pool (#481 (5)).
+                // One arriving with nobody asking (the spawn's own reading is
+                // read before this actor starts) is dropped.
+                if let WorkerMsg::CardFree { reusable_bytes, .. } = msg {
+                    let asked = card_free_asked.lock().ok().and_then(|mut w| w.take());
+                    if let Some(answer) = asked {
+                        let _ = answer.send(reusable_bytes);
+                    }
                     continue;
                 }
                 // What its guessers keep on the card, and the head it would
@@ -2370,6 +2398,53 @@ impl WorkerHandle {
     /// opened once per model and then stopped checking. See gotcha #586.
     fn holds_gpu_memory(&self) -> bool {
         !self.charged_against_ram
+    }
+
+    /// What this worker's own memory pool holds freed for its next allocation,
+    /// in MB, read from the worker NOW (`DaemonMsg::ReadCardFree` →
+    /// `WorkerMsg::CardFree::reusable_bytes`). A range this worker grows by
+    /// loads into it before the driver hands it anything, and the driver's
+    /// free figure the card budget reads counts it as taken: "the driver lends
+    /// a pool's spare memory only within its own process" (`cuda_pool`,
+    /// `docs/invariants/memory.md`). 0 without an answer within
+    /// [`GROWTH_CARD_READ_TIMEOUT`], from a worker older than the field, or
+    /// with `SWARMLLM_GROWTH_REUSES_POOL=0` (the A/B).
+    ///
+    /// Qwen3.8-27B's `[63,64)` growth was refused 4 of 4 with the card at
+    /// 1,080-1,130 MB free against the 1,231 its 411 MB needed above the
+    /// reserve, while the first range's worker held ~215-320 MB of the prompt
+    /// pass's freed buffers in its pool (`~/swarmllm-gate/split27_1120a`,
+    /// 2026-11-20; between requests the card read 1,399 free).
+    ///
+    /// Prior art: vLLM's `determine_available_memory` counts the memory its own
+    /// PyTorch caching allocator reserved as its own, never as another
+    /// process's; PyTorch's allocator serves an allocation from a reserved
+    /// free block before asking the driver.
+    async fn pool_reusable_mb(&self, model_id: &ModelId) -> u64 {
+        const MIB: u64 = 1024 * 1024;
+        if std::env::var("SWARMLLM_GROWTH_REUSES_POOL").as_deref() == Ok("0") {
+            return 0;
+        }
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        match self.card_free_asked.lock() {
+            Ok(mut asked) => *asked = Some(tx),
+            Err(_) => return 0,
+        }
+        {
+            let mut writer = self.writer.lock().await;
+            if let Err(e) = send_daemon(&mut *writer, &DaemonMsg::ReadCardFree, &[]).await {
+                tracing::debug!(
+                    model = %model_id,
+                    error = %e,
+                    "Could not ask a live worker what its card pool holds freed"
+                );
+                return 0;
+            }
+        }
+        match tokio::time::timeout(GROWTH_CARD_READ_TIMEOUT, rx).await {
+            Ok(Ok(Some(bytes))) => bytes / MIB,
+            _ => 0,
+        }
     }
 
     /// How many of the layers this worker holds run on its graphics card —
@@ -7171,7 +7246,16 @@ impl ModelProcessPool {
     /// rather than a `CUDA_ERROR_OUT_OF_MEMORY` that kills the worker and (until
     /// the pin became recoverable) cost the model its GPU for the whole run.
     fn admit_to_gpu(&self, model_id: &ModelId, estimated_mb: u64) -> bool {
-        let (budget, committed) = match self.card_verdict(estimated_mb) {
+        self.admit_to_gpu_reusing(model_id, estimated_mb, 0)
+    }
+
+    /// [`Self::admit_to_gpu`] for a load into a live worker whose own pool
+    /// holds `reusing_mb` freed ([`WorkerHandle::pool_reusable_mb`]): the load
+    /// takes that first, so only the rest is weighed against the card's room,
+    /// and the whole `estimated_mb` is charged — what the worker then holds.
+    fn admit_to_gpu_reusing(&self, model_id: &ModelId, estimated_mb: u64, reusing_mb: u64) -> bool {
+        let weighed_mb = estimated_mb.saturating_sub(reusing_mb);
+        let (budget, committed) = match self.card_verdict(weighed_mb) {
             Verdict::Unjudged => {
                 add_reserved(&self.vram_reserved_mb, model_id, estimated_mb);
                 return true;
@@ -7190,6 +7274,7 @@ impl ModelProcessPool {
                 tracing::debug!(
                     model = %model_id,
                     estimated_mb,
+                    reusing_mb,
                     committed_mb = committed,
                     budget_mb = budget,
                     "DIAG: GPU admission refused — not enough budget at this moment"
@@ -7212,9 +7297,10 @@ impl ModelProcessPool {
         tracing::info!(
             model = %model_id,
             estimated_mb,
+            reusing_mb,
             committed_mb = committed,
             budget_mb = budget,
-            headroom_mb = budget.saturating_sub(committed.saturating_add(estimated_mb)),
+            headroom_mb = budget.saturating_sub(committed.saturating_add(weighed_mb)),
             "DIAG: admitting model to GPU"
         );
         add_reserved(&self.vram_reserved_mb, model_id, estimated_mb);
@@ -8604,8 +8690,19 @@ impl ModelProcessPool {
             return Ok(());
         };
         let net_mb = delta_mb.saturating_sub(subsumed_mb);
+        // What the worker's pool holds freed is room this range loads into
+        // first (#481 (5)) — read from the worker now, after the forwards
+        // that left it there, and only for a growth the card would refuse
+        // without it: one that fits pays no question. The dry run
+        // (`growth_would_be_admitted`) is asked before a request's pass, when
+        // the pool holds none for it.
+        let reusing_mb = if on_gpu && matches!(self.card_verdict(net_mb), Verdict::Refused { .. }) {
+            handle.pool_reusable_mb(model_id).await
+        } else {
+            0
+        };
         let admitted = if on_gpu {
-            self.admit_to_gpu(model_id, net_mb)
+            self.admit_to_gpu_reusing(model_id, net_mb, reusing_mb)
         } else {
             self.admit_to_cpu(model_id, net_mb, requester)
         };
@@ -12950,6 +13047,7 @@ impl ModelProcessPool {
         let dead = Arc::new(AtomicBool::new(false));
         let context_fits = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let card_beside = Arc::new(CardBeside::default());
+        let card_free_asked: CardFreeAsked = Arc::default();
         let asked_to_load = Arc::new(AtomicBool::new(false));
         let reader_handle = tokio::spawn(reader_actor(
             read_half,
@@ -12964,6 +13062,7 @@ impl ModelProcessPool {
                 load_rate: self.load_rate.clone(),
                 context_fits: context_fits.clone(),
                 card_beside: card_beside.clone(),
+                card_free_asked: card_free_asked.clone(),
                 asked_to_load: asked_to_load.clone(),
                 daemon_stopping: self.daemon_stopping.get().cloned(),
             },
@@ -13002,6 +13101,7 @@ impl ModelProcessPool {
             card_free_at_load_mb: None,
             context_fits,
             card_beside,
+            card_free_asked,
             own_decode: std::sync::Mutex::new(OwnDecodeSpeed::default()),
             drafts_for_another_model: AtomicBool::new(false),
             guesses_for: std::sync::Mutex::new(Vec::new()),
@@ -20475,6 +20575,7 @@ mod tests {
                 load_rate: p.load_rate.clone(),
                 context_fits: Arc::new(std::sync::atomic::AtomicU32::new(0)),
                 card_beside: Arc::new(CardBeside::default()),
+                card_free_asked: Arc::default(),
                 asked_to_load: asked_to_load.clone(),
                 daemon_stopping: None,
             },
@@ -20578,6 +20679,7 @@ mod tests {
             card_free_at_load_mb: None,
             context_fits: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             card_beside: Arc::new(CardBeside::default()),
+            card_free_asked: Arc::default(),
             own_decode: std::sync::Mutex::new(OwnDecodeSpeed::default()),
             drafts_for_another_model: AtomicBool::new(false),
             guesses_for: std::sync::Mutex::new(Vec::new()),
@@ -21866,6 +21968,7 @@ mod tests {
                 load_rate: p.load_rate.clone(),
                 context_fits: Arc::new(std::sync::atomic::AtomicU32::new(0)),
                 card_beside: card_beside.clone(),
+                card_free_asked: Arc::default(),
                 asked_to_load: Arc::new(AtomicBool::new(false)),
                 daemon_stopping: None,
             },
@@ -21888,6 +21991,145 @@ mod tests {
         }
         assert_eq!(card_beside.reported_mb.load(Ordering::Acquire), 994);
         assert_eq!(card_beside.lends_head_mb(), 994);
+        reader.abort();
+        let _ = std::fs::remove_file(&name);
+    }
+
+    /// **A growth loads first into what its worker's own pool holds freed**
+    /// (#481 (5)), so only the rest is weighed against the card, and the whole
+    /// growth is charged. `~/swarmllm-gate/split27_1120a` (2026-11-20):
+    /// Qwen3.8-27B's `[63,64)` asked 411 MB, refused 4 of 4 with the card
+    /// 100-150 MB short, while the first range's worker held ~215-320 MB of
+    /// the prompt pass's freed buffers in its pool. A worker that answers with
+    /// no figure (one older than the field) is weighed whole, as before.
+    #[tokio::test]
+    async fn a_growth_loads_first_into_what_its_workers_pool_holds_freed() {
+        use crate::inference::worker_ipc::recv_daemon;
+        let pool = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-growth-pool"));
+        pool.set_gpu_layers(-1);
+        pool.set_vram_budget_mb(6_000);
+        let model = ModelId("grows-into-its-pool".into());
+        // One layer of growth is 400 MB; 300 MB of the card is left.
+        pool.test_cost_curve.insert(model.clone(), (500, 400));
+        assert!(pool.admit_to_gpu(&model, 5_700));
+        let (h, mut worker_end) = fake_worker_handle_split_with_its_end(
+            false,
+            None,
+            false,
+            std::time::Instant::now(),
+            None,
+        )
+        .await;
+        h.charged_mb.store(5_700, Ordering::Release);
+        h.record_charged_segment((0, 21), 0);
+        pool.workers.insert(model.clone(), h.clone());
+        let answering = {
+            let h = h.clone();
+            tokio::spawn(async move {
+                for answer in [None, Some(150u64 << 20)] {
+                    loop {
+                        let (msg, _) = recv_daemon(&mut worker_end).await.expect("a message");
+                        if matches!(msg, DaemonMsg::ReadCardFree) {
+                            break;
+                        }
+                    }
+                    let waiting = h
+                        .card_free_asked
+                        .lock()
+                        .expect("lock")
+                        .take()
+                        .expect("a growth waiting for the answer");
+                    let _ = waiting.send(answer);
+                }
+                worker_end
+            })
+        };
+        let refused = pool
+            .charge_additional_segment(&model, (63, 64), &h, Requester::Owner, RunShape::Plain)
+            .await
+            .expect_err("no figure: 400 MB weighed whole against the 300 left");
+        assert_eq!(refused.needed_mb, 400);
+        assert_eq!(pool.vram_committed_mb(), 5_700, "nothing charged");
+        pool.charge_additional_segment(&model, (63, 64), &h, Requester::Owner, RunShape::Plain)
+            .await
+            .expect("150 MB of it loads into the pool: 250 against the 300 left");
+        assert_eq!(
+            pool.vram_committed_mb(),
+            6_100,
+            "the whole growth is charged"
+        );
+        assert_eq!(h.charged_mb.load(Ordering::Acquire), 6_100);
+        let _worker_end = answering.await.expect("the worker answered twice");
+    }
+
+    /// A growth's question reaches the live worker's answer through the reader
+    /// (`card_free_asked`); an answer nobody asked for is dropped.
+    #[tokio::test]
+    async fn a_growths_question_about_the_pool_is_answered_through_the_reader() {
+        let (name, daemon_end, mut worker_end) = test_socket_pair().await;
+        let (read_half, _write_half) = split_ipc(daemon_end);
+        let p = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-pool-answer"));
+        let card_free_asked: CardFreeAsked = Arc::default();
+        let card_beside = Arc::new(CardBeside::default());
+        let reader = tokio::spawn(reader_actor(
+            read_half,
+            Arc::new(DashMap::new()),
+            Arc::new(AtomicBool::new(false)),
+            ModelId("grows".into()),
+            SideBand {
+                prefix_manifest_tx: None,
+                prefix_probe_tx: None,
+                progress_tx: None,
+                slow_card: p.slow_card.clone(),
+                load_rate: p.load_rate.clone(),
+                context_fits: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+                card_beside: card_beside.clone(),
+                card_free_asked: card_free_asked.clone(),
+                asked_to_load: Arc::new(AtomicBool::new(false)),
+                daemon_stopping: None,
+            },
+        ));
+        let unasked = WorkerMsg::CardFree {
+            free_bytes: Some(1 << 30),
+            reusable_bytes: Some(1 << 20),
+        };
+        send_worker(&mut worker_end, &unasked, &[])
+            .await
+            .expect("send");
+        // A message the reader marks where the test can see it, sent after
+        // the unasked reading: once it lands, that reading has been read.
+        let marker = WorkerMsg::CardBeside {
+            guessers_bytes: 7 << 20,
+            lends_head_bytes: 0,
+        };
+        send_worker(&mut worker_end, &marker, &[])
+            .await
+            .expect("send");
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while card_beside.reported_mb.load(Ordering::Acquire) != 7 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the reader read both");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        *card_free_asked.lock().expect("lock") = Some(tx);
+        let answer = WorkerMsg::CardFree {
+            free_bytes: Some(1_130 << 20),
+            reusable_bytes: Some(388 << 20),
+        };
+        send_worker(&mut worker_end, &answer, &[])
+            .await
+            .expect("send");
+        let got = tokio::time::timeout(std::time::Duration::from_secs(2), rx)
+            .await
+            .expect("answered in time")
+            .expect("not dropped");
+        assert_eq!(
+            got,
+            Some(388 << 20),
+            "the answer, not the unasked reading before it"
+        );
         reader.abort();
         let _ = std::fs::remove_file(&name);
     }
@@ -23679,22 +23921,30 @@ mod admission_tests {
         h.record_charged_segment((0, 26), 0);
         p.workers.insert(m.clone(), h.clone());
         h.note_conversation(Uuid::new_v4());
-        /// The next thing the worker was told, which must be a placement.
+        /// The next thing the worker was told, which must be a placement —
+        /// past a refused growth's question about its pool (#481 (5)), which
+        /// this fake worker leaves unanswered.
         async fn told(
             worker_end: &mut interprocess::local_socket::tokio::Stream,
         ) -> ((usize, usize), Option<RangePlacement>) {
-            match tokio::time::timeout(std::time::Duration::from_secs(5), recv_daemon(worker_end))
+            loop {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    recv_daemon(worker_end),
+                )
                 .await
-            {
-                Ok(Ok((
-                    DaemonMsg::PlaceRange {
-                        layer_start,
-                        layer_end,
-                        placement,
-                    },
-                    _,
-                ))) => ((layer_start, layer_end), placement),
-                other => panic!("the worker must be told where the range goes: {other:?}"),
+                {
+                    Ok(Ok((DaemonMsg::ReadCardFree, _))) => continue,
+                    Ok(Ok((
+                        DaemonMsg::PlaceRange {
+                            layer_start,
+                            layer_end,
+                            placement,
+                        },
+                        _,
+                    ))) => return ((layer_start, layer_end), placement),
+                    other => panic!("the worker must be told where the range goes: {other:?}"),
+                }
             }
         }
 
@@ -23820,14 +24070,19 @@ mod admission_tests {
             p.workers.get(&idle).is_none(),
             "the idle model gave the card back to the split"
         );
-        let placement = match tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            recv_daemon(&mut worker_end),
-        )
-        .await
-        {
-            Ok(Ok((DaemonMsg::PlaceRange { placement, .. }, _))) => placement,
-            other => panic!("the worker must be told where the range goes: {other:?}"),
+        // Past the refused growth's question about the pool (#481 (5)),
+        // which this fake worker leaves unanswered.
+        let placement = loop {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                recv_daemon(&mut worker_end),
+            )
+            .await
+            {
+                Ok(Ok((DaemonMsg::ReadCardFree, _))) => continue,
+                Ok(Ok((DaemonMsg::PlaceRange { placement, .. }, _))) => break placement,
+                other => panic!("the worker must be told where the range goes: {other:?}"),
+            }
         };
         let Some(RangePlacement {
             gpu_layers: None,
@@ -24779,9 +25034,11 @@ mod admission_tests {
                 send_worker(&mut end, &WorkerMsg::ContextFits { tokens: None }, &[])
                     .await
                     .expect("sent");
-                send_worker(&mut end, &WorkerMsg::CardFree { free_bytes }, &[])
-                    .await
-                    .expect("sent");
+                let answer = WorkerMsg::CardFree {
+                    free_bytes,
+                    reusable_bytes: None,
+                };
+                send_worker(&mut end, &answer, &[]).await.expect("sent");
                 std::future::pending::<()>().await;
             });
         }

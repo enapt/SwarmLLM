@@ -1242,9 +1242,16 @@ a rig that restarts the node between two identical runs (`tier_1119p` against `t
 > a lent head (`output_head_lent_mb`; A/B `SWARMLLM_GROWTH_PRICE=line`, `SWARMLLM_SHARE_OUTPUT_HEAD=0`): 1119t's tail
 > asks ~411 MB, not 1,405. Prior art: vLLM's `determine_available_memory` (its own memory profiled against a
 > `MemorySnapshot` baseline), llama.cpp's `llama_memory_breakdown` (each context's buffers per device), vLLM EAGLE/MTP
-> sharing the target's `lm_head`. Left, read on the forced-split rig: (C) whether ~411 MB is found beside a head that
-> took 994 of the 1,405 MB the spawn left — if not, weigh a growth against the free memory the WORKER reads, its
-> pool's reusable bytes included; (B) the refit (#365) eats the guesser's room (20 of 21 layers on the card where 17
+> sharing the target's `lm_head`. **Rig `split27_1120a` (08:24-08:36Z): the fold fired (`guessers_mb=995`,
+> `worker_charged_mb=5727`), the tail asked 411 MB and was STILL refused, 4 of 4** — the card 1,080-1,130 MB free
+> mid-request against the 1,231 needed above the reserve, 1,399 between requests: the prompt pass's freed buffers
+> (~215-320 MB) sat in the first range's worker pool, which the driver's free figure counts as taken. **(C) built
+> on main 2026-11-20, rig next:** a growth the card would refuse asks its live worker what its pool holds freed
+> (`WorkerHandle::pool_reusable_mb` → `DaemonMsg::ReadCardFree` → `WorkerMsg::CardFree::reusable_bytes`, 3 s, 0
+> without an answer) and weighs only the rest (`admit_to_gpu_reusing`), charging the whole growth; a growth that
+> fits asks nothing. A/B `SWARMLLM_GROWTH_REUSES_POOL=0`. Prior art: vLLM counts its own PyTorch caching
+> allocator's reserved memory as its own; PyTorch serves an allocation from a reserved free block before the
+> driver. Left: (B) the refit (#365) eats the guesser's room (20 of 21 layers on the card where 17
 > were planned, 20:07Z, guess head refused); (3c) the next-token block's card room at the spawn. **Why the ladder cannot place the tail
 > elsewhere** (traced 2026-11-19): the refusal is `charge_additional_segment`'s first rung (`process_pool.rs` ~8156-8194);
 > the split rung (`charge_segment_as_split`) runs next but `split_for_card` puts the output head on the card whatever
