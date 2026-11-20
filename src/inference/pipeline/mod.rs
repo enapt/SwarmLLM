@@ -3883,6 +3883,7 @@ mod tests {
                 model_load_ms_per_gib: None,
                 model_memory_ceiling_mb: None,
                 machine_room_beside_card_mb: None,
+                card_room_mb: None,
                 processor_tokens_per_sec_7b: None,
             }),
             last_seen: chrono::Utc::now(),

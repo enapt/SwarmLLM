@@ -1152,6 +1152,54 @@ fn layers_beside_card(
     room_mb as f64 * 1_048_576.0 / margin / full_price as f64
 }
 
+/// The rooms a peer that must LOAD `model_id` weighs that load against, as
+/// `(card, machine)` in MB with `margin` on top and this node's bookings onto
+/// it since its last report (`committed_mb`) taken off: on a card node the card
+/// budget it states for a new load (`NodeCapability::card_room_for`) and the
+/// system memory beside it (`processor_beside_card`, 0 where it states none);
+/// on a processor node `None` and the budget it states
+/// (`memory_for_model_layers_mb`). What `ModelProcessPool::fresh_load_room`
+/// weighs a fresh load by (#483 (b) D1).
+///
+/// `None` where the peer says nothing a load is admitted against — no
+/// capability, a zero, a card node predating `card_room_mb` (whose driver
+/// figure keeps the reserve in), or a processor node stating no budget — so
+/// the bound is read as before
+/// ([`max_hostable_layers`]); never "no room".
+/// `SWARMLLM_COLD_LOAD_PRICE=driver` prices a peer that must load the model
+/// at the driver's free figure, each layer at its weights and the prompt's
+/// cache, as before #483 (b) D1 — the control arm, inside one binary. Read at
+/// each plan, so a test run can flip it.
+fn cold_load_priced_as_before() -> bool {
+    std::env::var("SWARMLLM_COLD_LOAD_PRICE").is_ok_and(|v| v.trim() == "driver")
+}
+
+fn cold_load_rooms(
+    capability: Option<&swarmllm_types::NodeCapability>,
+    model_id: &str,
+    margin: f64,
+    committed_mb: u64,
+) -> Option<(Option<u64>, u64)> {
+    let cap = capability?;
+    let scaled = |mb: u64| (mb as f64 / margin) as u64;
+    if cap.models_run_on_card() {
+        let card = cap.card_room_for(model_id)?;
+        let machine = cap.processor_beside_card(model_id).map_or(0, |(mb, _)| mb);
+        return Some((
+            Some(scaled(card.saturating_sub(committed_mb))),
+            scaled(machine),
+        ));
+    }
+    // Only a STATED budget is what its admission weighs; a node stating none
+    // answers with the system's free reading, which it never promised.
+    cap.ram_model_budget_mb?;
+    let room = cap.memory_for_model_layers_mb(model_id);
+    if room == 0 {
+        return None;
+    }
+    Some((None, scaled(room.saturating_sub(committed_mb))))
+}
+
 /// KV-cache bytes ONE prompt position costs across ONE layer of `meta`'s model
 /// on a node with (`device.on_card`) or without a graphics card, kept the way
 /// that node says it keeps it (`device.keeps_half`).
@@ -5960,12 +6008,71 @@ impl PipelineScheduler {
                     }
                     _ => cold_load_ms_per_layer(advertised_rate, bytes_per_layer),
                 };
-                (
-                    card_and_beside(bound(residency, DELEGATE_VRAM_MARGIN), DELEGATE_VRAM_MARGIN),
-                    card_and_beside(bound(residency, 1.0), 1.0),
-                    load,
-                    card_layers,
-                )
+                // A peer that must LOAD the model is weighed as its own spawn
+                // weighs the load (#483 (b) D1): the rooms it states a load is
+                // admitted against, through this node's copy of the spawn's
+                // rungs — the reserve, the split's line on the card, a typical
+                // conversation's cache (this prompt's where longer), the
+                // process — where the bound above prices each layer at its
+                // weights and this prompt's cache in the driver's free figure.
+                // Both margins, so each rung still spends ours before the
+                // peer's own word. `None` (a card node predating the room, or
+                // a header not held) reads the bound as before, as does the
+                // A/B `SWARMLLM_COLD_LOAD_PRICE=driver`.
+                let fresh_load = |margin: f64| {
+                    if residency != PeerResidency::Cold || cold_load_priced_as_before() {
+                        return None;
+                    }
+                    // Copied out first: no registry guard is held while the
+                    // header is read.
+                    let (card_mb, machine_mb) = self
+                        .shared_state
+                        .peer_registry
+                        .get(&node_id)
+                        .and_then(|p| {
+                            cold_load_rooms(
+                                p.capability.as_ref(),
+                                &manifest.id.0,
+                                margin,
+                                committed_mb,
+                            )
+                        })?;
+                    let kv = prompt_tokens.map_or(
+                        crate::model::auto_manage::vram::KvCharge::Typical,
+                        |tokens| {
+                            crate::model::auto_manage::vram::KvCharge::LongPrompt(u64::from(tokens))
+                        },
+                    );
+                    self.shared_state.model_process_pool.fresh_load_room(
+                        &manifest.id,
+                        card_mb,
+                        machine_mb,
+                        kv,
+                    )
+                };
+                match (fresh_load(DELEGATE_VRAM_MARGIN), fresh_load(1.0)) {
+                    (Some(routine), Some(at_its_word)) => {
+                        let layers = |room: crate::inference::process_pool::FreshLoadRoom| {
+                            Some(room.layers.min(manifest.num_layers))
+                        };
+                        // Its card's share of what it would load, where the
+                        // rest would run on its processor.
+                        let card_layers = (beside(DELEGATE_VRAM_MARGIN) > 0.0).then(|| {
+                            card_could_hold
+                                .map_or(routine.on_card, |most| routine.on_card.min(most))
+                        });
+                        (layers(routine), layers(at_its_word), load, card_layers)
+                    }
+                    _ => (
+                        card_and_beside(
+                            bound(residency, DELEGATE_VRAM_MARGIN),
+                            DELEGATE_VRAM_MARGIN,
+                        ),
+                        card_and_beside(bound(residency, 1.0), 1.0),
+                        load,
+                        card_layers,
+                    ),
+                }
             };
             // Copied out first: no registry guard is held while the header is read.
             let advertised_ceiling_mb = if is_local {

@@ -5746,8 +5746,16 @@ fn the_vram_budget_is_read_live_like_the_ram_budget_beside_it() {
     let root = repo_root();
     let src = std::fs::read_to_string(root.join("src/model/auto_manage/vram.rs")).expect("vram.rs");
 
-    let body = fn_body(&src, "pub fn compute_vram_budget")
+    let entry = fn_body(&src, "pub fn compute_vram_budget")
         .expect("compute_vram_budget must exist — if it moved, move this test with it");
+    // Its body is the one the capability's card room shares (#483 (b) D1),
+    // handed the free reading that capability already took.
+    assert!(
+        entry.contains("vram_budget_given_free("),
+        "compute_vram_budget must stay the budget `vram_budget_given_free` computes"
+    );
+    let body = fn_body(&src, "fn vram_budget_given_free")
+        .expect("vram_budget_given_free must exist — if it moved, move this test with it");
 
     assert!(
         body.contains("cfg()"),

@@ -3358,6 +3358,17 @@ impl MachineCharge {
     }
 }
 
+/// What a fresh load would take on another computer
+/// ([`ModelProcessPool::fresh_load_room`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FreshLoadRoom {
+    /// The widest run of the model's layers that would load.
+    pub(crate) layers: u32,
+    /// Of them, the ones its card would hold — 0 on a computer whose models
+    /// run on its processor.
+    pub(crate) on_card: u32,
+}
+
 /// Add `mb` to a model's recorded charge.
 ///
 /// Segments of one model share a worker, so a second segment ADDS to what the
@@ -9914,6 +9925,104 @@ impl ModelProcessPool {
         }
         self.machine_charge(model_id, run, true, None, KvCharge::Typical)
             .mb()
+    }
+
+    /// What a fresh load of `model_id` would take on ANOTHER computer, whose
+    /// rooms are `card_room_mb` — the card budget its load is admitted against
+    /// (`NodeCapability::card_room_for`), `None` for a computer whose models
+    /// run on its processor — and `machine_room_mb`, the system memory it
+    /// grants the swarm's work (beside its card, or the whole of a processor
+    /// node's room). Weighed by THIS node's copy of the spawn's rungs, as
+    /// [`Self::peer_load_refusal`] weighs it over there: whole on the card
+    /// where the run's estimate fits the card's room, else the card/processor
+    /// split [`split_in_room`] makes in it ([`Self::machine_mb_beside_card`]'s
+    /// rungs), the machine charged by [`Self::machine_charge`]; on a processor
+    /// node the whole run's machine charge. The widest run that loads, by
+    /// bisection, and how many of its layers the card holds.
+    ///
+    /// **Why a coordinator asks this.** It weighed a peer that must first load
+    /// a model at the driver's free figure, each layer at its weights and this
+    /// prompt's cache, while the peer's spawn keeps a reserve back, fills 85%
+    /// of the card's room, charges a typical conversation's cache and the
+    /// process itself: Llama 3.3 70B was planned 60 layers on a 12 GB card
+    /// whose load would take 54, refused before the prompt pass, and re-planned
+    /// — on every cold request (FUTURE_WORK #483 (b) D1, 2026-11-20). One
+    /// formula both sides: Kubernetes' scheduler and its node's admission
+    /// weigh a pod with the same predicates against the node's Allocatable.
+    ///
+    /// Priced as a MIDDLE run — from layer 1, short of the last — so neither
+    /// end's table is in it: the search charges those per range
+    /// (`RangeWeights`). A middle run that loads whole is reported as every
+    /// layer. `kv` is the conversation its caches are charged for: a typical
+    /// one, or this prompt where it is longer (`KvCharge::LongPrompt`) — the
+    /// room the peer's prompt admission then weighs it against. `None` where
+    /// the model's geometry cannot be read — unknown, never "no room" — or it
+    /// has no middle to weigh.
+    pub(crate) fn fresh_load_room(
+        &self,
+        model_id: &ModelId,
+        card_room_mb: Option<u64>,
+        machine_room_mb: u64,
+        kv: KvCharge,
+    ) -> Option<FreshLoadRoom> {
+        let layers = u32::try_from(self.footprint_inputs(model_id, None)?.segment_layers).ok()?;
+        if layers < 3 {
+            return None;
+        }
+        let widest = layers - 2;
+        // `Some(layers on the card)` where a run of `width` from layer 1 loads.
+        let loads = |width: u32| -> Option<u32> {
+            let run = (1, 1 + width);
+            let Some(card_mb) = card_room_mb else {
+                let mb = self.machine_charge(model_id, run, true, None, kv).mb();
+                return (mb <= machine_room_mb).then_some(0);
+            };
+            let estimated = self.estimate_gpu_footprint_mb(model_id, Some(run), kv);
+            let (split, on_card) = if estimated <= card_mb {
+                (None, width)
+            } else {
+                let (inputs, weights) = self.segment_geometry(model_id, Some(run))?;
+                match split_in_room(&inputs, weights, card_mb, None, false) {
+                    Some(split) => (Some(split), u32::try_from(split.card_share().0).ok()?),
+                    // The card takes none of it: the whole run on the processor.
+                    None => {
+                        let mb = self.machine_charge(model_id, run, true, None, kv).mb();
+                        return (mb <= machine_room_mb).then_some(0);
+                    }
+                }
+            };
+            let mb = self.machine_charge(model_id, run, false, split, kv).mb();
+            (mb <= machine_room_mb).then_some(on_card)
+        };
+        if let Some(on_card) = loads(widest) {
+            return Some(FreshLoadRoom {
+                layers,
+                on_card: if on_card == widest { layers } else { on_card },
+            });
+        }
+        let Some(mut on_card) = loads(1) else {
+            return Some(FreshLoadRoom {
+                layers: 0,
+                on_card: 0,
+            });
+        };
+        // A run's charge grows with its width, as `peer_load_refusal`'s
+        // bisection reads it.
+        let (mut fitting, mut refused) = (1, widest);
+        while refused > fitting + 1 {
+            let mid = fitting + (refused - fitting) / 2;
+            match loads(mid) {
+                Some(card) => {
+                    fitting = mid;
+                    on_card = card;
+                }
+                None => refused = mid,
+            }
+        }
+        Some(FreshLoadRoom {
+            layers: fitting,
+            on_card,
+        })
     }
 
     /// What the layers a plan gives this node of `model_id` — `ranges`, beside
@@ -18335,6 +18444,86 @@ mod tests {
             .expect("a forward that arrives unasked is served as before");
         assert!(matches!(outcome, Growth::Respawn));
         assert!(p.workers.get(&model).is_none(), "retired for a fresh spawn");
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    /// **A coordinator weighs a peer's fresh load as that peer's own up-front
+    /// check weighs it** (#483 (b) D1) — the property on the shared helper: for
+    /// every middle run, `peer_load_refusal` on the peer answers go-ahead
+    /// exactly where `fresh_load_room`, over the rooms the peer advertises
+    /// (its card budget less what it committed, its machine room), says the
+    /// run fits — on a card that splits the run with its processor, on one
+    /// that takes it whole, and on a node whose models run on its processor.
+    /// The planner priced the same peer at the driver's free figure, each
+    /// layer at its weights and the prompt's cache: Llama 3.3 70B was planned
+    /// 60 layers on a 12 GB card whose load would take 54 (2026-11-20).
+    #[test]
+    fn a_coordinator_weighs_a_peers_fresh_load_as_the_peer_does() {
+        let model = ModelId("seventy-b-shaped-fresh-load".into());
+        let data_dir = header_only_seventy_b("fresh-load", &model, false);
+        let p = ModelProcessPool::new(data_dir.clone());
+        let widest = 6u32; // `[1..7)` of 8: neither end's table.
+        let card_whole = p.estimate_gpu_footprint_mb(&model, Some((1, 7)), KvCharge::Typical);
+        let machine_whole = p.estimate_cpu_footprint_mb(&model, Some((1, 7)), KvCharge::Typical);
+        assert!(
+            card_whole > 0 && machine_whole > 0,
+            "fixture: priced from the header ({card_whole} / {machine_whole} MB)"
+        );
+        let agrees = |card: Option<u64>, machine: u64, label: &str| {
+            let room = p
+                .fresh_load_room(&model, card, machine, KvCharge::Typical)
+                .expect("priced from the header");
+            for width in 1..=widest {
+                let peer_takes = p
+                    .peer_load_refusal(&model, &[(1, 1 + width)], Uuid::new_v4())
+                    .is_none();
+                assert_eq!(
+                    peer_takes,
+                    width <= room.layers,
+                    "{label}: [1..{}) — the peer says {peer_takes}, the coordinator {room:?}",
+                    1 + width
+                );
+            }
+            room
+        };
+
+        // A card node: the run split with its processor, at several rooms.
+        p.test_card_in_play
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        p.set_gpu_layers(-1);
+        let mut split_seen = false;
+        for (card, machine) in [
+            (card_whole / 2, machine_whole / 3),
+            (card_whole / 3, machine_whole / 2),
+            (card_whole / 2, machine_whole),
+            (card_whole / 4, machine_whole / 5),
+        ] {
+            p.set_vram_budget_mb(card);
+            p.set_ram_budget_mb(machine);
+            let room = agrees(Some(card), machine, "a split");
+            split_seen |= room.on_card > 0 && room.on_card < room.layers;
+        }
+        assert!(split_seen, "fixture: some room splits a run across the two");
+        // The card takes the widest run whole; the machine keeps only what the
+        // loader holds there whatever the device.
+        p.set_vram_budget_mb(card_whole * 2);
+        p.set_ram_budget_mb(machine_whole);
+        let whole = agrees(Some(card_whole * 2), machine_whole, "whole on the card");
+        assert_eq!(
+            (whole.layers, whole.on_card),
+            (8, 8),
+            "every layer, all on the card"
+        );
+
+        // A processor node: the whole run in system memory.
+        p.test_card_in_play
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        p.set_gpu_layers(0);
+        for machine in [machine_whole / 3, machine_whole / 2, machine_whole] {
+            p.set_ram_budget_mb(machine);
+            let room = agrees(None, machine, "a processor node");
+            assert_eq!(room.on_card, 0);
+        }
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 

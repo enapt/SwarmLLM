@@ -2978,6 +2978,61 @@ the accumulated text has been through no scrub at all.
 
 → `docs/invariants/scheduling.md`
 
+## A peer that must load the model is weighed as its spawn weighs it
+
+**Rule (2026-11-20, FUTURE_WORK #483 (b) D1).** A Cold candidate — a peer
+that holds parts of the model but has no worker of it — is bounded by
+`ModelProcessPool::fresh_load_room`: THIS node's copy of the peer spawn's
+rungs (the run whole on the card where its estimate fits the card's room,
+else the card/processor split `split_in_room` makes, the machine charged by
+`machine_charge`; on a processor node the whole run's machine charge),
+bisected for the widest middle run that loads, over the rooms
+`scheduler::cold_load_rooms` reads off the peer's capability: on a card
+node `NodeCapability::card_room_for` (the new `card_room_mb`, built by
+`vram::node_card_room_mb` — the spawn's card budget less what its workers
+committed, plus what idle workers of other models give way) and
+`processor_beside_card`; on a processor node its stated
+`ram_model_budget_mb` (through `memory_for_model_layers_mb`). Each room is
+less this node's bookings since the peer's last report and over the margin,
+so both rungs of the search (`DELEGATE_VRAM_MARGIN`, face value) still
+apply. The caches are charged for a typical conversation, or this prompt
+where longer (`KvCharge::LongPrompt`). A peer stating neither room — a card
+node older than the field, a processor node with no budget, whose figure is
+the system's free reading — is priced as before (`max_hostable_layers`), as
+is a header this node cannot read.
+
+**Why.** The planner priced a peer that must load the model at the driver's
+free figure, each layer at its weights and this prompt's cache. The peer's
+own admission (`peer_load_refusal`, the up-front `PromptAdmissionAsk`)
+weighs the card budget, which keeps a 512-2048 MB reserve back; fills 85%
+of the card's room (`hybrid::split_room_bytes`) with the cache charged at
+the full context; and charges the machine the process (256 / 320 MB), a
+typical conversation's cache and the host-resident tensors. Tier
+`tier_1120a` (2026-11-20, v0.3.301): Llama 3.3 70B was planned `[20,80)`,
+60 layers, on the Australian 12 GB card; its admission took 54 from 20 —
+25,862 MB asked against a 22,120 MB budget — refused before the prompt
+pass, and re-planned. Every cold request paid that attempt (~0.2-1.3 s and a
+re-plan), and the re-plan's view fed the wrong advice (#483 (b) E).
+
+**Prior art.** Kubernetes: a node publishes its Allocatable (capacity less
+system and kube reservations), and the kubelet's admission runs the SAME
+`GeneralPredicates` the scheduler ran, against it — the coordinator never
+weighs a pod more leniently than the node will. Petals' servers publish
+`cache_tokens_left` for the same reason (cited in `vram.rs`). What we take:
+one formula both sides, the node's reservations stated by the node. What we
+keep apart: Kubernetes rejects at the node; we already ask up front
+(`PromptAdmissionAsk`), so a disagreement costs a question, never a load.
+
+**What a change must keep.** `a_coordinator_weighs_a_peers_fresh_load_as_the_peer_does`
+asserts, for every middle run, that `peer_load_refusal` on the peer and
+`fresh_load_room` over its advertised rooms agree — on a card that splits
+the run, one that takes it whole, and a processor node: a change to either
+side's rungs fails it. `a_cold_peer_is_offered_what_its_own_load_would_take`
+fails with `SWARMLLM_COLD_LOAD_PRICE=driver` (24 layers offered where the
+load takes 11). `card_room_mb` is `#[serde(default)]` and inside the 256 MB
+memory deadband of `capability_news`; no feature bit (an older coordinator
+ignores it).
+
 ## A peer advertises the memory it will HONOUR, not the memory it has
 
 **`NodeCapability::memory_for_model_layers_mb` is the single answer to "how much

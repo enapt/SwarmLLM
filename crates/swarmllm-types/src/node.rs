@@ -937,6 +937,28 @@ pub struct NodeCapability {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine_room_beside_card_mb: Option<u64>,
 
+    /// On a node whose models go to a graphics card: the card memory a NEW
+    /// model's load is admitted against now, in MB — its card budget for the
+    /// swarm's work (the card less what other programs hold and the reserve
+    /// its contribution level keeps back) less what its own models have
+    /// committed there. The card's half of what [`Self::machine_room_beside_card_mb`]
+    /// is for system memory: the room the node will HONOUR, where
+    /// `gpu.vram_available_mb` is the driver's free figure, the reserve
+    /// included.
+    ///
+    /// Without it a coordinator priced a peer that must first load a model by
+    /// the driver's figure: Llama 3.3 70B was planned 60 layers on a 12 GB card
+    /// whose own load would take 54, and the peer refused before the prompt
+    /// pass — a wasted attempt and a re-plan on every cold request
+    /// (FUTURE_WORK #483 (b) D1, 2026-11-20). Kubernetes' rule: a node
+    /// publishes its Allocatable, and the scheduler and the node's admission
+    /// weigh the same request against it.
+    ///
+    /// `None` from a node without a card, from one whose card budget cannot be
+    /// read, and from an older node: then the driver's figure, as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card_room_mb: Option<u64>,
+
     /// This node's PROCESSOR speed, in the units of `est_tokens_per_sec_7b` —
     /// which on a card node is the card's. What a layer planned into
     /// [`Self::machine_room_beside_card_mb`] runs at. Stated beside that field
@@ -1254,6 +1276,22 @@ impl NodeCapability {
         let g = self.gpu.as_ref()?;
         Some(
             g.vram_available_mb
+                .saturating_add(self.given_way_for(model_id).card_mb),
+        )
+    }
+
+    /// The card memory a NEW load of `model_id` is admitted against
+    /// ([`Self::card_room_mb`]) plus what idle workers of other models would
+    /// give back there — `None` where the node does not state it or its models
+    /// do not run on its card. The room a coordinator weighs a range the node
+    /// must LOAD against, as its spawn will; a range it holds loaded is weighed
+    /// by [`Self::memory_for_model_layers_mb`].
+    pub fn card_room_for(&self, model_id: &str) -> Option<u64> {
+        if !self.models_run_on_card() {
+            return None;
+        }
+        Some(
+            self.card_room_mb?
                 .saturating_add(self.given_way_for(model_id).card_mb),
         )
     }
@@ -1713,6 +1751,57 @@ mod version_compat_tests {
         cap.ram_model_budget_mb = Some(4096);
         assert_eq!(cap.memory_for_model_layers_mb("other"), 4096 + 500);
         assert_eq!(cap.memory_for_model_layers_mb("idle-a"), 4096);
+    }
+
+    /// **A card node's room for a NEW load is the budget it states, plus what
+    /// idle workers of other models give back there** (#483 (b) D1) — never
+    /// the driver's free figure, and nothing from a node that does not state
+    /// it or whose models run on its processor.
+    #[test]
+    fn a_card_nodes_room_for_a_new_load_is_the_budget_it_states() {
+        let card = serde_json::json!({
+            "name": "card",
+            "vram_total_mb": 12288u64,
+            "vram_available_mb": 8768u64,
+            "memory_bandwidth_gbps": 360.0f32,
+        });
+        let mut fields = base_fields();
+        fields.as_object_mut().unwrap().insert("gpu".into(), card);
+        let older: NodeCapability = serde_json::from_value(fields.clone()).unwrap();
+        assert_eq!(older.card_room_for("m"), None, "an older card node");
+
+        fields
+            .as_object_mut()
+            .unwrap()
+            .insert("card_room_mb".into(), serde_json::json!(7900u64));
+        let mut cap: NodeCapability = serde_json::from_value(fields).unwrap();
+        assert_eq!(cap.card_room_for("m"), Some(7900));
+        assert_eq!(
+            cap.memory_for_model_layers_mb("m"),
+            8768,
+            "the driver's figure is still what a held range is weighed by"
+        );
+        cap.resident_layers = vec![ResidentModelLayers {
+            model_id: "idle".into(),
+            layers: 10,
+            ranges: Vec::new(),
+            decode_us_per_layer: None,
+            card_layers: None,
+            gives_way: Some(GivesWay {
+                card_mb: 3000,
+                machine_mb: 500,
+            }),
+            card_free_at_load_mb: None,
+        }];
+        assert_eq!(cap.card_room_for("m"), Some(7900 + 3000));
+        assert_eq!(cap.card_room_for("idle"), Some(7900), "its own worker");
+
+        cap.ram_model_budget_mb = Some(4096);
+        assert_eq!(
+            cap.card_room_for("m"),
+            None,
+            "a node whose models run on its processor"
+        );
     }
 
     /// **A worker of ANOTHER model that does not give way yet is room this node

@@ -2123,6 +2123,7 @@ fn slow_peer_capability(node: &NodeId) -> crate::types::NodeCapability {
         model_load_ms_per_gib: None,
         model_memory_ceiling_mb: None,
         machine_room_beside_card_mb: None,
+        card_room_mb: None,
         processor_tokens_per_sec_7b: None,
     }
 }
@@ -4750,6 +4751,7 @@ fn capability_with_gpu(free_mb: Option<u64>) -> crate::types::NodeCapability {
         model_load_ms_per_gib: None,
         model_memory_ceiling_mb: None,
         machine_room_beside_card_mb: None,
+        card_room_mb: None,
         processor_tokens_per_sec_7b: None,
     }
 }
@@ -9294,6 +9296,146 @@ fn a_plan_leaving_the_drafter_room_runs_only_where_it_is_the_cheaper() {
         "{:?}",
         choose(1, 26, &plain_plan)
     );
+}
+
+/// **A peer that must LOAD the model is offered what its own spawn would
+/// load** (#483 (b) D1). A cold card peer stating the card budget a new load
+/// is admitted against (`card_room_mb`) is bounded, at both margins, by
+/// `ModelProcessPool::fresh_load_room` over the rooms it states — fewer
+/// layers than its driver figure bought at weights alone, which is how Llama
+/// 3.3 70B was planned 60 layers on a 12 GB card whose load would take 54 and
+/// was refused before every cold request's prompt pass. The control: the
+/// same card stating no room (a node older than the field) is priced as
+/// before.
+#[test]
+fn a_cold_peer_is_offered_what_its_own_load_would_take() {
+    let (state, local, b, c, model) = two_whole_model_card_peers();
+    state.model_process_pool.test_footprint_inputs.insert(
+        model.clone(),
+        crate::model::auto_manage::vram::VramFootprintInputs {
+            quantized_weight_bytes: 4_000_000_000,
+            host_resident_bytes: 0,
+            head_bytes: 0,
+            unquantized_bytes_per_element: None,
+            vocab_size: 32_000,
+            embedding_length: 4096,
+            segment_layers: 32,
+            kv: crate::inference::split::kv_budget::KvPrice::uniform(
+                32,
+                8,
+                32,
+                128,
+                crate::inference::layers::KvAttention::Standard,
+            ),
+            rope_dim: 128,
+            effective_context: 4096,
+            is_first: true,
+            embedding_gatherable: true,
+            splits_across_devices: true,
+        },
+    );
+    // Both: 2,000 MB free on the card, 1,000 MB of system memory beside it.
+    // `b` states the room its load is admitted against — the reserve off.
+    let (card_room, machine_room) = (1_500u64, 1_000u64);
+    for (n, states) in [(&b, Some(card_room)), (&c, None)] {
+        let mut peer = state.peer_registry.get_mut(n).unwrap();
+        let cap = peer.capability.as_mut().unwrap();
+        cap.gpu.as_mut().unwrap().vram_available_mb = 2_000;
+        cap.card_room_mb = states;
+        cap.machine_room_beside_card_mb = Some(machine_room);
+        cap.processor_tokens_per_sec_7b = Some(5.0);
+    }
+    let scheduler =
+        PipelineScheduler::with_local_processor_speed(state.clone(), LOCAL_PROCESSOR_TPS);
+    let manifest = state.model_registry.get_manifest(&model).unwrap();
+    let cands = scheduler.gather_candidates(
+        &manifest,
+        &local,
+        uuid::Uuid::new_v4(),
+        None.into(),
+        super::Purpose::Preview,
+        &|| true,
+        crate::types::KeepAsked::Unasked,
+    );
+    let cand = |n: &NodeId| cands.iter().find(|x| &x.node_id == n).unwrap();
+    let its_load = |margin: f64| {
+        state
+            .model_process_pool
+            .fresh_load_room(
+                &model,
+                Some((card_room as f64 / margin) as u64),
+                (machine_room as f64 / margin) as u64,
+                crate::model::auto_manage::vram::KvCharge::Typical,
+            )
+            .expect("priced from the geometry")
+    };
+    let (stating, older) = (cand(&b), cand(&c));
+    assert_eq!(
+        stating.max_hostable_layers_at_face_value,
+        Some(its_load(1.0).layers),
+        "at its word: what its own load would take"
+    );
+    assert_eq!(
+        stating.max_hostable_layers,
+        Some(its_load(super::DELEGATE_VRAM_MARGIN).layers),
+        "with our margin on its rooms"
+    );
+    assert_eq!(
+        stating.card_layers,
+        Some(its_load(super::DELEGATE_VRAM_MARGIN).on_card),
+        "its card's share, as its split would place it"
+    );
+    let (now, before) = (
+        stating.max_hostable_layers_at_face_value.unwrap(),
+        older.max_hostable_layers_at_face_value.unwrap(),
+    );
+    assert!(
+        now > 0 && now < before,
+        "the load's own figure ({now}) is below the driver figure's ({before})"
+    );
+}
+
+/// The rooms a cold peer's load is weighed against (#483 (b) D1): a card node
+/// stating its card budget gives that and its machine room beside it, each
+/// less our bookings and over the margin; a processor node its stated budget.
+/// What the peer did not state — an older card node, a processor node with no
+/// budget (the system's free reading, never promised) — is `None`, priced as
+/// before.
+#[test]
+fn a_cold_peers_rooms_are_the_ones_its_admission_weighs() {
+    let mut card = capability_with_gpu(Some(9_000));
+    card.machine_room_beside_card_mb = Some(4_000);
+    card.processor_tokens_per_sec_7b = Some(5.0);
+    assert_eq!(
+        super::cold_load_rooms(Some(&card), "m", 1.0, 0),
+        None,
+        "an older card node: the driver figure, as before"
+    );
+    card.card_room_mb = Some(7_000);
+    assert_eq!(
+        super::cold_load_rooms(Some(&card), "m", 1.0, 1_000),
+        Some((Some(6_000), 4_000)),
+        "the card less our bookings; the machine room beside it"
+    );
+    assert_eq!(
+        super::cold_load_rooms(Some(&card), "m", 2.0, 0),
+        Some((Some(3_500), 2_000)),
+        "both over the margin"
+    );
+
+    let mut processor = capability_with_gpu(None);
+    processor.ram_available_mb = 30_000;
+    assert_eq!(
+        super::cold_load_rooms(Some(&processor), "m", 1.0, 0),
+        None,
+        "no stated budget: the system's free reading is no promise"
+    );
+    processor.ram_model_budget_mb = Some(20_000);
+    assert_eq!(
+        super::cold_load_rooms(Some(&processor), "m", 1.0, 2_000),
+        Some((None, 18_000))
+    );
+    assert_eq!(super::cold_load_rooms(None, "m", 1.0, 0), None);
 }
 
 /// Two card peers holding every part of a 32-layer model (4 GB, so 125 MB a

@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #483**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #484**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -945,9 +945,14 @@ What IS wrong, neither of which stops the 70B: **(D1) a peer's room is oversold 
 its free MB into layers at weights + THIS prompt's cache (`max_hostable_layers`, `layers_beside_card`, scheduler ~5836),
 while its admission charges a COLD load's machine share (`machine_charge`: KV at `ADMISSION_KV_CONTEXT`, process
 overhead, host-resident tensors) and a card share under the reserve (`split_room_bytes`): ~6 layers apart here, which
-the 1.2 margin hides until the face-value rung spends it — one wasted attempt (~0.5 s) before the re-plan. Fix: price a
-peer's COLD range with the admission's own estimator (`segment_cost_curve` → `layers_that_fit`), one formula both
-sides. **(E) the caller is told another computer's advice** ("Raise `resources.max_ram_mb`" — Australia's setting)
+the 1.2 margin hides until the face-value rung spends it — one wasted attempt (~0.5 s) before the re-plan. **D1 FIXED
+2026-11-20**: a Cold peer is bounded by `ModelProcessPool::fresh_load_room` — the spawn's own rungs (whole on the card,
+else `split_in_room`; `machine_charge`) bisected over the rooms the peer states (`scheduler::cold_load_rooms`: the new
+`NodeCapability::card_room_mb` — card budget less commitments — and the machine room beside it; a processor node's
+stated budget); a peer stating neither, as before. Prior art: Kubernetes — a node publishes Allocatable and the
+kubelet's admission runs the scheduler's own `GeneralPredicates` against it; Petals' `cache_tokens_left`. Evidence:
+`docs/invariants/scheduling.md` § "A peer that must load the model is weighed as its spawn weighs it". A/B
+`SWARMLLM_COLD_LOAD_PRICE=driver`. Not field-measured yet: needs peers on the release carrying the field. **(E) the caller is told another computer's advice** ("Raise `resources.max_ram_mb`" — Australia's setting)
 where the re-plan's own finding ("not enough memory in the swarm … not in pieces one chain can run") is the true one;
 `report_after_a_replan` reads it as "no route" (#931) and hands back the refusing holder's words. Also: `route_each_tail`
 returns the `Here` pass's "no valid sink vertex" when both tails fail — a misleading log line.

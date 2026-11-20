@@ -520,6 +520,10 @@ fn capability_news(
     ) {
         hold(n, s, CAPABILITY_MEMORY_DEADBAND_MB);
     }
+    // So does the card's room for a new load, with the card's free figure.
+    if let (Some(n), Some(s)) = (now.card_room_mb.as_mut(), sent.card_room_mb) {
+        hold(n, s, CAPABILITY_MEMORY_DEADBAND_MB);
+    }
     if let (Some(n), Some(s)) = (now.gpu.as_mut(), sent.gpu.as_ref()) {
         hold(
             &mut n.vram_available_mb,
@@ -1391,6 +1395,9 @@ impl HealthMonitor {
         // Done here rather than by clearing `gpu_info` because this capability
         // is rebuilt on every broadcast, so the withdrawal takes effect on the
         // next cycle and reverses itself if a worker starts again.
+        // The card's free reading, kept for the room a new load is admitted
+        // against (`card_room_mb`) — one `nvidia-smi` a broadcast, not two.
+        let mut card_free_read: Option<u64> = None;
         let gpu_info = self
             .shared_state
             .gpu_info
@@ -1413,7 +1420,9 @@ impl HealthMonitor {
                 // one `nvidia-smi` per cycle and is the only way the number can be
                 // true. `None` (unreadable) advertises 0, which reads as "no room"
                 // — the safe direction for anyone deciding whether to send us work.
-                let free = crate::model::auto_manage::vram::query_gpu_vram_free_mb().unwrap_or(0);
+                let read = crate::model::auto_manage::vram::query_gpu_vram_free_mb();
+                card_free_read = read;
+                let free = read.unwrap_or(0);
                 crate::types::GpuInfo {
                     name: g.name.clone(),
                     vram_total_mb: g.vram_total_mb,
@@ -1683,6 +1692,13 @@ impl HealthMonitor {
             // card that was full offered almost nothing, with the machine's
             // memory free beside it (2026-10-25).
             machine_room_beside_card_mb,
+            // On a card node: the card budget a new load is admitted against,
+            // so a peer prices a range this node must load as its spawn will
+            // (#483 (b) D1) — the driver's free figure keeps the reserve in.
+            card_room_mb: crate::model::auto_manage::vram::node_card_room_mb(
+                &self.shared_state,
+                card_free_read,
+            ),
             processor_tokens_per_sec_7b: machine_room_beside_card_mb
                 .map(|_| crate::model::auto_manage::vram::processor_tokens_per_sec_7b()),
             // Advertise the protocol epoch + the optional features this build
@@ -3411,6 +3427,7 @@ pub(crate) mod tests {
             model_load_ms_per_gib: Some(900),
             model_memory_ceiling_mb: Some(24_000),
             machine_room_beside_card_mb: None,
+            card_room_mb: None,
             processor_tokens_per_sec_7b: None,
         }
     }

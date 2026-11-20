@@ -1728,7 +1728,34 @@ pub fn processor_tokens_per_sec_7b() -> f32 {
     estimate_tokens_per_sec_7b(gbps, false)
 }
 
+/// The figure behind `NodeCapability::card_room_mb`: on a node whose models
+/// go to a card, the card memory a NEW model's load is admitted against now —
+/// the card budget the spawn reads ([`compute_vram_budget`], from the free
+/// reading `free_mb` the capability already took) less what this node's own
+/// workers have committed there, as `ModelProcessPool::split_against` and the
+/// card's admission weigh it. `None` without a card in use or a reading.
+/// What a peer's planner weighs a range this node must LOAD against, through
+/// the spawn's own rungs (`scheduler::cold_load_rooms` →
+/// `ModelProcessPool::fresh_load_room`, #483 (b) D1).
+pub fn node_card_room_mb(shared: &crate::daemon::SharedState, free_mb: Option<u64>) -> Option<u64> {
+    if !models_go_to_the_card(shared) {
+        return None;
+    }
+    let budget = vram_budget_given_free(shared, Some(free_mb?))?;
+    Some(budget.saturating_sub(shared.model_process_pool.vram_committed_mb()))
+}
+
 pub fn compute_vram_budget(shared: &crate::daemon::SharedState) -> Option<u64> {
+    vram_budget_given_free(shared, query_gpu_vram_free_mb())
+}
+
+/// [`compute_vram_budget`] from a free reading already taken (`None`:
+/// unreadable, read as nothing else on the card) — the one arithmetic behind
+/// the spawn's card budget and the room this node advertises for a new load.
+fn vram_budget_given_free(
+    shared: &crate::daemon::SharedState,
+    free_mb: Option<u64>,
+) -> Option<u64> {
     let gpu_total = shared
         .gpu_info
         .as_ref()
@@ -1752,7 +1779,7 @@ pub fn compute_vram_budget(shared: &crate::daemon::SharedState) -> Option<u64> {
     // less what our own workers have already reserved. Passing our own models'
     // memory through here would charge for them twice, since the caller weighs
     // this budget against `committed + estimated`.
-    let other_process_mb = query_gpu_vram_free_mb().map(|free| {
+    let other_process_mb = free_mb.map(|free| {
         let used_total = gpu_total.saturating_sub(free);
         used_total.saturating_sub(shared.model_process_pool.vram_committed_mb())
     });
