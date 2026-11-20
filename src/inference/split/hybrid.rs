@@ -662,6 +662,26 @@ impl LayerPlacement {
         }
     }
 
+    /// Where a split's guess head loads when its card has no room for it
+    /// (`mtp::split_head_home`, #485): the block, asked with the segment's
+    /// last layer `last` as [`Self::for_the_next_token_block`] is, on the
+    /// processor — experts and RoPE tables with it — every other layer
+    /// placed as before. A whole-card placement keeps its processor tables
+    /// on the card ([`Self::uniform`]), so they are moved here.
+    pub(crate) fn for_the_block_in_system_memory(&self, last: usize) -> candle_core::Result<Self> {
+        let mut placed = self.clone();
+        let offset = last.saturating_sub(self.layer_start);
+        placed.processor = offset..offset + 1;
+        placed.experts_on_the_processor = 0;
+        let cpu = placed.cpu.clone();
+        let (cos, sin) = &self.rope_cpu;
+        placed.rope_cpu = (cos.to_device(&cpu)?, sin.to_device(&cpu)?);
+        if let Some(w) = placed.windowed_rope.as_mut() {
+            w.cpu = (w.cpu.0.to_device(&cpu)?, w.cpu.1.to_device(&cpu)?);
+        }
+        Ok(placed)
+    }
+
     fn on_gpu(&self, abs_layer: usize) -> bool {
         // `checked_sub`, not `saturating_sub`: an index below this segment's
         // start is not in the segment at all, and saturating it to 0 reads as

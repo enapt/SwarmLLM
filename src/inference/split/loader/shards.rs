@@ -134,6 +134,7 @@ impl SplitModel {
                     gpu_layers: placement.gpu_layers,
                     cpu_expert_layers: placement.cpu_expert_layers,
                     guess_head_beside_first: false,
+                    guess_head_may_sit_in_system_memory: false,
                 },
             );
         }
@@ -331,6 +332,10 @@ impl SplitModel {
                     gpu_layers: placement.gpu_layers,
                     cpu_expert_layers: placement.cpu_expert_layers,
                     guess_head_beside_first,
+                    // A block drafter beside it reads the same output head on
+                    // the card (#485).
+                    guess_head_may_sit_in_system_memory: guess_head_beside_first
+                        && !drafter_beside(model_dir),
                 },
             )
         });
@@ -364,8 +369,19 @@ impl SplitModel {
             model.drafter_head_bytes = 0;
         } else if let Some(info) = drafter_head {
             let bytes = crate::inference::split::tensor_byte_size(&info);
+            // Read where its guess head runs: the machine's memory beside a
+            // block there, unless a block drafter reads it on the card (#485;
+            // `SWARMLLM_SPLIT_GUESS_HEAD_IN_RAM=0` reads it onto the card).
+            let head_device = if model.guess_head_in_system_memory()
+                && !drafter_beside(model_dir)
+                && crate::inference::split::mtp::split_guess_head_in_ram_on()
+            {
+                candle_core::Device::Cpu
+            } else {
+                model.device.clone()
+            };
             match info
-                .read(&mut reader, tensor_data_offset, &model.device)
+                .read(&mut reader, tensor_data_offset, &head_device)
                 .map_err(SwarmError::internal)
                 .and_then(|t| super::super::QMatMul::from_qtensor(t).map_err(SwarmError::internal))
             {

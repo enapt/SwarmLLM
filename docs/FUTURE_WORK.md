@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #485**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #487**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -34,8 +34,9 @@ residual).
 ## ▶ PRIORITIES — read this first
 
 **2026-11-20: split speed is the focus (owner: "we need to focus on getting split speeds going"; each node a small
-slice, nobody's card locked by a whole model). The plan: `docs/plans/small_slices.md` — zero-code simulator checks
-first, then #485 (the guesser where a split's last layers are).**
+slice, nobody's card locked by a whole model). The plan: `docs/plans/small_slices.md`. The bar (owner, same day):
+"minimum 20-30t/s" a reply. #485 closed (a split ending on a peer now guesses: the 27B here → US 3.1 → 5.0-6.2);
+next #486 (several rounds in flight for the Qwen 3.5 family) with short rings — neither alone reaches the bar.**
 
 **2026-11-18: #477 (P1, field report) — a restart re-read every held part flat out — SHIPPED in v0.3.298 (§ Closed),
 checked on Windows too.**
@@ -4355,25 +4356,18 @@ the measurement that can kill it), `docs/plans/split_speculation.md` (guess-and-
 `docs/plans/wan_parallel.md` (parallelise the reply, not the token), `docs/plans/regional_pipelines.md`
 (placement by distance, #192), `docs/plans/faster_than_local.md` (the ranked list).
 
-#### #485 — A split that ends on another computer guesses nothing: the guesser should run where the last layers are
-`P1` · perf-split · **OPEN** — 2026-11-20 · plan: `docs/plans/small_slices.md` step 2
+#### #486 — A Qwen 3.5-family split checks one round of guesses at a time, so its replies stay far under 20-30 tok/s
+`P1` · perf-split · **OPEN** (simulate first) — 2026-11-20 · plan: `docs/plans/small_slices.md` step 2b · history: #485, #437
 
-Qwen 3.5 / 3.6 / 3.8 (Qwen3.8-27B, Qwen3.6-35B-A3B) take no separate drafter and no flow; their file's guess head
-and the block drafter attach only beside a split's FIRST segment (`pipeline::split_guess_head_here`,
-`block_draft::a_guesser_may_answer`), because the head reads the LAST layer's output. So a chain guesses only when it
-starts and finishes on the asking computer. Measured 2026-11-20 (`~/swarmllm-gate/split27_3card`, main `4f693a127`,
-160 tokens): the 27B here → Australia → here 5.3-7.2 tok/s with the head; here → the US laptop, ending there, 3.05-3.08
-— one token a 272 ms round trip. A spread swarm's chains end on peers. **Design**: the tail samples, drafts the next γ
-with the file's head and returns [token, guesses, kept count] as ids with its reply (a `LayerResult` trailer under a
-new feature bit, gated at the sender; an older tail returns none). Each segment's rewind already travels with the
-next forward (`pending_truncate` → `truncate_kv_to`, `RECURRENT_REWIND`, ≤ 32 rows). Expected ~1.4-1.8× on a chain
-that ends on a peer (INFERRED from the two shapes above), and the asker's card no longer holds the tail layer and a
-second head. **Experiment first**: Qwen3.5-9B on the two-node rig at 130 ms, A [0,17) ↔ B [17,32) + head with B
-guessing, against A-B-A with the head at A; kill if B's kept-a-round is more than 10% under A's. Prior art: vLLM PR
-#44698 (MTP on the last pipeline rank; sampled + draft tokens + accepted counts broadcast to the other ranks; the
-recurrent state rolled back by that count; closed unmerged 2026-10-14), SGLang's "PP tail-draft", llama.cpp #27781
-(an MTP head sharing a cache lost 8 points of prose acceptance — check acceptance against a known answer after
-moving it).
+Qwen3.8-27B / Qwen3.6-35B-A3B take no separate drafter, so no flow (#134 (b)): the n-gram loop sends ONE check and
+waits (`ngram_only_spec`). With #485 the 27B here → US laptop (272 ms) writes ~2.6 tokens a 437 ms round, 5.0-6.2
+tok/s; the owner's bar is 20-30 (2026-11-20). Speed model (plan § 2): rounds in flight reach ~7.6 tok/s at 272 ms and
+~20 in a 60 ms ring (INFERRED: τ/e0 ≈ 27 ms from this node's ~70 ms stage, m = 0.39 a token) — so this needs short
+rings too. **Design**: the head guesses the next round from the predicted end of the one in flight (`HeadChain`
+already guesses while a check is abroad); each segment keeps a recurrent state per round in flight (#437's per-row
+parent states, ≤ `SsmState::MOST_ROWS_KEPT`) and drops those past a refusal. **Experiment first**:
+`tree_schedule_sim.py ring` at the measured acceptance (0.38 a guess), kill if a 60 ms ring reads under 15 tok/s.
+Prior art: PipeInfer (2407.11798), PEARL (post-verify drafting), SpecPipe (2504.04104).
 
 #### #469 — A split's yield is one figure for every kind of reply, so a prose reply can be planned onto a split slower than local
 `P2` · perf-split · **PARTIAL** (per-kind split yield built; this node's whole run per kind, mid-reply switching and per-conversation priors open) — 2026-11-17 · evidence: `faster_than_local.md` § 9 ("A second far card") · history: #3 (j), #428
@@ -8086,6 +8080,26 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-11-20, on main** (#485)
+- #485 — `P1` — **A split whose chain ended on another computer never guessed (the Qwen 3.5 family).** Filed as "the
+  guesser should run where the last layers are"; that premise was WRONG: the file's guess head beside the FIRST
+  segment is fed the last layer's rows by whichever computer runs it (`BlockRowsAsk`, `SENDS_BLOCK_ROWS`). It
+  guessed nothing because it never LOADED: a planner fills the first segment's card, and the Qwen3.8-27B's 227 MB
+  block failed its quarter of a 127 MB budget on this node's 8 GB card (`next-token-prediction block … on_card=true
+  loaded=false`, then "no block drafter or guess head beside this segment"); where the segment's last layer sat on
+  the processor, the block loaded but its 994 MB output head was read onto the full card and refused. **Fixed**:
+  `mtp::split_head_home` sends the head to system memory where the card cannot take the block and the output head
+  beside one conversation and the machine's live room can take a quarter (`LayerPlacement::
+  for_the_block_in_system_memory`); the output head is read where its block runs unless a block drafter needs it
+  on the card, weighed against the processor-side budget (`SplitModel::split_head_reads_from_system_memory`), its
+  hot rows on the processor; guesses scored on the head's device (`guess_scoring_device`). A/B
+  `SWARMLLM_SPLIT_GUESS_HEAD_IN_RAM=0`. **Measured** (Qwen3.8-27B, here [0,21) → the US RTX 5080 laptop [21,64),
+  272 ms, 160 tokens, `~/swarmllm-gate/split27_head`): unguessed 3.05-3.15 tok/s (main and the two builds whose head
+  was dropped) → prose 5.0-5.9, code 5.95-6.2 (11 replies over three node starts, every one guessing: 50-58 rounds
+  with the head, 37-40% of guesses kept, 11.6-12.4 ms a guess). Tests `a_split_guess_head_goes_to_the_machines_
+  memory_only_where_its_card_has_no_room` (red with the switch off), `a_heads_hot_rows_are_sized_off_its_tensor_
+  table_as_the_read_head_keeps_them`. Still far under the owner's 20-30 → #486.
 
 **Closed 2026-11-18, shipped in 0.3.300** (#478)
 - #478 — `P1` — **A card/processor split's first request could fail "device mismatch in cat, lhs: Cuda, rhs: Cpu".**

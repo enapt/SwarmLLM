@@ -4,6 +4,8 @@
 and distribute the load over the network. nobody has datacentres, or wants their gpu locked up by an entire
 model."* And (2026-11-13): *"like how torrents get much faster when theres more seeds."* A whole model on one
 card is a reference in a measurement here, never a design; no design may need anyone to hold the whole model.
+**The bar** (owner, 2026-11-20, hearing 3-7 tok/s for the 27B): *"we really need minimum 20-30t/s"* — a step is
+judged by whether it moves a reply toward that, never by its ratio over a slow split.
 
 This plan combines a research run of 2026-11-20 (a speed model calibrated on our own figures, prior art to
 2026-11, and ~50 earlier designs reconciled from `faster_than_local.md`, `split_speculation.md`,
@@ -19,9 +21,10 @@ from the Thailand node (8 GB card), main `4f693a127`:
 | shape | cards | reply speed | note |
 |---|---|---|---|
 | Australia holds it whole (REFERENCE) | 12 GB, part on its processor | prose 5.3, code 5.8 tok/s | the 16.5 GB model does not fit its card |
-| here → Australia → here | 8 + 12 GB | prose 5.3, code 5.7-7.2 | the guess head beside the first layers; it needs the last layer's output, so the chain starts and finishes here |
-| here → US laptop | 8 + 16 GB | prose 3.05, code 3.08 | ends on the peer: no guesser, one token a 272 ms round trip |
-| here → Australia → US laptop | 8 + 12 + 16 GB | prose 2.78, code 2.23 | three slices, ends on the peer: no guesser, ~360-450 ms a token |
+| here → Australia → here | 8 + 12 GB | prose 5.3, code 5.7-7.2 | the guess head beside the first layers, fed the last layer's rows by whichever computer runs it |
+| here → US laptop | 8 + 16 GB | prose 3.05, code 3.08 | the head found no room on this node's full card (corrected below): one token a 272 ms round trip |
+| **here → US laptop, the head in system memory (#485, built the same day)** | 8 + 16 GB | **prose 5.0-5.9, code 5.95-6.2** | ~38% of its guesses kept, 12 ms a guess on the processor, ~2.6 tokens a round |
+| here → Australia → US laptop | 8 + 12 + 16 GB | prose 2.78, code 2.23 | three slices; the head had no room here either (as above), ~360-450 ms a token |
 | **two conversations at once** through those three slices | 8 + 12 + 16 GB | **2.35 and 2.44 each** (4.8 together) | each as fast as one alone: the cards idle most of a round |
 
 - **Qwen3-14B** split Thailand ↔ Australia with a small drafter's tree flowing from the far end: prose
@@ -114,30 +117,35 @@ budget; prose profile, the 14B pair's measured prices; `flow_ring` with one far 
   draft block k+1 from block k's predicted end with the features up to the last commit, and score it against the
   greedy reply. Step 5 waits on it.
 
-### Step 2 — BUILD: the guesser runs where the model's last layers are (Qwen 3.5 / 3.6 / 3.8 first)
+### Step 2 — DONE 2026-11-20: a chain that ends on a peer guesses (FUTURE_WORK #485, closed)
 
-- **Why first**: the most popular family (Qwen3.8-27B, Qwen3.6-35B-A3B) takes no separate drafter and no flow;
-  today its guess head and block drafter attach only beside the FIRST segment (`pipeline::split_guess_head_here`,
-  `block_draft::a_guesser_may_answer`), so a chain must start and finish on the asking computer to guess at all.
-  Every chain that ends on a peer — the shape a spread swarm produces — runs one token a round trip (here → US
-  laptop: 3.05-3.08 tok/s). It also frees the asker's small card from the tail layer and a second head.
-- **Mechanism**: the tail samples, drafts the next γ with the file's head (it holds the last layer's output, the
-  norm and the head), and returns [token, guesses, kept count] — ids only — with its reply. Each segment's rewind
-  already travels with the next forward (`pending_truncate` → `truncate_kv_to`), the accounting vLLM had to add
-  as a broadcast.
-- **Expected**: ~1.4-1.8× on chains that end on a peer (here → US laptop: 3.1 → ~4.3-5.5). INFERRED from the two
-  measured shapes; the loop is unchanged.
-- **Protocol**: a new feature bit; a `LayerResult` trailer of guess ids, gated at the SENDER; an older tail
-  returns none and the chain runs as today.
-- **Recurrent risk**: counts known only at the last stage (vLLM's bug class) — here the rewind is explicit per
-  forward, ≤ 32 rows, `RECURRENT_REWIND` on every segment.
-- **Experiment first**: Qwen3.5-9B on the two-node rig at 130 ms, A [0,17) ↔ B [17,32) + head, B guessing,
-  against A-B-A with the head at A. Kill if kept-a-round at the tail is more than 10% under the head's. Then the
-  field: the 27B here → US laptop and here → Australia, both ending on the peer.
-- **Prior art**: vLLM PR #44698 (MTP on the last pipeline rank, sampled + draft tokens + accepted counts broadcast
-  to the other ranks, recurrent state rolled back by that count; closed unmerged 2026-10-14, nothing to port);
-  SGLang's "PP tail-draft"; llama.cpp #27781 (an MTP head sharing a cache cost 8 points of prose acceptance —
-  check acceptance against a known answer after moving it).
+- **Corrected premise**: the file's guess head beside the FIRST segment never needed the chain to finish here —
+  the last layer's rows come back from whichever computer runs it (`BlockRowsAsk`, `features::SENDS_BLOCK_ROWS`).
+  It guessed nothing because it never loaded: a planner fills the first segment's card, and the 27B's 227 MB block
+  and 994 MB output head found no room (a 127 MB budget on this node's 8 GB card).
+- **Built**: the head goes to system memory where the card has no room (`mtp::split_head_home`), its output head
+  read where its block runs, its hot rows on the processor. here → US laptop: 3.05-3.15 → prose 5.0-5.9, code
+  5.95-6.2 tok/s (four arms of 4 replies, `~/swarmllm-gate/split27_head`). **Still far under the bar.**
+- The guesser at the TAIL (vLLM PR #44698's shape) stays a memory design, not a speed one: it would spare the asker
+  the head (1.2 GB of its memory), with the same one check a round trip.
+
+### Step 2b — NEXT: several rounds in flight for the Qwen 3.5 family (FUTURE_WORK #486)
+
+- **Why**: the family checks ONE round at a time (`ngram_only_spec`), so a reply is ~2.6 tokens a 437 ms round
+  at 272 ms. The speed model (§ 2) with those 2.6 tokens a round (m = 0.39 misses a token) and this node's stage
+  at ~70 ms a round (its layers plus the head's ~4 × 12 ms guesses, so τ/e0 ≈ 27 ms): rounds in flight reach
+  ~7.6 tok/s at 272 ms (27 + 0.39 × 272 ms a token) and ~20 in a 60 ms ring (27 + 23 ms) — INFERRED. So the bar
+  needs BOTH in-flight rounds and short rings (step 6), and a faster head (on a card) or better acceptance lifts
+  both.
+- **Mechanism**: the head guesses the next round from the predicted end of the one in flight (`HeadChain`
+  already guesses while a check is abroad); each segment keeps a recurrent state per round in flight (#437's
+  per-row parent states, ≤ `SsmState::MOST_ROWS_KEPT`) and drops those past a refusal.
+- **Experiment first**: `tree_schedule_sim.py ring` with the measured per-guess acceptance (0.38) and a one-check
+  head, against K rounds in flight, at 130 / 272 / 60 ms. Kill if a 60 ms ring reads under 15 tok/s (the bar is
+  reached only in short rings; at 272 ms the estimate is ~1.3×).
+- **Prior art**: PipeInfer (2407.11798, continuous asynchronous speculation), PEARL (post-verify drafting),
+  SpecPipe (2504.04104, tokens a forward through a pipeline); the flow (#134 (b)) is ours for families with a
+  separate drafter.
 
 ### Step 3 — the throughput half: one stage carries several conversations' forwards as one
 

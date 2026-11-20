@@ -186,6 +186,80 @@ pub(crate) fn split_guess_head_on() -> bool {
     *ON.get_or_init(|| std::env::var("SWARMLLM_SPLIT_GUESS_HEAD").as_deref() != Ok("0"))
 }
 
+/// `SWARMLLM_SPLIT_GUESS_HEAD_IN_RAM=0`: a guess head beside a split's first
+/// segment whose card has no room for it is not loaded, as before #485 —
+/// for A/B inside one binary.
+pub(crate) fn split_guess_head_in_ram_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SWARMLLM_SPLIT_GUESS_HEAD_IN_RAM").as_deref() != Ok("0"))
+}
+
+/// Where a guess head beside a split's first segment loads (#485).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SplitHeadHome {
+    /// On the card, beside the segment's last layer.
+    Card,
+    /// In the machine's memory, the output head it reads with it.
+    SystemMemory,
+    /// Nowhere.
+    NoRoom,
+}
+
+/// Where a guess head beside a split's first segment, whose last layer is on
+/// a card, loads (#485): on the card where its block takes at most a quarter
+/// of the card's conversation budget (`card.0`) AND one conversation of the
+/// model's whole context (`card.1`) still fits beside the block and the output
+/// head it reads (`block_drafter::fits_beside_one_conversation`'s rule) —
+/// both checks it met before, one at load and one at attach; else in the
+/// machine's memory where that is KNOWN (`machine`, live) and the block, the
+/// head and the head's hot rows take at most a quarter of it (the quarter the
+/// block was always held to); else not at all. A planner fills a first
+/// segment's card with layers, so the card almost never had the room: every
+/// 27B chain from this node's 8 GB card that ended on a peer ran unguessed
+/// (2026-11-20: a 227 MB block against a 127 MB budget). llama.cpp places a
+/// draft model on devices of its own the same way (`--spec-draft-device`,
+/// `--spec-draft-ngl`); the block drafter's `drafter_home` (#451) is the same
+/// rule for it.
+pub(crate) fn split_head_home(
+    block: u64,
+    head: u64,
+    hot: u64,
+    card: (Option<u64>, u64),
+    machine: Option<u64>,
+) -> SplitHeadHome {
+    let on_card = card.0.is_none_or(|budget| {
+        block.saturating_mul(4) <= budget
+            && block.saturating_add(head).saturating_add(card.1) <= budget
+    });
+    if on_card {
+        return SplitHeadHome::Card;
+    }
+    let takes = block.saturating_add(head).saturating_add(hot);
+    if split_guess_head_in_ram_on() && machine.is_some_and(|room| takes.saturating_mul(4) <= room) {
+        SplitHeadHome::SystemMemory
+    } else {
+        SplitHeadHome::NoRoom
+    }
+}
+
+/// What the hot rows of an output head `info` names would take, read on the
+/// processor ([`hot_rows_for`]'s rows, sized off the tensor table before the
+/// head is read): 0 where a guess reads the whole head.
+pub(crate) fn hot_rows_bytes_of(info: &candle_core::quantized::gguf_file::TensorInfo) -> u64 {
+    let Some(rows) = draft_hot_rows() else {
+        return 0;
+    };
+    let dims = info.shape.dims();
+    let [vocab, cols] = dims[..] else {
+        return 0;
+    };
+    let dtype = info.ggml_dtype;
+    if rows >= vocab || cols % dtype.block_size() != 0 {
+        return 0;
+    }
+    (rows * (cols / dtype.block_size() * dtype.type_size())) as u64
+}
+
 /// Where a load may read the file's next-token-prediction block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HeadBeside {
@@ -420,6 +494,47 @@ impl SplitModel {
             .and_then(|_| self.total_layers.checked_sub(1))
     }
 
+    /// A guess head beside this split's first segment whose block runs in the
+    /// machine's memory beside a model on a card (#485) — sent there for want
+    /// of room on the card ([`split_head_home`]), or placed beside a last
+    /// layer the processor holds. Its output head is read there too where no
+    /// block drafter needs it on the card (`shards`), and its guesses are
+    /// scored where that head is ([`Self::guess_scoring_device`]). Read onto
+    /// the card instead, the 27B's 994 MB head found no room beside 20 layers
+    /// on this node's 8 GB card and the head guessed nothing (2026-11-20).
+    pub(crate) fn guess_head_in_system_memory(&self) -> bool {
+        self.split_head_reads_layer().is_some()
+            && self.mtp.as_ref().is_some_and(|h| !h.device.is_cuda())
+            && self.device.is_cuda()
+    }
+
+    /// Is the output head a guess head beside a split's first segment reads
+    /// (`drafter_head`) in the machine's memory, beside a model on a card?
+    pub(crate) fn split_head_reads_from_system_memory(&self) -> bool {
+        self.device.is_cuda()
+            && self
+                .drafter_head
+                .as_ref()
+                .and_then(QMatMul::quantized_weight)
+                .is_some_and(|head| !head.device().is_cuda())
+    }
+
+    /// Where a guess's rows are scored: on the device of the head that scores
+    /// them — the model's own head lives on its main device; a borrowed one
+    /// (`drafter_head`) where it was read, the machine's memory beside a guess
+    /// head sent there ([`Self::guess_head_in_system_memory`]).
+    fn guess_scoring_device(&self) -> Device {
+        match (
+            &self.output,
+            self.drafter_head
+                .as_ref()
+                .and_then(QMatMul::quantized_weight),
+        ) {
+            (None, Some(head)) => head.device().clone(),
+            _ => self.device.clone(),
+        }
+    }
+
     /// The head's hidden-state input from rows a forward kept after the
     /// trunk's last layer: normed as the output head reads them
     /// (llama.cpp's `t_h_nextn`) — by the model's own output norm, else, beside
@@ -457,8 +572,11 @@ impl SplitModel {
         let err = |e: candle_core::Error| SwarmError::Internal(format!("borrowed head: {e}"));
         let logits = head.forward(rows).map_err(err)?;
         match &self.suppressed_logits {
+            // The row lives on the model's main device; a borrowed head may
+            // score in the machine's memory (#485).
             Some(s) => s
                 .to_dtype(logits.dtype())
+                .and_then(|row| row.to_device(logits.device()))
                 .and_then(|row| logits.broadcast_add(&row))
                 .map_err(err),
             None => Ok(logits),
@@ -589,7 +707,7 @@ impl SplitModel {
         };
         let hidden = rows.dim(D::Minus1).map_err(err("rows"))?;
         let rows = rows
-            .to_device(&self.device)
+            .to_device(&self.guess_scoring_device())
             .and_then(|r| r.reshape(((), hidden)))
             .map_err(err("to the output head"))?;
         let table = |t: Tensor| t.to_dtype(DType::F32).and_then(|t| t.to_vec2::<f32>());
@@ -606,6 +724,7 @@ impl SplitModel {
             logits = s
                 .narrow(0, 0, n)
                 .and_then(|s| s.to_dtype(logits.dtype()))
+                .and_then(|s| s.to_device(logits.device()))
                 .and_then(|s| logits.broadcast_add(&s))
                 .map_err(err("suppressed words"))?;
         }
@@ -616,6 +735,7 @@ impl SplitModel {
                 own = Tensor::new(ids, s.device())
                     .and_then(|i| s.index_select(&i, 0))
                     .and_then(|s| s.to_dtype(own.dtype()))
+                    .and_then(|s| s.to_device(own.device()))
                     .and_then(|s| own.broadcast_add(&s))
                     .map_err(err("suppressed words"))?;
             }
@@ -776,5 +896,69 @@ mod tests {
         assert_eq!(alphabet_past(&vocab, 2), vec![3, 4, 10]);
         assert_eq!(alphabet_past(&vocab, 0), vec![0, 1, 3, 4, 10]);
         assert!(alphabet_past(&vocab, vocab.len()).is_empty());
+    }
+
+    /// A guess head beside a split's first segment stays on the card wherever
+    /// it fitted there before, and goes to the machine's memory only where the
+    /// card has no room for the block or for the output head beside one
+    /// conversation — with the Qwen3.8-27B's figures from this node's 8 GB card
+    /// (2026-11-20: a 227 MB block, its 994 MB head and 131 MB of hot rows
+    /// against a 127 MB card budget), which loaded no head at all before #485.
+    #[test]
+    fn a_split_guess_head_goes_to_the_machines_memory_only_where_its_card_has_no_room() {
+        const MB: u64 = 1 << 20;
+        let (block, head, hot, one) = (227 * MB, 994 * MB, 131 * MB, 96 * MB);
+        let machine = Some(40_000 * MB);
+        let home = |card: Option<u64>, machine: Option<u64>| {
+            split_head_home(block, head, hot, (card, one), machine)
+        };
+        // Room on the card, as before: the card, whatever the machine has.
+        assert_eq!(home(Some(8_000 * MB), machine), SplitHeadHome::Card);
+        assert_eq!(home(Some(8_000 * MB), None), SplitHeadHome::Card);
+        assert_eq!(home(None, None), SplitHeadHome::Card);
+        // The 27B's first segment: no room on the card.
+        assert_eq!(home(Some(127 * MB), machine), SplitHeadHome::SystemMemory);
+        // The block's quarter fits, the head beside one conversation does not.
+        assert_eq!(home(Some(1_000 * MB), machine), SplitHeadHome::SystemMemory);
+        // The machine is held to the same quarter, with the hot rows counted.
+        let takes = block + head + hot;
+        assert_eq!(
+            home(Some(127 * MB), Some(4 * takes)),
+            SplitHeadHome::SystemMemory
+        );
+        assert_eq!(
+            home(Some(127 * MB), Some(4 * takes - 1)),
+            SplitHeadHome::NoRoom
+        );
+        // A machine whose room is not known is never handed it.
+        assert_eq!(home(Some(127 * MB), None), SplitHeadHome::NoRoom);
+    }
+
+    /// The hot rows weighed off the tensor table before a head is read are
+    /// what the head read on the processor keeps ([`hot_rows_for`]).
+    #[test]
+    fn a_heads_hot_rows_are_sized_off_its_tensor_table_as_the_read_head_keeps_them(
+    ) -> candle_core::Result<()> {
+        let rows = draft_hot_rows().expect("hot rows on by default");
+        let vocab = rows + 100;
+        let w = Tensor::zeros((vocab, 64), DType::F32, &Device::Cpu)?;
+        let q = QTensor::quantize(&w, GgmlDType::Q8_0)?;
+        let info = candle_core::quantized::gguf_file::TensorInfo {
+            ggml_dtype: GgmlDType::Q8_0,
+            shape: q.shape().clone(),
+            offset: 0,
+        };
+        let head = QMatMul::from_qtensor(q)?;
+        let kept = hot_rows_for(Some(&head), false).expect("hot rows of a wide head");
+        assert_eq!(hot_rows_bytes_of(&info), kept.1);
+        assert_eq!(kept.1, (rows * 2 * 34) as u64);
+        // A head no wider than the hot rows is read whole: nothing extra.
+        let narrow = candle_core::quantized::gguf_file::TensorInfo {
+            ggml_dtype: GgmlDType::Q8_0,
+            shape: candle_core::Shape::from((rows, 64)),
+            offset: 0,
+        };
+        assert_eq!(hot_rows_bytes_of(&narrow), 0);
+        Ok(())
     }
 }

@@ -61,6 +61,10 @@ pub(super) struct SplitLoadOptions<'a> {
     /// (#425 (a), `mtp::HeadBeside::FirstSegment`). Only the part-file load
     /// reads the output head such a head borrows, so only it sets this.
     pub guess_head_beside_first: bool,
+    /// That head may load in the machine's memory where the card has no room
+    /// for it (`mtp::split_head_home`, #485): no block drafter sits beside the
+    /// model, which would read the same output head on the card.
+    pub guess_head_may_sit_in_system_memory: bool,
 }
 
 /// Element type the token-embedding table is dequantized to.
@@ -89,6 +93,20 @@ pub(super) struct SplitLoadOptions<'a> {
 /// 1629 MB for the entire rest of the model, which by itself pushed a 6 GB
 /// card to a CPU fallback (reported 2026-08-01).
 pub const EMBEDDING_DTYPE: candle_core::DType = candle_core::DType::F16;
+
+/// What a load may place in the machine's memory: the daemon's figure where it
+/// handed one (`--kv-budget-bytes`), else what the machine has available less
+/// the margin — the bound a processor worker is held to as the machine fills
+/// (`budget_reconciled_with_device`). A card/processor split's processor-held
+/// conversations are charged to it, and a guess head the card has no room for
+/// is weighed against it (#485).
+fn machine_room_bytes() -> Option<u64> {
+    super::cpu_kv_budget_bytes().or_else(|| {
+        super::kv_budget::host_free_and_total_bytes().map(|(available, total)| {
+            available.saturating_sub(super::kv_budget::device_free_margin_bytes(total))
+        })
+    })
+}
 
 /// The bytes of the tensors that belong to layers `layer_start..layer_end`
 /// alone — what moving those layers off the card takes off it
@@ -1229,6 +1247,7 @@ impl SplitModel {
                 gpu_layers: placement.gpu_layers,
                 cpu_expert_layers: placement.cpu_expert_layers,
                 guess_head_beside_first: false,
+                guess_head_may_sit_in_system_memory: false,
             },
         )
     }
@@ -1252,6 +1271,7 @@ impl SplitModel {
             gpu_layers,
             cpu_expert_layers,
             guess_head_beside_first,
+            guess_head_may_sit_in_system_memory,
         } = opts;
         // Detect architecture prefix from GGUF metadata
         let arch_str = super::gguf_arch_str(&ct);
@@ -1581,11 +1601,7 @@ impl SplitModel {
                 layer_start + processor_run.end,
                 false,
             );
-            host_kv_budget_bytes = super::cpu_kv_budget_bytes().or_else(|| {
-                super::kv_budget::host_free_and_total_bytes().map(|(available, total)| {
-                    available.saturating_sub(super::kv_budget::device_free_margin_bytes(total))
-                })
-            });
+            host_kv_budget_bytes = machine_room_bytes();
             if let Some(budget) = host_kv_budget_bytes {
                 tracing::info!(
                     processor_layers = segment_layer_count - device_layers,
@@ -2597,21 +2613,60 @@ impl SplitModel {
             } else {
                 super::mtp::HeadBeside::Nowhere
             };
-            // Its routed experts go to the machine's memory only where this
-            // segment has a processor side to charge them to; one wholly on a
-            // card keeps them there (`for_the_next_token_block`).
-            let mtp_placement = placement.for_the_next_token_block(host_kv_budget_bytes.is_some());
-            let mtp_block = super::mtp::block_to_load(
+            let mtp_index = super::mtp::block_to_load(
                 &ct,
                 &model_arch,
                 nextn_layers,
                 beside,
                 layer_end,
                 block_count,
-            )
-            .filter(|&block| {
-                let last = layer_end.saturating_sub(1);
-                let on_card = placement.device_for(last).is_cuda();
+            );
+            let last = layer_end.saturating_sub(1);
+            // A guess head beside a split's first segment on a card: on the
+            // card where the block and the output head it reads fit beside one
+            // conversation, else in the machine's memory, else nowhere
+            // (`mtp::split_head_home`, #485). The output head is read after
+            // this load (`shards::drafter_head_info`), so it is weighed here
+            // off the tensor table.
+            let split_head_home = match (mtp_index, beside) {
+                (Some(block), super::mtp::HeadBeside::FirstSegment)
+                    if guess_head_may_sit_in_system_memory
+                        && placement.device_for(last).is_cuda() =>
+                {
+                    let head = ct.tensor_infos.get("output.weight");
+                    let head_bytes = head.map_or(0, super::tensor_byte_size);
+                    let home = super::mtp::split_head_home(
+                        super::mtp::block_bytes(&ct, block, false).0,
+                        head_bytes,
+                        head.map_or(0, super::mtp::hot_rows_bytes_of),
+                        (kv_budget_bytes, kv_growth.bytes_for(context_length)),
+                        host_kv_budget_bytes.or_else(machine_room_bytes),
+                    );
+                    tracing::info!(
+                        block,
+                        head_mb = head_bytes >> 20,
+                        card_budget_mb = ?kv_budget_bytes.map(|b| b >> 20),
+                        home = ?home,
+                        "guess head beside the split's first segment: where it loads (#485)"
+                    );
+                    Some(home)
+                }
+                _ => None,
+            };
+            let block_in_system_memory =
+                split_head_home == Some(super::mtp::SplitHeadHome::SystemMemory);
+            // Its routed experts go to the machine's memory only where this
+            // segment has a processor side to charge them to; one wholly on a
+            // card keeps them there (`for_the_next_token_block`).
+            let mtp_placement = if block_in_system_memory {
+                placement
+                    .for_the_block_in_system_memory(last)
+                    .map_err(SwarmError::internal)?
+            } else {
+                placement.for_the_next_token_block(host_kv_budget_bytes.is_some())
+            };
+            let mtp_block = mtp_index.filter(|&block| {
+                let on_card = mtp_placement.device_for(last).is_cuda();
                 let experts_beside = on_card && !mtp_placement.experts_device_for(last).is_cuda();
                 let (mut here, beside) = super::mtp::block_bytes(&ct, block, experts_beside);
                 here += hot_rows.map_or(0, |(_, bytes)| bytes);
@@ -2621,7 +2676,10 @@ impl SplitModel {
                 // Experts kept beside a card are charged to the machine's
                 // conversation budget, and need one: with none, they would sit
                 // in its memory uncharged.
-                let fits = if on_card {
+                let fits = if let Some(home) = split_head_home {
+                    // Weighed with its head above.
+                    home != super::mtp::SplitHeadHome::NoRoom
+                } else if on_card {
                     quarter(here, kv_budget_bytes)
                         && (beside == 0
                             || host_kv_budget_bytes.is_some_and(|h| beside.saturating_mul(4) <= h))
@@ -2631,12 +2689,17 @@ impl SplitModel {
                     quarter(here, kv_budget_bytes)
                 };
                 if fits {
+                    // A block sent to the machine's memory beside a segment
+                    // wholly on its card has no budget there to come off: it
+                    // was weighed against the machine's live room.
                     let device_budget = if !on_card && host_kv_budget_bytes.is_some() {
-                        &mut host_kv_budget_bytes
+                        Some(&mut host_kv_budget_bytes)
+                    } else if block_in_system_memory {
+                        None
                     } else {
-                        &mut kv_budget_bytes
+                        Some(&mut kv_budget_bytes)
                     };
-                    if let Some(b) = device_budget.as_mut() {
+                    if let Some(b) = device_budget.and_then(Option::as_mut) {
                         *b -= here;
                     }
                     // Past the last layer, no estimate of a range counts it
@@ -2855,7 +2918,9 @@ impl SplitModel {
                 post_attention_norm,
             }) = mtp_layer
             {
-                let device = placement.device_for(layer_end - 1);
+                // Where the block's layer loaded (`mtp_placement`): beside the
+                // last layer, or in the machine's memory (#485).
+                let device = mtp_placement.device_for(layer_end - 1);
                 let nextn = |file: &mut R, what: &str| {
                     q35_tensor(
                         file,

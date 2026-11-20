@@ -6671,6 +6671,38 @@ A/B: `SWARMLLM_DELTA_RULE=steps`. Profile stage: `delta rule`.
 The 48 reply tokens identical in all eight runs, processor and card alike. On the processor the rest of the
 prompt is now the projections and the FFN, as for any dense model.
 
+### A first segment's full card sends the head to system memory (2026-11-20, FUTURE_WORK #485)
+
+**What broke.** The head beside a split's first segment is fed the last layer's rows by whichever computer runs
+it — a peer too (`SplitBlockDrafter::for_plan` asks only that every peer running that layer sends rows) — yet no
+27B chain from this node that ended on a peer ever guessed, and the split was filed as "guesses nothing" (#485's
+first premise, wrong). The head never LOADED: a planner fills the first segment's card with layers, so on this
+node's 8 GB card the 227 MB block failed its quarter of a 127 MB budget (`next-token-prediction block … on_card=
+true loaded=false`); where the planner put the segment's last layer on the processor, the block loaded there but
+its 994 MB output head (`drafter_head`) was read onto the card and failed one conversation beside it
+(`guess head beside the split's first segment … kept=false`). Either way the coordinator's guesser stopped with
+"no block drafter or guess head beside this segment".
+
+**The rule.** `mtp::split_head_home` weighs the block AND the output head together (the card's two old checks,
+one at load and one at attach, as one): the card where both fit beside one conversation, else the machine's live
+room (`machine_room_bytes`, the bound a card/processor split's processor side uses) at a quarter with the hot
+rows counted, else nowhere — a placement in the machine's memory is never unchecked (#451's rule). The block then
+loads through `LayerPlacement::for_the_block_in_system_memory`, and EVERY head tensor reads that placement: the
+first build read the head's small tensors and its `device` off the trunk placement, so the block's layer went to
+the processor and its norms to the card, and the head was dropped at attach (try 2). The output head is read
+where its block runs (`SplitModel::guess_head_in_system_memory`) unless a block drafter beside reads it on the
+card; its hot rows (FR-Spec, 131 MB) are then made on the processor; a guess is scored on the head's own device
+(`guess_scoring_device`), the suppressed-word row moved to it. Prior art: llama.cpp places a draft model on
+devices of its own (`--spec-draft-device`, `--spec-draft-ngl`).
+
+**Measured** (Qwen3.8-27B Q4_K_M, here [0,21) → the US RTX 5080 laptop [21,64), 272 ms, 160 tokens, owner's reply
+store off, `~/swarmllm-gate/split27_head`): unguessed 3.05-3.15 tok/s (main, and the two builds whose head was
+dropped) → prose 5.0-5.9, code 5.95-6.2. Every reply of three node starts guessed: 50-58 rounds with the head,
+37-40% of guesses kept, 11.6-12.4 ms a guess on the processor. The planner placed the range wholly on the card
+once and as 20 + 1 and 19 + 2 (card + processor) twice; both paths fired. The run's "off" arm guessed too: the
+switch then gated only the moved block, not the head read beside a processor-held last layer — fixed after the
+run, so `SWARMLLM_SPLIT_GUESS_HEAD_IN_RAM=0` restores both.
+
 ### Its convolution, and a taken-back check, on a card (2026-11-08, FUTURE_WORK #228 (9), #428)
 
 **Why it was looked at**: with the block drafter on a card (#428) a story wrote

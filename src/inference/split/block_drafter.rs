@@ -1374,16 +1374,36 @@ impl SplitModel {
         let hot_bytes = hot.as_ref().map_or(0, |(_, bytes)| *bytes);
         let takes = self.drafter_head_bytes.saturating_add(hot_bytes);
         let one_conversation = self.kv_growth.bytes_for(self.max_seq_len);
-        let fits = fits_beside_one_conversation(self.kv_budget_bytes, takes, one_conversation);
+        // Read into the machine's memory beside its block (#485), it is
+        // weighed there: against the processor-held layers' budget and one
+        // conversation of theirs where the segment has them; a segment wholly
+        // on its card weighed it with its block at load
+        // (`mtp::split_head_home`).
+        let in_system_memory = self.split_head_reads_from_system_memory();
+        let fits = if in_system_memory {
+            fits_beside_one_conversation(
+                self.host_kv_budget_bytes,
+                takes,
+                self.host_kv_growth.bytes_for(self.max_seq_len),
+            )
+        } else {
+            fits_beside_one_conversation(self.kv_budget_bytes, takes, one_conversation)
+        };
         if fits {
-            if let Some(b) = self.kv_budget_bytes.as_mut() {
-                *b -= takes;
+            let budget = if in_system_memory {
+                self.host_kv_budget_bytes.as_mut()
+            } else {
+                self.kv_budget_bytes.as_mut()
+            };
+            if let Some(b) = budget {
+                *b = b.saturating_sub(takes);
             }
         }
         tracing::info!(
             head_mb = self.drafter_head_bytes >> 20,
             hot_rows_mb = hot_bytes >> 20,
             on_card,
+            in_system_memory,
             reads_layer = ?self.split_head_reads_layer(),
             budget_left_mb = ?self.kv_budget_bytes.map(|b| b >> 20),
             one_conversation_mb = one_conversation >> 20,
