@@ -2670,24 +2670,13 @@ impl SplitModel {
                 let experts_beside = on_card && !mtp_placement.experts_device_for(last).is_cuda();
                 let (mut here, beside) = super::mtp::block_bytes(&ct, block, experts_beside);
                 here += hot_rows.map_or(0, |(_, bytes)| bytes);
-                let quarter = |bytes: u64, budget: Option<u64>| {
-                    budget.is_none_or(|b| bytes.saturating_mul(4) <= b)
-                };
-                // Experts kept beside a card are charged to the machine's
-                // conversation budget, and need one: with none, they would sit
-                // in its memory uncharged.
-                let fits = if let Some(home) = split_head_home {
-                    // Weighed with its head above.
-                    home != super::mtp::SplitHeadHome::NoRoom
-                } else if on_card {
-                    quarter(here, kv_budget_bytes)
-                        && (beside == 0
-                            || host_kv_budget_bytes.is_some_and(|h| beside.saturating_mul(4) <= h))
-                } else if host_kv_budget_bytes.is_some() {
-                    quarter(here, host_kv_budget_bytes)
-                } else {
-                    quarter(here, kv_budget_bytes)
-                };
+                let fits = super::mtp::guess_block_fits(
+                    split_head_home,
+                    on_card,
+                    (here, beside),
+                    kv_budget_bytes,
+                    host_kv_budget_bytes,
+                );
                 if fits {
                     // A block sent to the machine's memory beside a segment
                     // wholly on its card has no budget there to come off: it
@@ -2700,7 +2689,7 @@ impl SplitModel {
                         Some(&mut kv_budget_bytes)
                     };
                     if let Some(b) = device_budget.and_then(Option::as_mut) {
-                        *b -= here;
+                        *b = b.saturating_sub(here);
                     }
                     // Past the last layer, no estimate of a range counts it
                     // (`segment_weights` reads layers below the end).
@@ -2708,7 +2697,7 @@ impl SplitModel {
                         mtp_card_bytes = here;
                     }
                     if let Some(h) = host_kv_budget_bytes.as_mut().filter(|_| beside > 0) {
-                        *h -= beside;
+                        *h = h.saturating_sub(beside);
                     }
                 }
                 tracing::info!(

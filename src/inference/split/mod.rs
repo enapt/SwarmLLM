@@ -328,15 +328,33 @@ impl OutputHeadLent {
     /// Lend the output head one of `held` — the single-rank ranges this
     /// model process has loaded — holds, for the next load; `None` where none
     /// holds one or sharing is off. Taken BEFORE the load drops any range it
-    /// covers, so a head a dropped range held stays for the new one.
+    /// covers, so a head a dropped range held stays for the new one. A head on
+    /// a card is lent before one in the machine's memory: a load on the card
+    /// borrows only a head on its own device, and the worker advertises the
+    /// card-held one (`output_head_card_bytes`), so lending a first segment's
+    /// head read into system memory (#485) in its place would load a second
+    /// head the daemon never priced.
     pub(crate) fn of<'a>(held: impl IntoIterator<Item = &'a SplitModel>) -> Option<Self> {
         if !share_output_head_on() {
             return None;
         }
-        let head = held.into_iter().find_map(SplitModel::output_head_held)?;
+        let heads = held
+            .into_iter()
+            .filter_map(SplitModel::output_head_held)
+            .collect();
+        let head = card_held_first(heads, |head: &QMatMul| {
+            head.quantized_weight()
+                .is_some_and(|w| w.device().is_cuda())
+        })?;
         *lent_output_head_slot() = Some(head);
         Some(Self(()))
     }
+}
+
+/// The first of `heads` `on_card` says a card holds, else the first.
+fn card_held_first<T>(heads: Vec<T>, on_card: impl Fn(&T) -> bool) -> Option<T> {
+    let at = heads.iter().position(on_card).unwrap_or(0);
+    heads.into_iter().nth(at)
 }
 
 impl Drop for OutputHeadLent {
@@ -398,6 +416,31 @@ pub fn max_seq_len_override() -> Option<usize> {
         None
     } else {
         Some(v)
+    }
+}
+
+#[cfg(test)]
+mod lent_head_tests {
+    use super::card_held_first;
+
+    /// A card-held head is lent before one in the machine's memory, whatever
+    /// order the ranges come in; with none on a card, the first is.
+    #[test]
+    fn a_card_held_head_is_lent_before_one_in_system_memory() {
+        let on_card = |head: &(&str, bool)| head.1;
+        assert_eq!(
+            card_held_first(vec![("ram", false), ("card", true)], on_card),
+            Some(("card", true))
+        );
+        assert_eq!(
+            card_held_first(vec![("card", true), ("ram", false)], on_card),
+            Some(("card", true))
+        );
+        assert_eq!(
+            card_held_first(vec![("ram", false)], on_card),
+            Some(("ram", false))
+        );
+        assert_eq!(card_held_first(Vec::<(&str, bool)>::new(), on_card), None);
     }
 }
 

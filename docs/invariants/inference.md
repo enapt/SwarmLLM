@@ -6703,6 +6703,16 @@ once and as 20 + 1 and 19 + 2 (card + processor) twice; both paths fired. The ru
 switch then gated only the moved block, not the head read beside a processor-held last layer — fixed after the
 run, so `SWARMLLM_SPLIT_GUESS_HEAD_IN_RAM=0` restores both.
 
+**Two checks the move must keep** (the pre-release review, 2026-11-20 — neither seen on a run, both now tested):
+a card home weighs only the card, so a mixture-of-experts block's routed experts kept in the machine's memory
+still need the machine's conversation budget (`mtp::guess_block_fits` — the first build let 855 MB of a 35B-A3B
+block's experts come off a smaller budget with a bare `-=`); and a worker holding a first segment's head in system
+memory AND a later range's head on the card lends the CARD one (`OutputHeadLent::of` → `card_held_first`) — a load
+on the card borrows only a head on its own device, and the worker advertises the card-held one
+(`output_head_card_bytes`), so lending the processor copy in a hash map's order would load a second 994 MB head
+the daemon never priced (#458's failure). Tests `a_card_home_still_asks_the_machines_budget_for_the_blocks_experts`,
+`a_card_held_head_is_lent_before_one_in_system_memory` (each red with its fix off).
+
 ### Its convolution, and a taken-back check, on a card (2026-11-08, FUTURE_WORK #228 (9), #428)
 
 **Why it was looked at**: with the block drafter on a card (#428) a story wrote

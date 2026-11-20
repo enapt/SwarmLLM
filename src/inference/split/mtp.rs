@@ -242,6 +242,36 @@ pub(crate) fn split_head_home(
     }
 }
 
+/// Does a split's next-token block load, `here` bytes beside its device and
+/// `beside` of its routed experts in the machine's memory? Sent to the
+/// machine's memory ([`split_head_home`]) it was weighed there with its head;
+/// with no room anywhere it does not load. On the card — its home, or no home
+/// weighed — the card takes a quarter of its budget at most, and experts kept
+/// beside it need the machine's conversation budget to come off: with none
+/// they would sit there uncharged. A card home weighs only the card, so it
+/// still asks that of its experts (#485's review: a MoE block's 855 MB of
+/// experts would have come off a smaller machine budget unchecked).
+pub(crate) fn guess_block_fits(
+    home: Option<SplitHeadHome>,
+    on_card: bool,
+    (here, beside): (u64, u64),
+    card_budget: Option<u64>,
+    host_budget: Option<u64>,
+) -> bool {
+    let quarter =
+        |bytes: u64, budget: Option<u64>| budget.is_none_or(|b| bytes.saturating_mul(4) <= b);
+    match home {
+        Some(SplitHeadHome::SystemMemory) => true,
+        Some(SplitHeadHome::NoRoom) => false,
+        Some(SplitHeadHome::Card) | None if on_card => {
+            quarter(here, card_budget)
+                && (beside == 0 || host_budget.is_some_and(|h| beside.saturating_mul(4) <= h))
+        }
+        Some(SplitHeadHome::Card) | None if host_budget.is_some() => quarter(here, host_budget),
+        Some(SplitHeadHome::Card) | None => quarter(here, card_budget),
+    }
+}
+
 /// What the hot rows of an output head `info` names would take, read on the
 /// processor ([`hot_rows_for`]'s rows, sized off the tensor table before the
 /// head is read): 0 where a guess reads the whole head.
@@ -904,6 +934,47 @@ mod tests {
     /// conversation — with the Qwen3.8-27B's figures from this node's 8 GB card
     /// (2026-11-20: a 227 MB block, its 994 MB head and 131 MB of hot rows
     /// against a 127 MB card budget), which loaded no head at all before #485.
+    #[test]
+    fn a_card_home_still_asks_the_machines_budget_for_the_blocks_experts() {
+        const MB: u64 = 1 << 20;
+        let card = Some(8_000 * MB);
+        // Qwen3.6-35B-A3B's block on a big card, its 855 MB of experts beside
+        // it, a machine budget of 1 GB: the experts do not fit there.
+        let (here, beside) = (60 * MB, 855 * MB);
+        assert!(!guess_block_fits(
+            Some(SplitHeadHome::Card),
+            true,
+            (here, beside),
+            card,
+            Some(1_024 * MB)
+        ));
+        assert!(guess_block_fits(
+            Some(SplitHeadHome::Card),
+            true,
+            (here, beside),
+            card,
+            Some(4_000 * MB)
+        ));
+        assert!(
+            !guess_block_fits(Some(SplitHeadHome::Card), true, (here, beside), card, None),
+            "experts beside a card with no machine budget would sit uncharged"
+        );
+        assert!(guess_block_fits(
+            Some(SplitHeadHome::SystemMemory),
+            false,
+            (here, 0),
+            Some(MB),
+            None
+        ));
+        assert!(!guess_block_fits(
+            Some(SplitHeadHome::NoRoom),
+            true,
+            (here, 0),
+            card,
+            None
+        ));
+    }
+
     #[test]
     fn a_split_guess_head_goes_to_the_machines_memory_only_where_its_card_has_no_room() {
         const MB: u64 = 1 << 20;
