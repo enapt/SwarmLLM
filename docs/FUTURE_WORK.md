@@ -1198,6 +1198,19 @@ a rig that restarts the node between two identical runs (`tier_1119p` against `t
 > (`docs/invariants/scheduling.md` § "A model with no engine drafter leaves room for its BLOCK drafter"). Prior art:
 > llama.cpp counts the next-token block among the model's layers (`n_layer_all`), placed and charged with the
 > weights before any context is sized.
+> **Re-read 2026-11-20 evening, after #485 sent the head to system memory where the card is full (so a split always
+> guesses now)**: what a card home is still worth is the guess's SPEED. On the 27B here `[0,21)` → Australia
+> (`~/swarmllm-gate/split27_clock`, clocks held) a round is ~25 ms forward here + ~264 ms there + the guesses: ~3 a
+> round at 11.6 ms each on the processor (`DIAG: split guess head complete … guess_ms`). The head's block is 227 MB
+> read whole per guess — its width calibration read `4:7ms 3:9ms 2:13ms 1:25ms`, ~32 GB/s at 4 threads, near this
+> laptop's memory bandwidth, so a wider processor pool buys ~1 ms a guess (not built). On the card a guess is ~1-2 ms:
+> ~30 ms a round (~10%). The loader logged the room: `card_budget_mb=Some(291) one_conversation_mb=160`, block 227,
+> hot rows 131, whole head 994 — a card home today needs the WHOLE head on the card (`hot_rows_for` keeps hot rows on
+> the processor only) and four times the block (the quarter rule): ~1.4 GB, five layers. The set-aside patch
+> reserved the quarter rule's 908 MB. **Next design**: block + hot rows on the card (~360 MB, the reply's own words
+> still read from the head in system memory), a reservation of that size, AND the plan's price counting the guesses'
+> time by where they run — today a cut plan prices only its layers and always loses to the uncut one, whose guesses
+> run 10x slower. In a short ring of cards (the plan's target shape) the round is ~110 ms and the same 30 ms is ~25%.
 >
 > (4) **Diagnosable in 0.3.301: a US RTX 5080 (`5bfbd36e`, 16 GB, holds the Gemma 4s and gpt-oss) is never a
 > candidate.** **Read over the wire on 0.3.301, 2026-11-20 01:58Z: `inference_held_because: cooling`** (#440's heat
