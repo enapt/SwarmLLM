@@ -129,23 +129,27 @@ budget; prose profile, the 14B pair's measured prices; `flow_ring` with one far 
 - The guesser at the TAIL (vLLM PR #44698's shape) stays a memory design, not a speed one: it would spare the asker
   the head (1.2 GB of its memory), with the same one check a round trip.
 
-### Step 2b — NEXT: several rounds in flight for the Qwen 3.5 family (FUTURE_WORK #486)
+### Step 2b — KILLED 2026-11-20 by its simulator: rounds in flight for the Qwen 3.5 family (#486)
 
-- **Why**: the family checks ONE round at a time (`ngram_only_spec`), so a reply is ~2.6 tokens a 437 ms round
-  at 272 ms. The speed model (§ 2) with those 2.6 tokens a round (m = 0.39 misses a token) and this node's stage
-  at ~70 ms a round (its layers plus the head's ~4 × 12 ms guesses, so τ/e0 ≈ 27 ms): rounds in flight reach
-  ~7.6 tok/s at 272 ms (27 + 0.39 × 272 ms a token) and ~20 in a 60 ms ring (27 + 23 ms) — INFERRED. So the bar
-  needs BOTH in-flight rounds and short rings (step 6), and a faster head (on a card) or better acceptance lifts
-  both.
-- **Mechanism**: the head guesses the next round from the predicted end of the one in flight (`HeadChain`
-  already guesses while a check is abroad); each segment keeps a recurrent state per round in flight (#437's
-  per-row parent states, ≤ `SsmState::MOST_ROWS_KEPT`) and drops those past a refusal.
-- **Experiment first**: `tree_schedule_sim.py ring` with the measured per-guess acceptance (0.38) and a one-check
-  head, against K rounds in flight, at 130 / 272 / 60 ms. Kill if a 60 ms ring reads under 15 tok/s (the bar is
-  reached only in short rings; at 272 ms the estimate is ~1.3×).
-- **Prior art**: PipeInfer (2407.11798, continuous asynchronous speculation), PEARL (post-verify drafting),
-  SpecPipe (2504.04104, tokens a forward through a pipeline); the flow (#134 (b)) is ours for families with a
-  separate drafter.
+- **The check** (`examples/head_inflight_sim.py`): a chain head, each stage one forward at a time, a round sent
+  from the predicted end of the one before kept only if that round and the head's guess of the check's token were
+  right. Calibrated on the 27B here → US rig (one round of 4 at 272 ms: 5.7-5.8 tok/s vs 5.0-6.2 measured) under two
+  acceptance shapes that both fit its 38% over 4 (i.i.d. 0.65; 0.75 × 0.8^(k−1)).
+- **Result**: rounds in flight add +4-10% (272 ms 5.9 → 6.5; 60 ms 11.3 → 12.4; the head on a card at 60 ms 14.4 →
+  14.8) — under the kill line. A round sent ahead is void ~8 times in 9.
+- **What the bar needs** (same sim, head on a card, best chunk): the FORWARD WORK a round. Today's slices take
+  ~117 ms a round between them (a card/processor slice here, 43 layers on a laptop card there):
+
+  | ring | today's slices (117 ms) one / two in flight | slices wholly on good cards (~30 ms) one / two |
+  |---|---|---|
+  | 272 ms | 6.3-6.8 / 6.3-7.1 | 8.0-8.7 / 8.1-9.1 |
+  | 130 ms | 9.8-10.5 / 9.8-10.9 | 14.8-15.8 / 15.0-16.7 |
+  | 60 ms | 13.5-14.4 / 13.5-14.8 | **25.4-26.7 / 25.8-28.4** |
+  | 20 ms | 17.2-18.2 / 16.4-18.1 | 42.9-43.9 / 43.8-47.3 |
+
+  So for this family the order is: **slices wholly on cards** (step 6's planner work, and where the 117 ms goes —
+  measure the two stages apart first), the **head on a card**, then **short rings** (step 6, needs computers near
+  each other). INFERRED from a calibrated model, not measured.
 
 ### Step 3 — the throughput half: one stage carries several conversations' forwards as one
 

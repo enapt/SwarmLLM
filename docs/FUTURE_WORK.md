@@ -36,7 +36,8 @@ residual).
 **2026-11-20: split speed is the focus (owner: "we need to focus on getting split speeds going"; each node a small
 slice, nobody's card locked by a whole model). The plan: `docs/plans/small_slices.md`. The bar (owner, same day):
 "minimum 20-30t/s" a reply. #485 closed (a split ending on a peer now guesses: the 27B here → US 3.1 → 5.0-6.2);
-next #486 (several rounds in flight for the Qwen 3.5 family) with short rings — neither alone reaches the bar.**
+#486 (rounds in flight) killed by its simulator (+4-10%); the bar needs slices wholly on cards in short rings
+(sim: 25-28 tok/s at 60 ms) — plan step 2b.**
 
 **2026-11-18: #477 (P1, field report) — a restart re-read every held part flat out — SHIPPED in v0.3.298 (§ Closed),
 checked on Windows too.**
@@ -4356,19 +4357,6 @@ the measurement that can kill it), `docs/plans/split_speculation.md` (guess-and-
 `docs/plans/wan_parallel.md` (parallelise the reply, not the token), `docs/plans/regional_pipelines.md`
 (placement by distance, #192), `docs/plans/faster_than_local.md` (the ranked list).
 
-#### #486 — A Qwen 3.5-family split checks one round of guesses at a time, so its replies stay far under 20-30 tok/s
-`P1` · perf-split · **OPEN** (simulate first) — 2026-11-20 · plan: `docs/plans/small_slices.md` step 2b · history: #485, #437
-
-Qwen3.8-27B / Qwen3.6-35B-A3B take no separate drafter, so no flow (#134 (b)): the n-gram loop sends ONE check and
-waits (`ngram_only_spec`). With #485 the 27B here → US laptop (272 ms) writes ~2.6 tokens a 437 ms round, 5.0-6.2
-tok/s; the owner's bar is 20-30 (2026-11-20). Speed model (plan § 2): rounds in flight reach ~7.6 tok/s at 272 ms and
-~20 in a 60 ms ring (INFERRED: τ/e0 ≈ 27 ms from this node's ~70 ms stage, m = 0.39 a token) — so this needs short
-rings too. **Design**: the head guesses the next round from the predicted end of the one in flight (`HeadChain`
-already guesses while a check is abroad); each segment keeps a recurrent state per round in flight (#437's per-row
-parent states, ≤ `SsmState::MOST_ROWS_KEPT`) and drops those past a refusal. **Experiment first**:
-`tree_schedule_sim.py ring` at the measured acceptance (0.38 a guess), kill if a 60 ms ring reads under 15 tok/s.
-Prior art: PipeInfer (2407.11798), PEARL (post-verify drafting), SpecPipe (2504.04104).
-
 #### #469 — A split's yield is one figure for every kind of reply, so a prose reply can be planned onto a split slower than local
 `P2` · perf-split · **PARTIAL** (per-kind split yield built; this node's whole run per kind, mid-reply switching and per-conversation priors open) — 2026-11-17 · evidence: `faster_than_local.md` § 9 ("A second far card") · history: #3 (j), #428
 
@@ -7977,6 +7965,15 @@ appears. Listed so sweeps and future sessions do not re-file them; the reasoning
 archive under the named heading. Reopen one only with the evidence its line names.
 
 **Engine and speed**
+- **#486 — several rounds of guesses in flight for a Qwen 3.5-family split** (2026-11-20, killed by its own
+  simulator before any build). The file's guess head guesses a chain from its own output, so a round sent from the
+  predicted end of the one before is kept only if that whole round AND the head's guess of the check's token were
+  right — about 0.65⁵ ≈ one in nine for chains of 4. `examples/head_inflight_sim.py` (calibrated on the 27B
+  here → US rig: one round of 4 at 272 ms = 5.7-5.8 tok/s against 5.0-6.2 measured) gives +4-10% at best (60 ms
+  ring 11.3 → 12.4, the head on a card 14.4 → 14.8: under the plan's 15 kill line). What DOES reach the bar is the
+  forward work a round: slices wholly on good cards (~30 ms a round, against today's ~117) in a 60 ms ring read
+  25-28 tok/s with or without rounds in flight → `docs/plans/small_slices.md` step 2b. Prior art: PipeInfer
+  (2407.11798), PEARL, SpecPipe (2504.04104). Reopen with a head whose deep guesses are kept far more often.
 - **Q4_K block-interleaved repack** — the 1.8× did not survive our own kernel (ceiling
   1.24-1.27×). Archive § "Q4_K block-interleaved repack: the 1.8x does not survive our own kernel".
 - **Ragged batching** — measured +25% (processor) / +23% (card) at batch 4; decode batching was
@@ -8099,7 +8096,8 @@ grep `^| N |`).
   was dropped) → prose 5.0-5.9, code 5.95-6.2 (11 replies over three node starts, every one guessing: 50-58 rounds
   with the head, 37-40% of guesses kept, 11.6-12.4 ms a guess). Tests `a_split_guess_head_goes_to_the_machines_
   memory_only_where_its_card_has_no_room` (red with the switch off), `a_heads_hot_rows_are_sized_off_its_tensor_
-  table_as_the_read_head_keeps_them`. Still far under the owner's 20-30 → #486.
+  table_as_the_read_head_keeps_them`. Still far under the owner's 20-30 (#486 was the next idea; its simulator
+  killed it — § Decided).
 
 **Closed 2026-11-18, shipped in 0.3.300** (#478)
 - #478 — `P1` — **A card/processor split's first request could fail "device mismatch in cat, lhs: Cuda, rhs: Cpu".**
