@@ -2471,6 +2471,25 @@ What a change must keep: a split's yield is measured, trusted, explored and pric
 the two passes together offer every route one search would; a plan's price reads its own tail; a
 split of one tail never delays the other's exploration; a tail no route can form never takes every
 exploration.
+
+**A split whose first segment's worker refused its guessers is priced at a token a round (2026-11-20, FUTURE_WORK
+#481 (1)).** `pipeline::split_yield_prior` asked config, the header and the parts on disk — never what the first
+segment's worker LOADED. On `~/swarmllm-gate/tier_1119r` (2026-11-19 21:12-21:21Z) Qwen3.6-35B-A3B's first segment
+`[0,14)` loaded with no room for its block drafter (430 MB against 1,172) and without its guess head
+(`loaded=false`); both refused on the first reply ("no block drafter or guess head beside this segment"), and
+`block_draft::refused_lately` kept the next replies from asking. The plans after it still priced the split from the
+drafter's prior (1.21 tokens a round, 8 when explored): it ran 159 rounds for 160 tokens, 4.2-4.5 tok/s, against
+the 35 tok/s a hand-off to Australia delivers. **The fix**: `split_yield_prior` counts the file's guessers only
+while **`block_draft::a_guesser_may_answer`** — the guess head, or the block drafter where its file is on disk, not
+refused — the same refusals `SplitBlockDrafter::for_plan` reads, so a price and the reply it prices agree. A refusal
+**stands only while the worker that gave it serves the model** (`block_draft::refusal_stands`: within
+`REFUSAL_HOLDS` AND spawned no later than the refusal, `ModelProcessPool::live_worker_spawned_at`): a worker
+attaches a block drafter and keeps a guess head only at load (`model_worker`'s load; in-place growth attaches
+none), so one spawned since, or none at all, is asked again. Prior art: SmartSpec (Liu et al. 2024, arXiv
+2406.14066) prices a step from the speculation RUNNING, and one with none as plain decode. No new worker message:
+the coordinator already hears the refusal per reply. Tests `a_split_whose_worker_refused_its_guessers_is_priced_at_a_round_a_token`
+(red with `a_guesser_may_answer` dropped from the gate), `a_refusal_stands_only_while_the_worker_that_gave_it_lives`
+(red with the spawn condition dropped).
 Tests: `a_split_is_planned_and_priced_for_the_tail_it_ends_on` (parallax — red with one search
 for both), `each_tail_of_a_split_is_measured_and_explored_apart` and the per-tail arms of
 `an_untried_split_is_explored_on_a_doubling_schedule` (`split_rounds`),
@@ -8017,4 +8036,23 @@ every piece as the run's end, and a 32-layer model held whole with 12 on its car
 on its processor). A run holds `min(width, card)` on its card in either order and a token's time only sums its
 layers (`split_tokens_per_sec`), so the counts price a fresh run exactly. Test
 `a_copy_loaded_processor_first_is_priced_where_its_card_layers_are`.
+
+**A mixture-of-experts layer beside the card is its card's, but for the experts a token reads (2026-11-20,
+FUTURE_WORK #481 (1)).** The pool's `card_split` keeps a MoE segment too big for the card ON the card with the
+fewest layers' routed experts in the machine's memory (`ExpertsInRam`, #138 (3)) whenever the rest fits, so a
+"layer beside the card" of such a model runs its attention, router and shared expert on the card and reads only the
+experts a token is routed to on the processor. Priced as a whole processor layer, Qwen3.6-35B-A3B on the Australian
+3060 holding it whole read 1.39 ms a layer where it delivers ~0.7, and the 35 tok/s hand-off lost to a 4.5 tok/s
+split (`tier_1119r`). **`NodeCandidate::decode_ms_by_device`** is the one split of a range's decode by device: a
+layer beside the card is the processor's whole for a dense model, and for a MoE model the card's prior × (1 − s)
+plus the processor's × s, where s is the routed experts' share of what a token reads
+(**`GgufTensorMeta::active_expert_share`**, the tensors `split::routed_expert_bytes` counts at `expert_used_count /
+expert_count`; `scheduler::experts_share_for` → `NodeCandidate::experts_share`). `prior_ms_per_layer_over` sums
+it; `parallax::prompt_speedup_over` reads each part at its own device's prompt ratio. No wire field: a MoE model's
+layers beside a card are experts-in-RAM layers wherever the loader could place the rest on the card. Prior art:
+Fiddler (Kamahori et al. 2024, arXiv 2402.07033) keeps the non-expert weights on the card and prices an expert in
+system memory as the processor reading its weights once a token; llama.cpp's `--n-cpu-moe` and kTransformers are
+the same layer-wise hybrid. A/B `SWARMLLM_MOE_BESIDE_PRICE=processor` (every layer beside a card the processor's,
+as before). Tests `a_moe_layer_beside_the_card_is_priced_by_the_experts_a_token_reads` (red with the MoE arm
+dropped), `a_token_reads_the_experts_it_is_routed_to_and_the_layers_whole`.
 

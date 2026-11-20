@@ -10828,6 +10828,30 @@ impl ModelProcessPool {
         })
     }
 
+    /// When the model's live worker was spawned — `None` with none alive. What
+    /// that worker loaded beside its layers (a guess head, a block drafter) is
+    /// fixed at its spawn, so a refusal it gave stands only while it lives
+    /// (`pipeline::block_draft`'s refusals, #481 (1)): a worker spawned since
+    /// may have had the room.
+    pub(crate) fn live_worker_spawned_at(&self, model_id: &ModelId) -> Option<std::time::Instant> {
+        self.workers
+            .get(model_id)
+            .filter(|h| !h.dead.load(Ordering::Acquire))
+            .map(|h| h.spawned_at)
+    }
+
+    /// A worker of `model_id` that answers nothing, spawned at `spawned_at`,
+    /// put in the pool for a test outside this module.
+    #[cfg(test)]
+    pub(crate) async fn with_a_fake_worker_spawned(
+        &self,
+        model_id: &ModelId,
+        spawned_at: std::time::Instant,
+    ) {
+        let handle = tests::fake_worker_handle_spawned(false, None, false, spawned_at).await;
+        self.workers.insert(model_id.clone(), handle);
+    }
+
     /// The one loader behind both: through `get_or_spawn` as the work it
     /// precedes would go, then `DaemonMsg::LoadRange` so the worker reads the
     /// weights now (a spawn alone loads nothing).

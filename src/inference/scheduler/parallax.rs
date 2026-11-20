@@ -927,12 +927,13 @@ fn prompt_speedup_over(c: &NodeCandidate, range: (u32, u32), ahead: u32) -> f32 
     } else {
         PREFILL_SPEEDUP_CPU
     };
-    let (first, beside) = c.layers_by_device(range, ahead);
+    let (_, beside) = c.layers_by_device(range, ahead);
     if beside == 0 {
         return first_speedup;
     }
-    let card = first as f32 * c.prior_ms_per_layer();
-    let processor = beside as f32 * c.processor_prior_ms_per_layer();
+    // Each device's share of the decode (a mixture-of-experts layer beside
+    // the card is mostly the card's, #481 (1)) at its own ratio.
+    let (card, processor) = c.decode_ms_by_device(range, ahead);
     let read = card / first_speedup + processor / PREFILL_SPEEDUP_CPU;
     if !read.is_finite() || read <= 0.0 {
         return first_speedup;
@@ -2427,6 +2428,7 @@ mod tests {
             region_score: 1.0,
             est_tokens_per_sec,
             layer_work: 1.0,
+            experts_share: 0.0,
             activation_bytes_per_token: ACTIVATION_BYTES_PER_TOKEN as f32,
             observed_latency_ms_per_layer: None,
             observed_latency_timed_on: None,
@@ -6253,6 +6255,7 @@ mod transfer_cost_tests {
             region_score: 1.0,
             est_tokens_per_sec: 20.0,
             layer_work: 1.0,
+            experts_share: 0.0,
             activation_bytes_per_token: ACTIVATION_BYTES_PER_TOKEN as f32,
             observed_latency_ms_per_layer: None,
             observed_latency_timed_on: None,

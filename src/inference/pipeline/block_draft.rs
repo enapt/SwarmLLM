@@ -314,12 +314,68 @@ fn refused_lately(
 /// How long a refusal keeps a model's replies from asking that guesser.
 const REFUSAL_HOLDS: std::time::Duration = std::time::Duration::from_secs(600);
 
-fn refused(key: &str) -> bool {
-    refused_lately()
+/// Whether the guesser under `key` was refused lately by the worker now
+/// serving `model` ([`refusal_stands`]).
+fn refused(
+    state: &crate::daemon::state::SharedState,
+    model: &crate::types::ModelId,
+    key: &str,
+) -> bool {
+    let Some(at) = refused_lately()
         .lock()
         .ok()
         .and_then(|r| r.get(key).copied())
-        .is_some_and(|at| at.elapsed() < REFUSAL_HOLDS)
+    else {
+        return false;
+    };
+    refusal_stands(
+        at,
+        state.model_process_pool.live_worker_spawned_at(model),
+        std::time::Instant::now(),
+    )
+}
+
+/// A refusal given at `refused_at` still stands at `now`: within
+/// [`REFUSAL_HOLDS`], and the worker that gave it still the one serving the
+/// model — spawned no later than the refusal. What a worker holds beside its
+/// layers is fixed at its spawn (`model_worker` attaches a block drafter and
+/// keeps a guess head only at load), so a worker spawned since, or none at
+/// all (the next reply spawns one), may have the room the refusing one had
+/// not (#481 (1)).
+fn refusal_stands(
+    refused_at: std::time::Instant,
+    worker_spawned_at: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    now.saturating_duration_since(refused_at) < REFUSAL_HOLDS
+        && worker_spawned_at.is_some_and(|spawned| spawned <= refused_at)
+}
+
+/// Whether a guesser beside a split's first segment may still guess for
+/// `model_id` from here: its guess head, or its block drafter where the file
+/// is on disk, neither refused by the worker now serving the model
+/// ([`refused`]). [`SplitBlockDrafter::for_plan`] builds no guesser once
+/// both are, so `pipeline::split_yield_prior` asks this before pricing a
+/// split above a token a round (#481 (1)): the 35B-A3B's first segment
+/// loaded with no room for either (430 MB against the drafter's 1,172; the
+/// head not loaded) and every split after was still priced at 1.21-1.86
+/// tokens a round, and explored at 8 — 159 rounds for 160 tokens.
+pub(crate) fn a_guesser_may_answer(
+    state: &crate::daemon::state::SharedState,
+    model_id: &crate::types::ModelId,
+) -> bool {
+    let model = model_id.0.as_str();
+    !refused(state, model_id, &Guesser::refusal_key(By::Head, model))
+        || (!refused(state, model_id, &Guesser::refusal_key(By::Block, model))
+            && crate::inference::split::block_drafter_plan_in(&state.model_dir(model)).is_some())
+}
+
+/// Record that the first-segment worker refused `by` for `model` now — what
+/// the next replies and the next plans read through [`refused`].
+pub(super) fn note_refusal(by: By, model: &str) {
+    if let Ok(mut refused) = refused_lately().lock() {
+        refused.insert(Guesser::refusal_key(by, model), std::time::Instant::now());
+    }
 }
 
 /// The most a guess head's draft makes — the worker's `MtpGuesses::MOST_GUESSES`.
@@ -656,16 +712,24 @@ impl SplitBlockDrafter {
         }
         let model = exec.request.model_id.0.as_str();
         let meta = exec.shared_state.gguf_meta_for(&exec.request.model_id)?;
-        let block = (!refused(&Guesser::refusal_key(By::Block, model)))
-            .then(|| {
-                crate::inference::split::block_drafter_plan_in(&exec.shared_state.model_dir(model))
-            })
-            .flatten()
-            .filter(|plan| every_peer_sends_rows(exec, &plan.target_layers));
-        let head_layer = (!refused(&Guesser::refusal_key(By::Head, model)) && head_planned(&meta))
-            .then(|| meta.block_count.checked_sub(1))
-            .flatten()
-            .filter(|&layer| every_peer_sends_rows(exec, &[layer]));
+        let block = (!refused(
+            &exec.shared_state,
+            &exec.request.model_id,
+            &Guesser::refusal_key(By::Block, model),
+        ))
+        .then(|| {
+            crate::inference::split::block_drafter_plan_in(&exec.shared_state.model_dir(model))
+        })
+        .flatten()
+        .filter(|plan| every_peer_sends_rows(exec, &plan.target_layers));
+        let head_layer = (!refused(
+            &exec.shared_state,
+            &exec.request.model_id,
+            &Guesser::refusal_key(By::Head, model),
+        ) && head_planned(&meta))
+        .then(|| meta.block_count.checked_sub(1))
+        .flatten()
+        .filter(|&layer| every_peer_sends_rows(exec, &[layer]));
         if block.is_none() && head_layer.is_none() {
             return None;
         }
@@ -827,12 +891,7 @@ impl SplitBlockDrafter {
                 // Absent on its first ask: not loaded beside the segment, so
                 // the next replies ask none of its rows for a while.
                 if first_ask && matches!(e, SwarmError::ServiceUnavailable(_)) {
-                    if let Ok(mut refused) = refused_lately().lock() {
-                        refused.insert(
-                            Guesser::refusal_key(by, &exec.request.model_id.0),
-                            std::time::Instant::now(),
-                        );
-                    }
+                    note_refusal(by, &exec.request.model_id.0);
                 }
                 *self.slot(by) = None;
             }
@@ -1182,6 +1241,36 @@ fn choose(block: Choice, head: Choice) -> By {
 mod tests {
     use super::*;
     use crate::inference::dsd_controller::{CheckReach, FIRST_BLOCK_GUESSES, FIRST_PROBE_AFTER};
+
+    /// **A guesser's refusal stands only while the worker that gave it
+    /// serves the model** (#481 (1)): what a worker loads beside its layers is
+    /// fixed at its spawn, so one spawned after the refusal, or none at all,
+    /// is asked again. Red with the spawn condition dropped (the time alone
+    /// then holds it for ten minutes over a worker that may have the room).
+    #[test]
+    fn a_refusal_stands_only_while_the_worker_that_gave_it_lives() {
+        let now = std::time::Instant::now();
+        let back = |secs| {
+            now.checked_sub(std::time::Duration::from_secs(secs))
+                .expect("an instant that far back")
+        };
+        let refused_at = back(30);
+        let earlier = back(90);
+        assert!(refusal_stands(refused_at, Some(earlier), now));
+        assert!(
+            refusal_stands(refused_at, Some(refused_at), now),
+            "the worker that refused, at the refusal's instant"
+        );
+        assert!(
+            !refusal_stands(refused_at, Some(now), now),
+            "a worker spawned since"
+        );
+        assert!(!refusal_stands(refused_at, None, now), "no worker alive");
+        assert!(
+            !refusal_stands(earlier, Some(earlier), earlier + REFUSAL_HOLDS),
+            "the same worker, past the hold"
+        );
+    }
 
     /// By default a tree goes only for a reply read as prose (#437 (2)): the
     /// card rig wrote prose 12-30% faster with one and code 21-68% slower.

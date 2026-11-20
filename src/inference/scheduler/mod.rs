@@ -338,6 +338,15 @@ struct NodeCandidate {
     /// run's first layer, as every build before it. Read only through
     /// [`Self::layers_by_device`].
     processor_run_first: bool,
+    /// The share of a layer's decode a token spends reading routed experts
+    /// ([`experts_share_for`]) — what a layer of a mixture-of-experts model
+    /// beside the card reads on the processor while the card runs the rest:
+    /// its loader keeps such a layer ON the card with its experts in the
+    /// machine's memory (`process_pool::card_split`, #138 (3)). 0 for a dense
+    /// model, whose layer beside the card is all processor work. The same for
+    /// every candidate of one model. Read only through
+    /// [`Self::decode_ms_by_device`].
+    experts_share: f32,
     /// A worker of ANOTHER model holds memory on this peer that it does not
     /// give way yet (`NodeCapability::room_held_by_other_models`): room it may
     /// have again shortly, so a refusal short of this peer's room is reported
@@ -465,6 +474,35 @@ pub(crate) fn layer_work_for(state: &SharedState, model_id: &ModelId) -> f32 {
         .gguf_meta_for(model_id)
         .and_then(|meta| meta.active_bytes_per_layer());
     active.map_or(1.0, layer_work_from_bytes)
+}
+
+/// The share of a layer's decode a token spends reading routed experts —
+/// [`NodeCandidate::experts_share`] of every candidate for `model_id`, off its
+/// header (`GgufTensorMeta::active_expert_share`). A layer of a
+/// mixture-of-experts model beside a card keeps its attention, router and
+/// shared expert on the card and only its routed experts in the machine's
+/// memory (`process_pool::card_split` chooses it whenever the rest fits),
+/// so the processor reads only the experts a token is routed to — priced as
+/// a whole processor layer, Qwen3.6-35B-A3B on a 3060 holding it whole read
+/// 1.39 ms a layer where it delivers ~0.7, and the hand-off that ran 35 tok/s
+/// lost to a 4.5 tok/s split (FUTURE_WORK #481 (1), 2026-11-19). Prior art:
+/// Fiddler (Kamahori et al. 2024, arXiv 2402.07033) keeps the non-expert
+/// weights on the card and prices an expert in system memory as the
+/// processor reading its weights once a token; llama.cpp's `--n-cpu-moe` is
+/// the same layout. 0 (every layer beside a card priced as the processor's,
+/// as before) for a dense model, a header this node does not hold, or under
+/// `SWARMLLM_MOE_BESIDE_PRICE=processor` (the A/B switch, read once).
+pub(crate) fn experts_share_for(state: &SharedState, model_id: &ModelId) -> f32 {
+    static AS_PROCESSOR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *AS_PROCESSOR
+        .get_or_init(|| std::env::var("SWARMLLM_MOE_BESIDE_PRICE").is_ok_and(|v| v == "processor"))
+    {
+        return 0.0;
+    }
+    state
+        .gguf_meta_for(model_id)
+        .and_then(|meta| meta.active_expert_share())
+        .map_or(0.0, |share| share as f32)
 }
 
 /// What one token of a prompt weighs crossing to a segment, in bytes: the
@@ -724,9 +762,34 @@ impl NodeCandidate {
         if beside == 0 {
             return self.prior_ms_per_layer();
         }
-        (first as f32 * self.prior_ms_per_layer()
-            + beside as f32 * self.processor_prior_ms_per_layer())
-            / (first + beside) as f32
+        let (card, processor) = self.decode_ms_by_device(range, ahead);
+        (card + processor) / (first + beside) as f32
+    }
+
+    /// A token's decode time over `range` at the priors, in ms, as (on the
+    /// card, on the processor) — `ahead` as [`Self::layers_by_device`]. A
+    /// layer beside the card is the processor's, except a mixture-of-experts
+    /// layer's: its card reads all but the routed experts' share
+    /// ([`Self::experts_share`]), its processor that share (#481 (1)). The ONE
+    /// split of a range's decode by device: [`Self::prior_ms_per_layer_over`]
+    /// sums it, `parallax::prompt_speedup_over` reads each part at its own
+    /// device's prompt ratio.
+    pub(super) fn decode_ms_by_device(&self, range: (u32, u32), ahead: u32) -> (f32, f32) {
+        let (first, beside) = self.layers_by_device(range, ahead);
+        let card_layer = self.prior_ms_per_layer();
+        let processor_layer = self.processor_prior_ms_per_layer();
+        let on_card = first as f32 * card_layer;
+        let share = self.experts_share.clamp(0.0, 1.0);
+        if share > 0.0 {
+            // On the card with its routed experts in the machine's memory.
+            (
+                on_card + beside as f32 * card_layer * (1.0 - share),
+                beside as f32 * processor_layer * share,
+            )
+        } else {
+            // A dense layer beside the card is the processor's whole.
+            (on_card, beside as f32 * processor_layer)
+        }
     }
 
     /// Layers of NEW memory this candidate needs to run `range` — its width,
@@ -5430,6 +5493,7 @@ impl PipelineScheduler {
         let ceiling_curve = std::cell::OnceCell::new();
         // One model, one weight per layer, for every candidate (#250).
         let layer_work = layer_work_for(&self.shared_state, &manifest.id);
+        let experts_share = experts_share_for(&self.shared_state, &manifest.id);
         let activation_bytes_per_token =
             activation_bytes_per_token_for(&self.shared_state, &manifest.id);
 
@@ -6289,6 +6353,7 @@ impl PipelineScheduler {
                     region_score,
                     est_tokens_per_sec,
                     layer_work,
+                    experts_share,
                     activation_bytes_per_token,
                     stated_ms_per_layer: stated_decode_ms_per_layer(
                         reported.as_ref().and_then(|r| r.decode_us_per_layer),
@@ -6396,6 +6461,9 @@ impl PipelineScheduler {
                 // What one of this model's layers weighs in 7B-reference
                 // layers (#250); 1.0 = priced as before, or unknown.
                 layer_work = c.layer_work,
+                // A mixture-of-experts layer beside the card: the share its
+                // processor reads (#481 (1)); 0 = all processor work.
+                experts_share = c.experts_share,
                 // The peer's own timing of this model, per layer (#3 (f)):
                 // `None` = priced from the stated speed alone, as before.
                 stated_ms_per_layer = ?c.stated_ms_per_layer,

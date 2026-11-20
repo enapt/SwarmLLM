@@ -1032,7 +1032,7 @@ failure streak, `counted_as` from day one), validated (finite, inside the clamps
 a rig that restarts the node between two identical runs (`tier_1119p` against `tier_1119n` is the shape).
 
 #### #481 — A peer that holds a popular model whole was passed over for a split through it 8x slower
-`P1` · routing · **PARTIAL: (1) priced in 0.3.301 but the hand-off still not chosen after a split; (3a) fixed in 0.3.301; (5) partly (every request answered, an 8 GB card's tail still on the processor); (4) diagnosable; (2), (3b), (3c) open** — 2026-11-19 · history: #3 (j3), #3 (j4), #469, #10, #458
+`P1` · routing · **PARTIAL: (1) FIXED on main 2026-11-20 (the yield read off the first segment's worker, a card-held MoE layer priced by the experts it reads); (3a) fixed in 0.3.301; (5) partly (every request answered, an 8 GB card's tail still on the processor); (4) diagnosable; (2), (3b), (3c) open** — 2026-11-19 · history: #3 (j3), #3 (j4), #469, #10, #458
 
 > Seen on the live node 2026-11-19 14:54-15:00Z (v0.3.300, overnight tier run `~/swarmllm-gate/tier_1119n`):
 > Qwen3.6-35B-A3B, the Australian RTX 3060 `aa3d1e66` (132 ms) holds it whole and ran it whole at 35-36 tok/s
@@ -1087,6 +1087,25 @@ a rig that restarts the node between two identical runs (`tier_1119p` against `t
 > "layer-wise" hybrids of that shape (DALI, arXiv 2602.03495) — so a card-held MoE layer's prior is its card part
 > plus the ACTIVE experts' bytes over the processor's bandwidth (`mem_bandwidth::measured_gbps`), not a whole
 > processor layer.
+> **FIXED on main 2026-11-20, both halves.** (a) `pipeline::split_yield_prior` counts the file's guessers only while
+> `block_draft::a_guesser_may_answer` — the guess head, or the block drafter where its file is on disk, not refused
+> by the worker now serving the first segment: the refusals `SplitBlockDrafter::for_plan` already read, so the
+> price and the reply agree, and no new worker message. A refusal now stands only while the worker that gave it
+> lives (`block_draft::refusal_stands` ← `ModelProcessPool::live_worker_spawned_at`; a worker attaches its guessers
+> only at load). With none, the split is priced at a token a round and never explored at 8. (b)
+> `NodeCandidate::decode_ms_by_device` prices a MoE layer beside a card as card × (1 − s) + processor × s, s the
+> routed experts' share of a token's reads (`GgufTensorMeta::active_expert_share`: 0.281 for this file) — no wire
+> field, since `card_split` keeps such a layer on the card with its experts in memory; A/B
+> `SWARMLLM_MOE_BESIDE_PRICE=processor`. **Measured 2026-11-20 05:45-05:48Z (`~/swarmllm-gate/tier_1120b`, main's
+> card build, uptime 30 h)**: every candidate carried `experts_share=0.281`; Australia whole priced at
+> `cost_compute_ms` 3,333 for 128 passes (26 ms a token) against 7,134 the night before — it then delivered 27-28 ms
+> a token: 33.9 tok/s (code, after its 70.8 s cold load), 37.4 (prose), 36.3 (code), all three asks handed over
+> whole, against 4.2-4.5 tok/s on the split at `tier_1119r`. ⚠ What that run does NOT show: this node no longer
+> holds the file's part 0 (given back 2026-11-19), so the forced split warm-up failed ("no reachable node holds
+> layer 0") and no split was possible except through Italy's processor (299 s cold) — Australia whole was the only
+> route either price could choose. (b) is checked against a known answer (the delivered time); (a) only by its unit
+> tests (`a_split_whose_worker_refused_its_guessers_is_priced_at_a_round_a_token`,
+> `a_refusal_stands_only_while_the_worker_that_gave_it_lives`), each red with its half off.
 >
 > (2) **Measured and set aside 2026-11-19 evening — the load was not what passed Australia's whole run over.**
 > Australia's split worker held [14,40) (again [12,40), then [8,40)), so its whole run carried `cold_load_ms` (19,820 of

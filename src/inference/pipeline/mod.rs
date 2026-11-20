@@ -1762,7 +1762,11 @@ fn drafter_may_guess_for(state: &SharedState, model_id: &ModelId) -> bool {
 /// before this node has measured enough of them (`split_rounds::YieldPrior`,
 /// FUTURE_WORK #3 (j)): the drafter's prior where a drafter may guess for it
 /// AND one held here would ([`drafter_to_leave_room_for`], the planner's own
-/// choice of drafter) — no prior otherwise, one round a token, as before.
+/// choice of drafter), or the file's own guessers beside the first segment
+/// would ([`split_guess_head_here`]) and the worker serving it has not refused
+/// both (`block_draft::a_guesser_may_answer`, #481 (1): what is RUNNING
+/// first, a prior only for what could run — SmartSpec, arXiv 2406.14066) —
+/// no prior otherwise, one round a token, as before.
 /// The router sets it on the plan beside [`request_may_guess_ahead`]
 /// (`PromptPlan::with_guessing_ahead`). A/B `SWARMLLM_SPLIT_YIELD_PRIOR=none`
 /// (read once): no prior anywhere.
@@ -1794,7 +1798,8 @@ pub(crate) fn split_yield_prior(
     }
     if !((drafter_may_guess_for(state, model_id)
         && drafter_to_leave_room_for(state, model_id).is_some())
-        || split_guess_head_here(state, model_id))
+        || (split_guess_head_here(state, model_id)
+            && block_draft::a_guesser_may_answer(state, model_id)))
     {
         return YieldPriors::both(YieldPrior::None);
     }
@@ -5087,6 +5092,72 @@ mod tests {
         use crate::daemon::state::split_rounds::YieldPrior;
         let state = make_test_state();
         let mid = ModelId("qwen3.8-27b-q4-k-m".into());
+        a_27b_with_its_own_guess_head(&state, &mid);
+        let hold = |index: u32| hold_here(&state, &mid, index);
+        let prior = || split_yield_prior(&state, &mid, uuid::Uuid::new_v4()).here;
+        assert!(!split_guess_head_here(&state, &mid), "nothing held");
+        hold(3);
+        assert!(
+            !split_guess_head_here(&state, &mid),
+            "the head's part without layer 0's: the head never runs in a split from here"
+        );
+        hold(0);
+        assert!(split_guess_head_here(&state, &mid));
+        assert_ne!(
+            prior(),
+            YieldPrior::None,
+            "a split the head guesses for starts from a prior, not a round a token"
+        );
+    }
+
+    /// **A split whose first segment's worker refused its guessers is priced
+    /// at a round a token while that worker lives** (#481 (1), 2026-11-20):
+    /// the 35B-A3B's first segment loaded with no room for its guess head or
+    /// block drafter, both refused on the first reply, and every later split
+    /// was still priced from the drafter's prior (1.21-1.86 tokens a round,
+    /// 8 when explored) — 159 rounds for 160 tokens. A worker spawned after
+    /// the refusal, or none, may have the room, so the prior comes back. Red
+    /// with `block_draft::a_guesser_may_answer` dropped from
+    /// `split_yield_prior`'s gate.
+    #[tokio::test]
+    async fn a_split_whose_worker_refused_its_guessers_is_priced_at_a_round_a_token() {
+        use crate::daemon::state::split_rounds::YieldPrior;
+        let state = make_test_state();
+        // Its own id: the refusals are one map for the process.
+        let mid = ModelId("qwen3.8-27b-refused-guessers".into());
+        a_27b_with_its_own_guess_head(&state, &mid);
+        assert!(hold_here(&state, &mid, 0) && hold_here(&state, &mid, 3));
+        let prior = || split_yield_prior(&state, &mid, uuid::Uuid::new_v4()).here;
+        let before = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(1))
+            .expect("a second back");
+        state
+            .model_process_pool
+            .with_a_fake_worker_spawned(&mid, before)
+            .await;
+        assert_ne!(prior(), YieldPrior::None, "nothing refused yet");
+
+        block_draft::note_refusal(block_draft::By::Head, &mid.0);
+        assert_eq!(
+            prior(),
+            YieldPrior::None,
+            "the worker serving the first segment has no guess head (and no \
+             block drafter is on disk): a token a round"
+        );
+        state
+            .model_process_pool
+            .with_a_fake_worker_spawned(&mid, std::time::Instant::now())
+            .await;
+        assert_ne!(
+            prior(),
+            YieldPrior::None,
+            "a worker spawned since the refusal may have the room"
+        );
+    }
+
+    /// Registers a Qwen3.8-27B-shaped header and manifest for `mid`: 64 layers
+    /// in parts `[0,1)`, `[1,63)`, `[63,64)` and the guess head's `[64,65)`.
+    fn a_27b_with_its_own_guess_head(state: &SharedState, mid: &ModelId) {
         let layers = 64usize;
         let mut tensors = std::collections::HashMap::new();
         for name in [
@@ -5161,29 +5232,17 @@ mod tests {
             mmproj: None,
             context_length: None,
         });
-        let hold = |index: u32| {
-            state.model_registry.record_shard_holder(
-                ShardId {
-                    model_id: mid.clone(),
-                    index,
-                },
-                state.identity.node_id().clone(),
-            )
-        };
-        let prior = || split_yield_prior(&state, &mid, uuid::Uuid::new_v4()).here;
-        assert!(!split_guess_head_here(&state, &mid), "nothing held");
-        hold(3);
-        assert!(
-            !split_guess_head_here(&state, &mid),
-            "the head's part without layer 0's: the head never runs in a split from here"
-        );
-        hold(0);
-        assert!(split_guess_head_here(&state, &mid));
-        assert_ne!(
-            prior(),
-            YieldPrior::None,
-            "a split the head guesses for starts from a prior, not a round a token"
-        );
+    }
+
+    /// Records this node as holding part `index` of `mid`; whether it was new.
+    fn hold_here(state: &SharedState, mid: &ModelId, index: u32) -> bool {
+        state.model_registry.record_shard_holder(
+            ShardId {
+                model_id: mid.clone(),
+                index,
+            },
+            state.identity.node_id().clone(),
+        )
     }
 }
 

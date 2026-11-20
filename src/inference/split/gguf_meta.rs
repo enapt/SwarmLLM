@@ -1247,6 +1247,39 @@ impl GgufTensorMeta {
         self.bytes_per_layer(false)
     }
 
+    /// The share of [`Self::active_bytes_per_layer`] a token reads from
+    /// routed expert stacks — the tensors [`routed_expert_bytes`] counts, at
+    /// `expert_used_count / expert_count` — 0 for a dense model. What a layer
+    /// keeping its experts in the machine's memory (`process_pool::card_split`,
+    /// #138 (3)) reads on the processor while its card reads the rest, so the
+    /// route planner prices such a layer by it (FUTURE_WORK #481 (1); Fiddler,
+    /// arXiv 2402.07033). `None` where the active figure is.
+    pub fn active_expert_share(&self) -> Option<f64> {
+        let active = self.active_bytes_per_layer()?;
+        if active <= 0.0 || self.block_count == 0 {
+            return None;
+        }
+        const ROUTED: [&str; 4] = [
+            ".ffn_gate_exps.weight",
+            ".ffn_up_exps.weight",
+            ".ffn_gate_up_exps.weight",
+            ".ffn_down_exps.weight",
+        ];
+        let routed: f64 = self
+            .tensors
+            .iter()
+            .filter(|(name, _)| {
+                name.starts_with("blk.") && ROUTED.iter().any(|t| name.ends_with(t))
+            })
+            .map(|(_, loc)| loc.size as f64)
+            .sum();
+        if routed == 0.0 {
+            return Some(0.0);
+        }
+        let used = self.expert_used_count.min(self.expert_count) as f64 / self.expert_count as f64;
+        Some((routed * used / self.block_count as f64 / active).clamp(0.0, 1.0))
+    }
+
     fn bytes_per_layer(&self, routed_share_only: bool) -> Option<f64> {
         if self.block_count == 0 {
             return None;
@@ -2221,6 +2254,22 @@ mod active_bytes_tests {
         assert_eq!(m.active_bytes_per_layer(), Some(300.0));
         // Held, every expert counts: (100 + 1600) × 2 + 200 = 3600, over 2.
         assert_eq!(m.stored_bytes_per_layer(), Some(1_800.0));
+        // The routed experts' share of what a token reads: 100 of the 300
+        // a layer (FUTURE_WORK #481 (1)) — what a layer keeping its experts in
+        // the machine's memory reads on the processor.
+        assert_eq!(m.active_expert_share(), Some(100.0 / 300.0));
+    }
+
+    /// A dense model's layer reads no routed experts, so a layer of it beside
+    /// a card is all processor work (#481 (1)).
+    #[test]
+    fn a_dense_layer_reads_no_routed_experts() {
+        let m = meta(
+            1,
+            (0, 0),
+            &[("output.weight", 50), ("blk.0.attn_q.weight", 100)],
+        );
+        assert_eq!(m.active_expert_share(), Some(0.0));
     }
 
     /// A dense model holds exactly what a token reads.

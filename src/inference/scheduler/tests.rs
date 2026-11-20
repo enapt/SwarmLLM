@@ -1342,6 +1342,58 @@ fn merge_contiguous_segments_same_node() {
     assert_eq!(merged[0].layer_range, (0, 4));
 }
 
+/// **A mixture-of-experts layer beside the card is priced as its card part
+/// plus the processor reading the experts a token is routed to** (#481 (1),
+/// Fiddler, arXiv 2402.07033): its loader keeps such a layer on the card with
+/// only its routed experts in the machine's memory. Priced as a whole
+/// processor layer, Qwen3.6-35B-A3B on a 3060 holding it whole read 1.39 ms a
+/// layer where it delivers ~0.7, and its 35 tok/s hand-off lost to a 4.5 tok/s
+/// split (2026-11-19). A dense layer beside the card stays the processor's
+/// whole. Red with `decode_ms_by_device`'s mixture-of-experts arm dropped.
+#[test]
+fn a_moe_layer_beside_the_card_is_priced_by_the_experts_a_token_reads() {
+    let mut c = simple_candidate(1, vec![(0, 40)]);
+    c.has_gpu = true;
+    c.est_tokens_per_sec = 45.0;
+    c.processor_tokens_per_sec = 6.0;
+    c.layer_work = 0.41;
+    c.card_layers = Some(15);
+    let card = c.prior_ms_per_layer();
+    let processor = c.processor_prior_ms_per_layer();
+    assert!(
+        processor > 5.0 * card,
+        "fixture: {processor} against {card}"
+    );
+
+    let dense = c.prior_ms_per_layer_over((0, 40), 0);
+    let expected_dense = (15.0 * card + 25.0 * processor) / 40.0;
+    assert!(
+        (dense - expected_dense).abs() < 1e-4,
+        "{dense} against {expected_dense}"
+    );
+
+    c.experts_share = 0.45;
+    let moe = c.prior_ms_per_layer_over((0, 40), 0);
+    let beside = card * 0.55 + processor * 0.45;
+    let expected_moe = (15.0 * card + 25.0 * beside) / 40.0;
+    assert!(
+        (moe - expected_moe).abs() < 1e-4,
+        "{moe} against {expected_moe}"
+    );
+    assert!(
+        moe < 0.7 * dense && moe > card,
+        "between the card's {card} and the dense blend's {dense}: {moe}"
+    );
+    let (on_card, on_processor) = c.decode_ms_by_device((0, 40), 0);
+    assert!(
+        (on_processor - 25.0 * processor * 0.45).abs() < 1e-3,
+        "the processor reads only the routed experts' share: {on_processor}"
+    );
+    assert!((on_card + on_processor - 40.0 * moe).abs() < 1e-3);
+    // A range the card holds whole is the card's, experts or not.
+    assert!((c.prior_ms_per_layer_over((0, 15), 0) - card).abs() < 1e-6);
+}
+
 /// Minimal candidate for the greedy tests — everything neutral so the field
 /// under test is the only thing that varies.
 fn simple_candidate(byte: u8, ranges: Vec<(u32, u32)>) -> NodeCandidate {
@@ -1361,6 +1413,7 @@ fn simple_candidate(byte: u8, ranges: Vec<(u32, u32)>) -> NodeCandidate {
         region_score: 1.0,
         est_tokens_per_sec: 0.0,
         layer_work: 1.0,
+        experts_share: 0.0,
         activation_bytes_per_token: parallax::ACTIVATION_BYTES_PER_TOKEN as f32,
         observed_latency_ms_per_layer: None,
         observed_latency_timed_on: None,
@@ -1841,6 +1894,7 @@ fn greedy_assign_multi_range_candidate() {
             region_score: 1.0,
             est_tokens_per_sec: 0.0,
             layer_work: 1.0,
+            experts_share: 0.0,
             activation_bytes_per_token: parallax::ACTIVATION_BYTES_PER_TOKEN as f32,
             observed_latency_ms_per_layer: None,
             observed_latency_timed_on: None,
@@ -1893,6 +1947,7 @@ fn greedy_assign_multi_range_candidate() {
             region_score: 0.7,
             est_tokens_per_sec: 0.0,
             layer_work: 1.0,
+            experts_share: 0.0,
             activation_bytes_per_token: parallax::ACTIVATION_BYTES_PER_TOKEN as f32,
             observed_latency_ms_per_layer: None,
             observed_latency_timed_on: None,
@@ -2957,6 +3012,7 @@ fn cost_cand(
         region_score: 1.0,
         est_tokens_per_sec: 0.0,
         layer_work: 1.0,
+        experts_share: 0.0,
         activation_bytes_per_token: parallax::ACTIVATION_BYTES_PER_TOKEN as f32,
         observed_latency_ms_per_layer: ms_per_layer,
         observed_latency_timed_on: None,
@@ -4376,6 +4432,7 @@ fn one_node_is_not_made_standby_for_more_layers_than_it_can_run() {
         region_score: 1.0,
         est_tokens_per_sec: 5.0,
         layer_work: 1.0,
+        experts_share: 0.0,
         activation_bytes_per_token: parallax::ACTIVATION_BYTES_PER_TOKEN as f32,
         observed_latency_ms_per_layer: None,
         observed_latency_timed_on: None,
@@ -4491,6 +4548,7 @@ fn a_node_with_room_still_stands_in_for_every_segment() {
         region_score: 1.0,
         est_tokens_per_sec: 5.0,
         layer_work: 1.0,
+        experts_share: 0.0,
         activation_bytes_per_token: parallax::ACTIVATION_BYTES_PER_TOKEN as f32,
         observed_latency_ms_per_layer: None,
         observed_latency_timed_on: None,
@@ -4606,6 +4664,7 @@ fn a_standby_is_chosen_by_cost_not_by_ping() {
         region_score: 1.0,
         est_tokens_per_sec: tps,
         layer_work: 1.0,
+        experts_share: 0.0,
         activation_bytes_per_token: parallax::ACTIVATION_BYTES_PER_TOKEN as f32,
         observed_latency_ms_per_layer: None,
         observed_latency_timed_on: None,

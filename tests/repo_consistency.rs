@@ -9450,6 +9450,7 @@ const WORKER_MAP_READERS_THAT_SEND_NO_WORK: &[&str] = &[
     "make_room_for_a_longer_prompt",
     "retirement_decision",
     "holds_range",
+    "live_worker_spawned_at",
     "note_decode_step",
     "classify_worker_error",
     "context_fits",
