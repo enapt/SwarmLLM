@@ -4399,7 +4399,7 @@ the measurement that can kill it), `docs/plans/split_speculation.md` (guess-and-
 
 #### #488 — A split's head that runs part of its layers on the processor puts its drafter in system memory, where a guess takes 54 ms
 
-**P2, opened 2026-11-20 evening (Llama 3.3 70B, `~/swarmllm-gate/tier_1120c`).** The 70B ran here `[0,25)` (10 layers on
+**P3 (lowered the same evening by its probe, below); opened 2026-11-20 evening (Llama 3.3 70B, `~/swarmllm-gate/tier_1120c`).** The 70B ran here `[0,25)` (10 layers on
 this 8 GB card, 15 on the processor) + Australia `[25,80)`, 2.5-3.6 tok/s. Its drafter, Llama 3.2 3B, ran from system
 memory: `draft_ms_each=54`, `drafter_on_card=false`, 104 of ~163 guesses kept a reply (`alpha` 0.80), and the γ
 controller held ~2 guesses a round (`check_fixed_ms` 813, 64 ms a position). The planner had priced it on the card
@@ -4421,6 +4421,15 @@ where the drafter landed. Kill it if an A/B on the 70B pair reads under +10%. Pr
 server sizes the draft model's offload apart from the target's (`-ngld` / `--gpu-layers-draft` beside `-ngl`), and its
 guidance for a partly offloaded target is the draft fully on the GPU; vLLM loads the drafter beside the target before
 it sizes the caches (`GPUModelRunner.load_model` → `drafter.load_model`, then `determine_available_memory`).
+
+**Probed 2026-11-20 19:47-19:50Z — the arrangement does not fit this pair** (`~/swarmllm-gate/probe488`, an UNCOMMITTED
+patch: a split's card room less `SWARMLLM_PROBE488_LEAVE_MB`=2800 in `hybrid::split_room_bytes`, the drafter judged by
+the card as it stands in `guest_fit_beside` — `PROBE488 … fit=OnCard` fired). This computer's fresh run fell 26 → 20
+layers (`fresh_run_withdrawn`): the head's processor layers already take ~8.5 GB of system memory
+(`plan_machine_mb=8485`), which cannot take the card layers the drafter displaces, so the 70B had NO route (Australia
+refused the rest; 2 of 2 asks `HoldersDeclined`, the other full holder cooling). The planner's fallback was right here.
+What is left: only where system memory takes the displaced card layers, and the planner must weigh that fit itself (its
+cut already computes `fresh_run_withdrawn`). No gain measured anywhere; re-open with a machine that has the memory.
 
 #### #469 — A split's yield is one figure for every kind of reply, so a prose reply can be planned onto a split slower than local
 `P2` · perf-split · **PARTIAL** (per-kind split yield built; this node's whole run per kind, mid-reply switching and per-conversation priors open) — 2026-11-17 · evidence: `faster_than_local.md` § 9 ("A second far card") · history: #3 (j), #428
