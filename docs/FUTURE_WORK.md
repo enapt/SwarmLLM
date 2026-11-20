@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #488**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #489**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -4396,6 +4396,31 @@ Designs: `docs/plans/large_model_splits.md` (the target, the bound and the build
 the measurement that can kill it), `docs/plans/split_speculation.md` (guess-and-check across a split),
 `docs/plans/wan_parallel.md` (parallelise the reply, not the token), `docs/plans/regional_pipelines.md`
 (placement by distance, #192), `docs/plans/faster_than_local.md` (the ranked list).
+
+#### #488 — A split's head that runs part of its layers on the processor puts its drafter in system memory, where a guess takes 54 ms
+
+**P2, opened 2026-11-20 evening (Llama 3.3 70B, `~/swarmllm-gate/tier_1120c`).** The 70B ran here `[0,25)` (10 layers on
+this 8 GB card, 15 on the processor) + Australia `[25,80)`, 2.5-3.6 tok/s. Its drafter, Llama 3.2 3B, ran from system
+memory: `draft_ms_each=54`, `drafter_on_card=false`, 104 of ~163 guesses kept a reply (`alpha` 0.80), and the γ
+controller held ~2 guesses a round (`check_fixed_ms` 813, 64 ms a position). The planner had priced it on the card
+(`Leaving room beside this node's layers for the drafter … room_for=Some(6) room_without_it=Some(12)`), but that cut
+found no route (Australia cannot take 74 layers) and the uncut plan ran; then `guest_fit_beside` sends a guest to
+system memory whenever the plan's layers here exceed the card layers that fit beside it (`adds > room`: 25 > 6) —
+always so for a card/processor plan, whose split fills the card (`hybrid::split_room_bytes`).
+
+**The arrangement nobody weighs**: the same 25 layers with the drafter's card charge left free — ~6 target layers on the
+card, ~19 on the processor (+4 × ~16 ms a check forward) and the 3B on the card (a guess in a few ms instead of 54). From
+the measured controller figures, γ 4-5 instead of ~2: est. ~+20% a reply on this pair. INFERRED, not measured.
+
+**Design to weigh** (after the release; card-memory placement): the choice is the plan's, made once and kept by every
+path — the planner (`candidates_leaving_room_for_the_drafter` keeps the uncut range and moves only the card share),
+`guest_fit_beside` (`OnCard` where the plan left the room), and the target's spawn — its split sizing AND its refit
+(#365) leaving the guest's card charge free, as a spawn leaves the plan's other ranges (`PlannedHere`, #481 (5)). A warm
+target already filling the card keeps it (no reload mid-conversation, #93); the γ controller's draft price follows
+where the drafter landed. Kill it if an A/B on the 70B pair reads under +10%. Prior art: llama.cpp's speculative
+server sizes the draft model's offload apart from the target's (`-ngld` / `--gpu-layers-draft` beside `-ngl`), and its
+guidance for a partly offloaded target is the draft fully on the GPU; vLLM loads the drafter beside the target before
+it sizes the caches (`GPUModelRunner.load_model` → `drafter.load_model`, then `determine_available_memory`).
 
 #### #469 — A split's yield is one figure for every kind of reply, so a prose reply can be planned onto a split slower than local
 `P2` · perf-split · **PARTIAL** (per-kind split yield built; this node's whole run per kind, mid-reply switching and per-conversation priors open) — 2026-11-17 · evidence: `faster_than_local.md` § 9 ("A second far card") · history: #3 (j), #428
