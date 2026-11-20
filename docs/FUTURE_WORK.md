@@ -2528,6 +2528,18 @@ than `K_VALUE` (20) — every table in a swarm this size, so every insert is a b
 are ours: fewer RE-inserts (our removals: `identify.rs` ~188 a cut-off peer, `dht.rs` `leave_the_table_if_out_of_reach`
 and `forget_address_answered_by_another`), smaller answers (~2.7 KB for ~6 peers ≈ 450 B a peer: the addresses we let
 into the table), or a vendored kad exposing the setter (a fourth vendored crate, with its own guard).
+**Read on 0.3.301, 2026-11-20 06:19:30-06:47:36Z (sampler `~/swarmllm-gate/idle1120/`, `diff.py`; the live node 31-59
+min after a start, 7 peers, no request): out 4.4 MB/h, in 4.6 MB/h** — each 5-min slice 3.8-5.1 out — a third of the
+11-19 reading on 0.3.300 and under the README's earlier "under 10 MB an hour". Out by protocol: gossip 3.0 MB/h
+(`swarm/models` 1.07, `swarm/health` 0.94 — 947 sends for our 60 pings, so other nodes' pings forwarded, each received
+2.1 times; control ~0.7), Kademlia ANSWERS 0.57 MB/h (`find_node` 3.5 a minute against 29.6 on 11-19), direct 0.7.
+This node published 6 messages on `swarm/models` in the half hour (one parts list, five capabilities). Not yet read:
+whether 11-19's Kademlia half was a peer's provider republish (every 4 h, ~150 parts each: a walk plus an
+`add_provider` per part — this node's own start opened 2,435 Kademlia streams in 29 min, the same shape) rather than
+bootstraps; a second, hour-long window runs 08:51-09:51Z (`w2_*.json`). And the start costs ~13 MB once: 29 manifests
+(1.6 MB) flood-published to every peer in the first round with peers — the day's repeat, or the short window chosen
+while a connected peer's capability had not yet arrived (`manifest_quiet_window` counts it as taking no digests);
+which one is not readable at info level (the round's line is DEBUG).
 
 #### #169 — Connection churn on multi-interface hosts: only the LAN dial is deterministic
 `P3` · network · **PARTIAL** — 2026-07-25 · history: archive § "Connection churn on multi-interface hosts — deterministic dialer partial", gotcha #353
