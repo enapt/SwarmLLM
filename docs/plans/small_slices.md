@@ -105,6 +105,14 @@ budget; prose profile, the 14B pair's measured prices; `flow_ring` with one far 
   measured prices the far slice already sets the pace (~30 ms a forward against the head's ~26).
 - Caveat: the sim's walk advances at most one level a forward (the real flow three), so its CODE figures are
   capped (27.8 at 130 ms against 40-43 measured); prose is the calibrated one.
+- **1b: re-framed, not a replay.** Chunks WITHIN one block cannot beat the loop: every chunk is drafted from the
+  same anchor in one block forward, and the next block needs the verdict, so splitting the check into chunks only
+  overlaps a few rows' wire and compute. The 1.5-2x the research gave assumed the reply moves at the far's pace,
+  which needs the NEXT block drafted from the predicted end of this one — without the target's features for the
+  guessed positions (a block drafter reads them for committed positions only). That acceptance is unmeasured
+  anywhere. The check is offline, on Qwen3.5-9B whole here with its DFlash drafter (#428 stage 1's harness):
+  draft block k+1 from block k's predicted end with the features up to the last commit, and score it against the
+  greedy reply. Step 5 waits on it.
 
 ### Step 2 — BUILD: the guesser runs where the model's last layers are (Qwen 3.5 / 3.6 / 3.8 first)
 
