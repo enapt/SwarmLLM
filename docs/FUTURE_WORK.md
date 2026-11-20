@@ -926,6 +926,17 @@ the shape #481 (5) narrowed in 0.3.301 (a split that starts and finishes here le
 updates itself to 0.3.301; the error's own text names the layers and MB ("layers A..B of M need about N MB more than
 this node has left …"). Next: reproduce the shape from this node on 0.3.301 — Llama 3.3 70B is held here and by four
 peers, one of them a 16 GB laptop card.
+**Measured from this node on the published 0.3.301, 2026-11-20 01:58Z (`~/swarmllm-gate/tier_1120a`, its own route,
+two 128-token asks): 0 of 2, each in under a second — a different failure, same tier.** Planned here [0,20) + the
+Australian 12 GB 3060 [20,80) — the only holder that can be LAST; the strict pass found no route, so the plan took the
+peer "at its word" (`max_hostable_layers` 50 with our margin; face value ~60 + the head's 1.64). The peer's up-front
+weigh (`peer_load_refusal`) refused: its machine share of a fresh [20,80) is 25,862 MB against the swarm's RAM budget of
+22,120 MB — 54 layers from 20 would load. The re-plan then found NO chain ("room for all 80 of its layers between
+them, but not in pieces one chain can run": Australia 51, here all 28 it holds, Proxmox 7 of the 36 it holds), though
+here [0,28) + Proxmox [28,32) + Australia [32,80) (48) reads as feasible from those counts. Two defects, each
+stopping the 70B: (D1) the peer's face-value room exceeds what its own admission honours (#219/#447's invariant);
+(D2) the re-plan after an honest "54 from 20" finds no route. Both being traced (2026-11-20); the US laptop holding
+the 70B was not a candidate at all — a third question. Australia had restarted 8.5 min before (its update to 0.3.301).
 
 (c) **The shared 14B: `ModelIncompleteInSwarm`.** No change in 0.3.298..0.3.301 found that makes a correctly announced
 split read as incomplete. Producers: `SharedState::no_route_error` (no reachable holder of ANY part),
