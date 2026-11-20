@@ -1733,7 +1733,14 @@ peer list's `resident[].card_free_at_load_mb`). On the real link with v0.3.286 (
 read 10,814 MB and placed 47 of 48 layers, and NO reload happened in 12 requests: the narrowing that led to it (j8,
 j12) is gone, so the wait itself was not exercised there. **Open:** a reload after a real retirement on a far
 computer — `card_free_at_load_mb` near the free memory before it means the wait covered the lag; ~5.7 GB-like means
-not: read the INFO `DIAG: a stopped worker's card memory` lines where a node's log is at hand. Since `3d03afe9` the wait also ends
+not: read the INFO `DIAG: a stopped worker's card memory` lines where a node's log is at hand. **Seen again 2026-11-20
+(AU on v0.3.302, cause UNREAD):** the 27B forced here [0,21) → AU [21,64) — at 16-17Z AU advertised 39 of the 43 layers on
+its card and its worker took ~110 ms a step (`~/swarmllm-gate/split27_clock`); at 20:12-20:37Z it advertised 29-30 and took
+~350 ms (`~/swarmllm-gate/hold_query`, served ~400 ms). Between the two AU had served the 70B's [25,80) for this node
+(19:08-19:20Z, `tier_1120c`) and refused it at 19:49Z. Its `card_free_at_load_mb` was not captured and the worker had
+unloaded by 20:50Z (`resident []`), so whether a retirement's memory lag, an idle 70B worker or the owner's own use took
+the room is unknown. Since then `~/swarmllm-gate-common/ask_tier.py` records every peer's loaded ranges, `card_layers`
+and `card_free_at_load_mb` for the asked model after each ask (`peers_loaded` in `ASK_JSON`). Since `3d03afe9` the wait also ends
 once the release has settled short of three quarters (`Settled`, two readings within 32 MB of the steady run's
 first). **Closed 2026-11-14 (v0.3.287), the pre-release review's hypothesis (confidence ~45)**:
 a worker charged its card share at admission and stopped before its first message (it loads on that message)
@@ -8171,7 +8178,8 @@ grep `^| N |`).
   timed from a step's END (a prompt pass over 1 s came back with its hold spent). Re-measured
   (`~/swarmllm-gate/hold_query`, same pair, on/off/on, three asks each): this side 25/28 and 26/35 ms (median/p90)
   held vs 74/186 off, 13,570 and 13,506 pieces with 5 and 1 turns found busy, 0 driver events; replies +6-8%
-  (Australia served ~400 ms a step that hour against ~121 earlier, so the far side dominated).
+  (Australia served ~400 ms a step that hour against ~121 earlier: it held 29-30 of its 43 layers on its card against
+  39 earlier, so the far side's processor layers set the pace — #3 (j13)'s field note).
   Evidence: `docs/invariants/inference.md` § "A card between a split's forwards keeps its clocks".
 - #485 — `P1` — **A split whose chain ended on another computer never guessed (the Qwen 3.5 family).** Filed as "the
   guesser should run where the last layers are"; that premise was WRONG: the file's guess head beside the FIRST
