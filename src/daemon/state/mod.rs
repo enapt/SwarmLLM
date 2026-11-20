@@ -4033,7 +4033,10 @@ impl SharedState {
         if shedding_load || !has_peers {
             return local_fast_path_allowed(shedding_load, false, has_peers);
         }
-        let would_run_on_processor = self.model_process_pool.serves_on_cpu(model_id);
+        let would_run_on_processor = self.model_process_pool.serves_on_cpu(
+            model_id,
+            crate::inference::pipeline::requester_for_override(over),
+        );
         let allowed = local_fast_path_allowed(shedding_load, would_run_on_processor, has_peers);
         if !allowed && would_run_on_processor {
             tracing::debug!(

@@ -386,6 +386,8 @@ struct VramReclaimCandidate {
     model: ModelId,
     /// What admission has charged for it — the figure the budget is spent in.
     charge_mb: u64,
+    /// Idle as the request asking for the room sees it
+    /// ([`WorkerHandle::idle_secs_for`], #483 (a)).
     idle_secs: u64,
     /// A request is in flight against it right now.
     busy: bool,
@@ -609,6 +611,9 @@ enum Growth {
 /// for this model — is the real answer and needs per-model figures for both;
 /// `docs/FUTURE_WORK.md` carries it with the measurements that justify it.
 const VRAM_MAKE_ROOM_MIN_IDLE_SECS_DEFAULT: u64 = 5;
+
+/// [`WorkerHandle::owner_last_used`] before the owner's first request.
+const NEVER_USED: u64 = u64::MAX;
 
 /// How long a worker is idle before peers are told it would give way to
 /// another model's work (`ModelProcessPool::gives_way`, #447). One capability
@@ -1224,6 +1229,11 @@ struct WorkerHandle {
     /// 0 both before the first and for one registered in its first second.
     /// Read by [`ModelProcessPool::model_used_secs_ago`].
     ran_a_request: AtomicBool,
+    /// [`Self::last_used`] counting only THIS computer's owner's requests
+    /// ([`Requester::Owner`]), stamped at the same two moments; [`NEVER_USED`]
+    /// until the owner's first. What an owner's request reads as another
+    /// model's idle time ([`Self::idle_secs_for`], #483 (a)).
+    owner_last_used: AtomicU64,
     /// Has this worker been given anything that loads weights — a request
     /// ([`Self::register_response`]), a load ahead (`DaemonMsg::LoadRange`) —
     /// or reported a load (`WorkerMsg::ModelLoadTimed`, by the reader)? Until
@@ -2244,7 +2254,7 @@ struct ResponseGuard {
     /// WEAK: the stamp must not keep the worker alive. Its last owner's drop
     /// kills the process and frees its memory (`impl Drop for WorkerHandle`),
     /// and a reply's slot can outlive an evicted worker.
-    used_until_now: Option<std::sync::Weak<WorkerHandle>>,
+    used_until_now: Option<(std::sync::Weak<WorkerHandle>, Requester)>,
 }
 
 /// Claim `request_id` in `map` for a fresh attempt. Returns the new attempt's
@@ -2707,18 +2717,22 @@ impl WorkerHandle {
     /// Returns the guard plus the token displaced from the map, if any. A
     /// `Some` displaced token means another attempt is in flight under the
     /// same `request_id` — the caller has superseded it.
+    ///
+    /// `user` is whose request the slot serves, REQUIRED: an owner's use is
+    /// stamped apart ([`Self::idle_secs_for`], #483 (a)).
     fn register_response(
         self: &Arc<Self>,
         request_id: Uuid,
         tx: ResponseTx,
         cancel_on_drop: bool,
+        user: Requester,
     ) -> (ResponseGuard, Option<u64>) {
-        self.mark_used_now();
+        self.mark_used_now(user);
         self.ran_a_request.store(true, Ordering::Relaxed);
         // Before the request is sent: its first message may load weights.
         self.asked_to_load.store(true, Ordering::Release);
         let (mut guard, displaced) = self.register_unseen(request_id, tx, cancel_on_drop);
-        guard.used_until_now = Some(Arc::downgrade(self));
+        guard.used_until_now = Some((Arc::downgrade(self), user));
         (guard, displaced)
     }
 
@@ -2755,9 +2769,12 @@ impl WorkerHandle {
     /// This worker did work for a request just now: its idle time starts
     /// over ([`Self::idle_secs`]). A plain store, as the stamp always was: the
     /// clock only moves forward, and two stamps racing differ by a second.
-    fn mark_used_now(&self) {
-        self.last_used
-            .store(self.spawned_at.elapsed().as_secs(), Ordering::Relaxed);
+    fn mark_used_now(&self, user: Requester) {
+        let now = self.spawned_at.elapsed().as_secs();
+        self.last_used.store(now, Ordering::Relaxed);
+        if user == Requester::Owner {
+            self.owner_last_used.store(now, Ordering::Relaxed);
+        }
     }
 
     /// [`Self::register_response`] for a PEER's question
@@ -2811,6 +2828,33 @@ impl WorkerHandle {
             .saturating_sub(self.last_used.load(Ordering::Relaxed))
     }
 
+    /// How long this worker has gone unused as `asking`'s request sees it —
+    /// the idle time another model's request weighs before it may take the
+    /// card from this one ([`vram_reclaim_eligible`]).
+    ///
+    /// **The swarm sees every use; the owner sees only their own** (#483 (a)):
+    /// the contribution level caps what the SWARM may use of this computer,
+    /// never the owner (#266), so a model answering peers keeps the card from
+    /// another peer's model while it is in steady use, but not from the
+    /// owner's. Field report on 0.3.300 (2026-11-20): Gemma 4 12B on the
+    /// card, the owner's own 14B beside it partly on the processor at 5.1
+    /// tok/s against ~20 — a peer's use was inferred, never read in the log.
+    /// Never mid-reply: [`Self::in_use`] guards both readings (#93). A worker
+    /// the owner never used has been idle, to them, as long as it has existed,
+    /// as [`Self::idle_secs`] reads one nobody used.
+    fn idle_secs_for(&self, asking: Requester) -> u64 {
+        match asking {
+            Requester::Swarm => self.idle_secs(),
+            Requester::Owner => {
+                let residency = self.spawned_at.elapsed().as_secs();
+                match self.owner_last_used.load(Ordering::Relaxed) {
+                    NEVER_USED => residency,
+                    stamp => residency.saturating_sub(stamp),
+                }
+            }
+        }
+    }
+
     /// Did this node place the worker short of the card for want of its
     /// memory — on the processor, or split between the two? A split is only
     /// ever admission's answer to a card without room for the whole model
@@ -2857,8 +2901,12 @@ impl Drop for ResponseGuard {
         // would fail a request that is still perfectly healthy.
         self.responses
             .remove_if(&self.request_id, |_, (tok, _)| *tok == self.token);
-        if let Some(worker) = self.used_until_now.take().and_then(|w| w.upgrade()) {
-            worker.mark_used_now();
+        if let Some((worker, user)) = self
+            .used_until_now
+            .take()
+            .and_then(|(w, user)| w.upgrade().map(|w| (w, user)))
+        {
+            worker.mark_used_now(user);
         }
 
         // Still armed → the caller went away before a terminal reply arrived:
@@ -3078,21 +3126,33 @@ async fn dispatch_scheduler_group(pool: &Arc<ModelProcessPool>, msgs: Vec<BatchS
         return;
     }
     if msgs.len() == 1 {
-        let BatchSchedulerMsg::Forward { fwd, resp_tx } =
-            msgs.into_iter().next().expect("len == 1 checked above");
-        // Only decode steps are batch-scheduled, and decode keeps the
-        // contribution width whoever asked; an owner's mark made at its prompt
-        // pass stays on the request.
-        let result = pool.forward_direct(fwd, None, Requester::Swarm).await;
+        let BatchSchedulerMsg::Forward {
+            fwd,
+            requester,
+            resp_tx,
+        } = msgs.into_iter().next().expect("len == 1 checked above");
+        // Only decode steps are batch-scheduled; an owner's mark made at its
+        // prompt pass stays on the request, so naming the requester changes
+        // no width — it stamps whose use the step was (#483 (a)).
+        let result = pool.forward_direct(fwd, None, requester).await;
         let _ = resp_tx.send(result);
         return;
     }
-    let (forwards, resp_txs): (Vec<_>, Vec<_>) = msgs
-        .into_iter()
-        .map(|BatchSchedulerMsg::Forward { fwd, resp_tx }| (fwd, resp_tx))
-        .unzip();
+    let mut forwards = Vec::with_capacity(msgs.len());
+    let mut users = Vec::with_capacity(msgs.len());
+    let mut resp_txs = Vec::with_capacity(msgs.len());
+    for BatchSchedulerMsg::Forward {
+        fwd,
+        requester,
+        resp_tx,
+    } in msgs
+    {
+        forwards.push(fwd);
+        users.push(requester);
+        resp_txs.push(resp_tx);
+    }
     let n = forwards.len();
-    match pool.forward_batch(forwards).await {
+    match pool.forward_batch(forwards, &users).await {
         Ok(results) => {
             if results.len() != n {
                 for tx in resp_txs {
@@ -4946,6 +5006,8 @@ pub struct ModelProcessPool {
 enum BatchSchedulerMsg {
     Forward {
         fwd: crate::types::LayerForward,
+        /// Whose request the step is ([`WorkerHandle::idle_secs_for`]).
+        requester: Requester,
         resp_tx: tokio::sync::oneshot::Sender<Result<crate::types::LayerResult, SwarmError>>,
     },
 }
@@ -6380,9 +6442,14 @@ impl ModelProcessPool {
     /// memory adds no layer, so the split it makes is the same. Drafters are
     /// not counted, as the reclaim never takes them — but for a WHOLE
     /// placement of the one model they guess for (`placing`, #442).
-    fn split_budget_for_planning(&self, model_id: &ModelId, placing: SplitFor) -> u64 {
+    fn split_budget_for_planning(
+        &self,
+        model_id: &ModelId,
+        placing: SplitFor,
+        asking: Requester,
+    ) -> u64 {
         self.card_budget_for_planning(model_id)
-            .saturating_add(self.idle_vram_reclaimable_for_split_mb(model_id, placing))
+            .saturating_add(self.idle_vram_reclaimable_for_split_mb(model_id, placing, asking))
     }
 
     /// Set the CPU thread count handed to each worker's rayon pool.
@@ -6501,6 +6568,7 @@ impl ModelProcessPool {
         model_id: &ModelId,
         estimated_mb: u64,
         budget_mb: u64,
+        asking: Requester,
     ) -> Option<bool> {
         if budget_mb == 0 || estimated_mb == 0 {
             return None;
@@ -6509,7 +6577,7 @@ impl ModelProcessPool {
         if self.vram_committed_mb().saturating_add(needed_mb) <= budget_mb {
             return Some(true);
         }
-        Some(self.reclaimable_vram_mb(model_id, needed_mb, budget_mb) > 0)
+        Some(self.reclaimable_vram_mb(model_id, needed_mb, budget_mb, asking) > 0)
     }
 
     /// Does `model_id`'s worker here hold EVERY layer of it, ON the card? The
@@ -6558,12 +6626,21 @@ impl ModelProcessPool {
     ///
     /// Single-answer callers keep the single-answer methods; nothing is made
     /// slower to make this faster.
-    pub fn gpu_estimate_and_fit(&self, model_id: &ModelId) -> (Option<u64>, Option<bool>) {
+    pub fn gpu_estimate_and_fit(
+        &self,
+        model_id: &ModelId,
+        requester: Requester,
+    ) -> (Option<u64>, Option<bool>) {
         let estimated = self.estimate_gpu_footprint_mb(model_id, None, KvCharge::Typical);
         let fits = if self.whole_model_on_card(model_id) {
             Some(true)
         } else {
-            self.fits_in_budget(model_id, estimated, self.card_budget_for_planning(model_id))
+            self.fits_in_budget(
+                model_id,
+                estimated,
+                self.card_budget_for_planning(model_id),
+                requester,
+            )
         };
         ((estimated != 0).then_some(estimated), fits)
     }
@@ -6587,7 +6664,7 @@ impl ModelProcessPool {
     /// the reclaim's dry run with the admission gate, so the scheduler's view
     /// and the loader's view cannot drift apart and disagree about whether a
     /// request could have run.
-    pub fn would_fit_on_gpu(&self, model_id: &ModelId) -> Option<bool> {
+    pub fn would_fit_on_gpu(&self, model_id: &ModelId, requester: Requester) -> Option<bool> {
         // Already resident ON THE GPU means already charged: running it costs
         // no new memory, whatever the budget currently says.
         //
@@ -6646,6 +6723,7 @@ impl ModelProcessPool {
             model_id,
             self.estimate_gpu_footprint_mb(model_id, None, KvCharge::Typical),
             budget,
+            requester,
         )
     }
 
@@ -6697,8 +6775,8 @@ impl ModelProcessPool {
     /// run is, and a peer that would run it several times faster is worth
     /// asking either way. The peer-side gates (whole coverage, direct
     /// reachability, trust, room or a wide speed margin) are unchanged.
-    pub fn serves_on_cpu(&self, model_id: &ModelId) -> bool {
-        !self.card_in_play() || self.is_cpu_bound_for_lack_of_vram(model_id)
+    pub fn serves_on_cpu(&self, model_id: &ModelId, requester: Requester) -> bool {
+        !self.card_in_play() || self.is_cpu_bound_for_lack_of_vram(model_id, requester)
     }
 
     /// Does `model_id`'s LIVE worker here run its layers whole on the
@@ -6764,21 +6842,32 @@ impl ModelProcessPool {
         model_id: &ModelId,
         requester: Requester,
     ) -> Option<u32> {
-        self.max_local_hostable_layers(model_id, self.planning_on_card(model_id), requester)
+        self.max_local_hostable_layers(
+            model_id,
+            self.planning_on_card(model_id, requester),
+            requester,
+        )
     }
 
     /// The ranges a live worker of `model_id` already holds, on the same device
     /// [`Self::max_hostable_layers_for_planning`] weighs — the room and what
     /// already occupies it are read on one device or the charge is wrong.
-    pub fn held_layer_ranges_for_planning(&self, model_id: &ModelId) -> Vec<HeldRange> {
-        self.held_layer_ranges(model_id, self.planning_on_card(model_id))
+    pub fn held_layer_ranges_for_planning(
+        &self,
+        model_id: &ModelId,
+        requester: Requester,
+    ) -> Vec<HeldRange> {
+        self.held_layer_ranges(model_id, self.planning_on_card(model_id, requester))
     }
 
     /// The device the loader would put `model_id`'s layers on, for weighing
     /// room: the card whenever one is in play — whole, or split across it and
     /// the processor — and the processor when there is none, or when the model
     /// neither fits the card whole nor is split by the loader.
-    fn planning_on_card(&self, model_id: &ModelId) -> bool {
+    ///
+    /// `requester` is whose request is planned: its spawn reclaims idle card
+    /// memory as that requester reads idle ([`WorkerHandle::idle_secs_for`]).
+    fn planning_on_card(&self, model_id: &ModelId, requester: Requester) -> bool {
         if !self.card_in_play() {
             return false;
         }
@@ -6797,7 +6886,7 @@ impl ModelProcessPool {
         {
             return true;
         }
-        if !self.is_cpu_bound_for_lack_of_vram(model_id) {
+        if !self.is_cpu_bound_for_lack_of_vram(model_id, requester) {
             return true;
         }
         self.estimated_gpu_mb(model_id)
@@ -6806,13 +6895,13 @@ impl ModelProcessPool {
                     model_id,
                     None,
                     estimated,
-                    self.split_budget_for_planning(model_id, SplitFor::Part),
+                    self.split_budget_for_planning(model_id, SplitFor::Part, requester),
                 )
             })
             .is_some()
     }
 
-    pub fn is_cpu_bound_for_lack_of_vram(&self, model_id: &ModelId) -> bool {
+    pub fn is_cpu_bound_for_lack_of_vram(&self, model_id: &ModelId, requester: Requester) -> bool {
         if self.gpu_layers.load(std::sync::atomic::Ordering::Relaxed) == 0 {
             return false;
         }
@@ -6820,7 +6909,7 @@ impl ModelProcessPool {
         if !crate::daemon::gpu_support::local_gpu_is_supported() {
             return false;
         }
-        matches!(self.would_fit_on_gpu(model_id), Some(false))
+        matches!(self.would_fit_on_gpu(model_id, requester), Some(false))
     }
 
     /// The configured GPU memory budget in MB, or `None` when unset.
@@ -7112,7 +7201,12 @@ impl ModelProcessPool {
         SwarmError::ServiceUnavailable(format!("worker closed connection {during}"))
     }
 
-    async fn free_vram_for_admission(&self, exclude: &ModelId, needed_mb: u64) -> u64 {
+    async fn free_vram_for_admission(
+        &self,
+        exclude: &ModelId,
+        needed_mb: u64,
+        asking: Requester,
+    ) -> u64 {
         let budget = self
             .vram_budget_mb
             .load(std::sync::atomic::Ordering::Relaxed);
@@ -7125,8 +7219,8 @@ impl ModelProcessPool {
         }
 
         // Candidates: workers holding a VRAM charge that are neither the model
-        // being loaded, nor busy, nor recently used.
-        let candidates = self.vram_reclaim_candidates(exclude);
+        // being loaded, nor busy, nor recently used — by the asker's reading.
+        let candidates = self.vram_reclaim_candidates(exclude, asking);
 
         let plan = plan_vram_reclaim(budget, committed, needed_mb, candidates);
         if plan.is_empty() {
@@ -7164,10 +7258,11 @@ impl ModelProcessPool {
         &self,
         exclude: &ModelId,
         placing: SplitFor,
+        asking: Requester,
         on_card_with: impl Fn(u64) -> usize,
     ) -> u64 {
         let plan = plan_vram_reclaim_for_split(
-            self.vram_reclaim_candidates(exclude),
+            self.vram_reclaim_candidates(exclude, asking),
             placing,
             on_card_with,
         );
@@ -7227,6 +7322,7 @@ impl ModelProcessPool {
         model_id: &ModelId,
         handle: &WorkerHandle,
         segment: (u32, u32),
+        requester: Requester,
     ) -> bool {
         if !handle.short_of_the_card() {
             return false;
@@ -7246,7 +7342,7 @@ impl ModelProcessPool {
             );
             return false;
         }
-        self.promotion_weighed(model_id, handle, !self.gpu_is_usable())
+        self.promotion_weighed(model_id, handle, !self.gpu_is_usable(), requester)
     }
 
     /// [`Self::worker_should_return_to_gpu`] past its device questions, which
@@ -7268,6 +7364,7 @@ impl ModelProcessPool {
         model_id: &ModelId,
         handle: &WorkerHandle,
         permanently_cpu_bound: bool,
+        requester: Requester,
     ) -> bool {
         let mut inputs = PromotionInputs {
             short_of_the_card: handle.short_of_the_card(),
@@ -7295,7 +7392,8 @@ impl ModelProcessPool {
         // Retiring the worker gives its own share back, so only the rest has
         // to be found among the other models.
         let still_needed = handle.gpu_estimate_mb.saturating_sub(inputs.own_card_mb);
-        inputs.reclaimable_mb = self.reclaimable_vram_mb(model_id, still_needed, inputs.budget_mb);
+        inputs.reclaimable_mb =
+            self.reclaimable_vram_mb(model_id, still_needed, inputs.budget_mb, requester);
         should_return_to_gpu(&inputs)
     }
 
@@ -7330,7 +7428,11 @@ impl ModelProcessPool {
     /// Every OTHER model's worker holding a graphics charge, as the reclaim
     /// planner sees it — read by the reclaim, its dry run, and the planner's
     /// ceiling, so all three weigh the same set.
-    fn vram_reclaim_candidates(&self, exclude: &ModelId) -> Vec<VramReclaimCandidate> {
+    fn vram_reclaim_candidates(
+        &self,
+        exclude: &ModelId,
+        asking: Requester,
+    ) -> Vec<VramReclaimCandidate> {
         self.vram_reserved_mb
             .iter()
             .filter(|e| e.key() != exclude && *e.value() > 0)
@@ -7339,7 +7441,7 @@ impl ModelProcessPool {
                 Some(VramReclaimCandidate {
                     model: e.key().clone(),
                     charge_mb: *e.value(),
-                    idle_secs: worker.idle_secs(),
+                    idle_secs: worker.idle_secs_for(asking),
                     busy: worker.in_use(self.conversation_window()),
                     drafts: worker.drafts_for_another_model.load(Ordering::Acquire),
                     guesses_only_for_the_placed: worker.guesses_only_for(exclude),
@@ -7359,8 +7461,8 @@ impl ModelProcessPool {
     /// not a plan: admission reclaims least-recently-used first and only what it
     /// needs, from the same set under the same predicate, so it can always make
     /// the room counted here.
-    fn idle_vram_reclaimable_mb(&self, exclude: &ModelId) -> u64 {
-        self.vram_reclaim_candidates(exclude)
+    fn idle_vram_reclaimable_mb(&self, exclude: &ModelId, asking: Requester) -> u64 {
+        self.vram_reclaim_candidates(exclude, asking)
             .iter()
             .filter(|c| vram_reclaim_eligible(c))
             .map(|c| c.charge_mb)
@@ -7372,8 +7474,13 @@ impl ModelProcessPool {
     /// for a whole placement of the one model they guess for) — the planner's
     /// half of [`Self::free_vram_for_split`], a ceiling as
     /// [`Self::idle_vram_reclaimable_mb`] is.
-    fn idle_vram_reclaimable_for_split_mb(&self, exclude: &ModelId, placing: SplitFor) -> u64 {
-        self.vram_reclaim_candidates(exclude)
+    fn idle_vram_reclaimable_for_split_mb(
+        &self,
+        exclude: &ModelId,
+        placing: SplitFor,
+        asking: Requester,
+    ) -> u64 {
+        self.vram_reclaim_candidates(exclude, asking)
             .iter()
             .filter(|c| split_reclaim_eligible(c, placing))
             .map(|c| c.charge_mb)
@@ -7450,7 +7557,13 @@ impl ModelProcessPool {
     /// enough to be reclaimed on demand. Asking only "does it fit in the room
     /// lying about" made the promotion wait for a timer instead of for the
     /// condition.
-    fn reclaimable_vram_mb(&self, exclude: &ModelId, needed_mb: u64, budget_mb: u64) -> u64 {
+    fn reclaimable_vram_mb(
+        &self,
+        exclude: &ModelId,
+        needed_mb: u64,
+        budget_mb: u64,
+        asking: Requester,
+    ) -> u64 {
         if budget_mb == 0 || needed_mb == 0 {
             return 0;
         }
@@ -7458,7 +7571,7 @@ impl ModelProcessPool {
         if committed.saturating_add(needed_mb) <= budget_mb {
             return 0;
         }
-        let candidates = self.vram_reclaim_candidates(exclude);
+        let candidates = self.vram_reclaim_candidates(exclude, asking);
         plan_vram_reclaim(budget_mb, committed, needed_mb, candidates)
             .iter()
             .map(|(_model, mb)| *mb)
@@ -7831,7 +7944,7 @@ impl ModelProcessPool {
         {
             return None;
         }
-        if self.planning_on_card(model_id) {
+        if self.planning_on_card(model_id, requester) {
             if !self.spawn_may_take_the_card(guest) {
                 return None;
             }
@@ -7877,7 +7990,7 @@ impl ModelProcessPool {
         }
         self.local_layers_leaving(
             model_id,
-            self.planning_on_card(model_id),
+            self.planning_on_card(model_id, requester),
             requester,
             Some(guest_mb),
         )
@@ -7912,7 +8025,7 @@ impl ModelProcessPool {
         if now == GuestFit::Refused || self.live_worker(guest).is_some() {
             return now;
         }
-        let held = self.held_layer_ranges_for_planning(target);
+        let held = self.held_layer_ranges_for_planning(target, requester);
         let adds = ranges
             .iter()
             .fold(0u32, |n, r| n.saturating_add(layers_added_by(*r, &held)));
@@ -7929,10 +8042,10 @@ impl ModelProcessPool {
         // they loaded the machine's live headroom was 3.4 GB: its spawn was
         // refused and the reply ran unguessed (2026-10-26), where the 3B the
         // next replies loaded beside the same layers fitted.
-        let in_ram_beside_a_card_plan = self.planning_on_card(target)
+        let in_ram_beside_a_card_plan = self.planning_on_card(target, requester)
             && (!self.spawn_may_take_the_card(guest) || room.is_some_and(|room| adds > room));
         if in_ram_beside_a_card_plan {
-            let plan_mb = self.machine_mb_a_plan_adds(target, ranges, &held);
+            let plan_mb = self.machine_mb_a_plan_adds(target, ranges, &held, requester);
             let in_ram = !matches!(
                 self.ram_verdict_after_loading(
                     self.estimate_cpu_footprint_mb(guest, Some(guest_range), kv),
@@ -8887,7 +9000,7 @@ impl ModelProcessPool {
             // because a reclaim unloads workers and waits for their processes to
             // exit.
             let freed = self
-                .free_vram_for_admission(model_id, refused.needed_mb)
+                .free_vram_for_admission(model_id, refused.needed_mb, requester)
                 .await;
             if freed > 0 {
                 tracing::info!(
@@ -8918,7 +9031,7 @@ impl ModelProcessPool {
             held.push(segment);
             let placing = self.split_for(model_id, &held);
             let freed = self
-                .free_vram_for_split(model_id, placing, |extra_mb| {
+                .free_vram_for_split(model_id, placing, requester, |extra_mb| {
                     self.growth_split(model_id, segment, &handle, extra_mb)
                         .map_or(0, |(split, _)| split.card_share().0)
                 })
@@ -9004,7 +9117,7 @@ impl ModelProcessPool {
         let held_mb = self.ram_reserved_mb.get(model_id).map_or(0, |mb| *mb);
         self.machine_would_take(
             model_id,
-            self.fresh_spawn_machine_mb(model_id, segment),
+            self.fresh_spawn_machine_mb(model_id, segment, requester),
             requester,
             held_mb,
         )
@@ -9153,8 +9266,22 @@ impl ModelProcessPool {
             held.iter().map(|r| r.1).max().unwrap_or(run.1),
         );
         match (
-            self.held_layers_a_fresh_spawn_keeps_on_card(model_id, run, &held, run),
-            self.held_layers_a_fresh_spawn_keeps_on_card(model_id, hull, &held, run),
+            // Asked only by a peer's up-front weighing: the spawn it foresees
+            // is the swarm's.
+            self.held_layers_a_fresh_spawn_keeps_on_card(
+                model_id,
+                run,
+                &held,
+                run,
+                Requester::Swarm,
+            ),
+            self.held_layers_a_fresh_spawn_keeps_on_card(
+                model_id,
+                hull,
+                &held,
+                run,
+                Requester::Swarm,
+            ),
         ) {
             (Some(kept), Some(kept_in_place)) => kept >= on_card_now.min(kept_in_place),
             _ => true,
@@ -9199,6 +9326,7 @@ impl ModelProcessPool {
         spawn: (u32, u32),
         held: &[(u32, u32)],
         within: (u32, u32),
+        requester: Requester,
     ) -> Option<u32> {
         let held_in = |span: (u32, u32)| {
             held.iter()
@@ -9217,7 +9345,7 @@ impl ModelProcessPool {
         }
         let own_card_mb = self.vram_reserved_mb.get(model_id).map_or(0, |mb| *mb);
         let budget = self
-            .split_budget_for_planning(model_id, self.split_for(model_id, &[spawn]))
+            .split_budget_for_planning(model_id, self.split_for(model_id, &[spawn]), requester)
             .saturating_add(own_card_mb);
         let on_the_processor =
             match self.partial_gpu_layers(model_id, Some(spawn), estimated, budget) {
@@ -9620,7 +9748,7 @@ impl ModelProcessPool {
             let committed = self.vram_committed_mb();
             let own = budget
                 .saturating_sub(committed)
-                .saturating_add(self.idle_vram_reclaimable_mb(model_id))
+                .saturating_add(self.idle_vram_reclaimable_mb(model_id, requester))
                 .min(budget);
             match guest_mb {
                 // The guest is admitted to the card after these layers load,
@@ -9768,7 +9896,7 @@ impl ModelProcessPool {
         model_id: &ModelId,
         requester: Requester,
     ) -> Option<u32> {
-        if !self.planning_on_card(model_id) {
+        if !self.planning_on_card(model_id, requester) {
             return None;
         }
         if self
@@ -9802,10 +9930,10 @@ impl ModelProcessPool {
         // The whole model's run may take a drafter that guesses for it alone,
         // as its spawn would (#442); a segment's leaves every drafter.
         let whole_budget = self
-            .split_budget_for_planning(model_id, SplitFor::Whole)
+            .split_budget_for_planning(model_id, SplitFor::Whole, requester)
             .saturating_add(own_card_mb);
         let budget = self
-            .split_budget_for_planning(model_id, SplitFor::Part)
+            .split_budget_for_planning(model_id, SplitFor::Part, requester)
             .saturating_add(own_card_mb);
         let split = self.partial_gpu_layers(model_id, None, estimated, whole_budget)?;
         let total = u32::try_from(split.card_share().1).unwrap_or(u32::MAX);
@@ -9913,11 +10041,16 @@ impl ModelProcessPool {
     /// own bound), else the whole run on the processor. A fresh spawn of a
     /// model replaces its worker, so what that worker holds on the card is
     /// counted as free — none with no worker (#349).
-    fn fresh_spawn_machine_mb(&self, model_id: &ModelId, run: (u32, u32)) -> u64 {
+    fn fresh_spawn_machine_mb(
+        &self,
+        model_id: &ModelId,
+        run: (u32, u32),
+        requester: Requester,
+    ) -> u64 {
         if self.spawn_may_take_the_card(model_id) {
             let own_card_mb = self.vram_reserved_mb.get(model_id).map_or(0, |mb| *mb);
             let budget = self
-                .split_budget_for_planning(model_id, self.split_for(model_id, &[run]))
+                .split_budget_for_planning(model_id, self.split_for(model_id, &[run]), requester)
                 .saturating_add(own_card_mb);
             if let Some(mb) = self.machine_mb_beside_card(model_id, run, budget) {
                 return mb;
@@ -10039,6 +10172,7 @@ impl ModelProcessPool {
         model_id: &ModelId,
         ranges: &[(u32, u32)],
         held: &[HeldRange],
+        requester: Requester,
     ) -> u64 {
         if self.live_worker(model_id).is_some() {
             return 0;
@@ -10046,7 +10180,9 @@ impl ModelProcessPool {
         ranges
             .iter()
             .find(|r| layers_added_by(**r, held) > 0)
-            .map_or(0, |run| self.fresh_spawn_machine_mb(model_id, *run))
+            .map_or(0, |run| {
+                self.fresh_spawn_machine_mb(model_id, *run, requester)
+            })
     }
 
     /// Would the forwards of a peer's split be refused the LOAD of the layers
@@ -10173,7 +10309,8 @@ impl ModelProcessPool {
             );
             return Some((message, layers_that_fit));
         }
-        let needed_mb = self.fresh_spawn_machine_mb(model_id, (start, end));
+        // A peer's load: the swarm's spawn.
+        let needed_mb = self.fresh_spawn_machine_mb(model_id, (start, end), Requester::Swarm);
         let in_use = self.ram_committed_mb();
         let budget = self.ram_budget_now(Requester::Swarm).map_or(
             self.ram_budget_mb
@@ -10243,7 +10380,11 @@ impl ModelProcessPool {
     /// a 14B ran `[24..48)` on this 8 GB card, this node's candidate read
     /// `card_layers=None`, 6.4 tok/s, and no split here won again (2026-11-13,
     /// the real link).
-    pub fn card_share_for_planning(&self, model_id: &ModelId) -> Option<(usize, usize)> {
+    pub fn card_share_for_planning(
+        &self,
+        model_id: &ModelId,
+        requester: Requester,
+    ) -> Option<(usize, usize)> {
         if let Some(worker) = self.live_worker(model_id) {
             if !worker.holds_gpu_memory() {
                 return None;
@@ -10264,7 +10405,7 @@ impl ModelProcessPool {
                 .filter(|&l| l > held)?;
             let part_of_a_model_too_big = on_card > 0
                 && self.split_for(model_id, &ranges) == SplitFor::Part
-                && self.would_fit_on_gpu(model_id) == Some(false);
+                && self.would_fit_on_gpu(model_id, requester) == Some(false);
             // **And the layers it can still grow by on the card** (#3 (j11)):
             // a live worker grows on the device its spawn charged — the card,
             // no processor rung (gotcha #806) — and the planner's bound on
@@ -10290,7 +10431,7 @@ impl ModelProcessPool {
             let card = on_card.saturating_add(growth).min(layers);
             return part_of_a_model_too_big.then_some((card as usize, layers as usize));
         }
-        if !self.planning_on_card(model_id) {
+        if !self.planning_on_card(model_id, requester) {
             return None;
         }
         let estimated = self.estimated_gpu_mb(model_id)?;
@@ -10301,7 +10442,7 @@ impl ModelProcessPool {
             model_id,
             None,
             estimated,
-            self.split_budget_for_planning(model_id, SplitFor::Part),
+            self.split_budget_for_planning(model_id, SplitFor::Part, requester),
         )
         .map(CardSplit::card_share)
     }
@@ -10324,11 +10465,15 @@ impl ModelProcessPool {
         model_id: &ModelId,
         range: (u32, u32),
         outcome: &Result<T, SwarmError>,
+        requester: Requester,
     ) {
         if !matches!(outcome, Err(SwarmError::LocalMemoryUnavailable(_))) {
             return;
         }
-        let added = layers_added_by(range, &self.held_layer_ranges_for_planning(model_id));
+        let added = layers_added_by(
+            range,
+            &self.held_layer_ranges_for_planning(model_id, requester),
+        );
         // Never left to grow: an entry is taken when the router re-plans, and
         // one for a request no router of ours runs (a peer's segment) or that
         // was not re-planned goes stale here.
@@ -10430,7 +10575,7 @@ impl ModelProcessPool {
             );
             return Ok(());
         }
-        match self.send_admission(admit, cancel).await? {
+        match self.send_admission(admit, requester, cancel).await? {
             Admission::NoWorker => Ok(()),
             Admission::Busy => {
                 tracing::info!(
@@ -10525,7 +10670,7 @@ impl ModelProcessPool {
             }
         }
         let ask = peer_question(model_id, layer_ranges, prompt_tokens, for_request);
-        match self.send_admission(ask, None).await {
+        match self.send_admission(ask, Requester::Swarm, None).await {
             Ok(Admission::Refused {
                 message,
                 layers_that_fit,
@@ -10659,9 +10804,13 @@ impl ModelProcessPool {
     /// not given it by `UP_FRONT_ADMISSION_WAIT` is busy, and the caller goes
     /// ahead as it always did. A recording admission still reaches the worker
     /// ahead of its request's forwards, which see its record.
+    ///
+    /// `user` is whose request a RECORDING admission serves; a peer's question
+    /// (`only_weigh`) takes a slot that marks no use whoever it names.
     async fn send_admission(
         &self,
         admit: IpcAdmitPrompt,
+        user: Requester,
         cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
     ) -> Result<Admission, SwarmError> {
         let Some(handle) = self.live_worker(&admit.model_id) else {
@@ -10673,7 +10822,7 @@ impl ModelProcessPool {
         let (mut guard, _) = if admit.only_weigh {
             handle.register_question(request_id, resp_tx)
         } else {
-            handle.register_response(request_id, resp_tx, true)
+            handle.register_response(request_id, resp_tx, true, user)
         };
         let attempt_token = guard.token;
         {
@@ -11098,6 +11247,7 @@ impl ModelProcessPool {
         estimated: u64,
         tenancy: Tenancy,
         leaving_mb: u64,
+        requester: Requester,
     ) -> bool {
         if let Tenancy::Guest { leaves_mb, .. } = tenancy {
             if !self.guest_fits_the_card(estimated, leaves_mb) {
@@ -11115,7 +11265,7 @@ impl ModelProcessPool {
             && self.admit_to_gpu(model_id, estimated);
         if !admitted && tenancy == Tenancy::Tenant {
             let freed = self
-                .free_vram_for_admission(model_id, estimated.saturating_add(leaving_mb))
+                .free_vram_for_admission(model_id, estimated.saturating_add(leaving_mb), requester)
                 .await;
             if freed > 0 {
                 tracing::info!(
@@ -11243,7 +11393,9 @@ impl ModelProcessPool {
                      failing the request"
                 );
                 self.retire_dead_worker(model_id).await;
-            } else if guest || !self.worker_should_return_to_gpu(model_id, &handle, segment) {
+            } else if guest
+                || !self.worker_should_return_to_gpu(model_id, &handle, segment, requester)
+            {
                 // A guest is never promoted: moving it to the card means
                 // taking memory, which it may not do (`Tenancy::Guest`).
                 if handle.serves_segment(segment, shape) {
@@ -11300,7 +11452,8 @@ impl ModelProcessPool {
                 false
             }
             Some(handle) => {
-                if guest || !self.worker_should_return_to_gpu(model_id, &handle, segment) {
+                if guest || !self.worker_should_return_to_gpu(model_id, &handle, segment, requester)
+                {
                     // Another task spawned it while this one waited. Hand it
                     // back only if it holds THIS range: returned uncharged, the
                     // worker loads whatever a forward names, and memory the pool
@@ -11405,7 +11558,7 @@ impl ModelProcessPool {
                 self.room_for_the_plans_other_ranges(model_id, segment)
             };
             let mut admitted = self
-                .admit_to_gpu_as(model_id, estimated, tenancy, leaving_mb)
+                .admit_to_gpu_as(model_id, estimated, tenancy, leaving_mb, requester)
                 .await;
             if admitted {
                 charged_vram_mb = estimated;
@@ -11441,6 +11594,7 @@ impl ModelProcessPool {
                     .free_vram_for_split(
                         model_id,
                         self.split_for(model_id, &[segment]),
+                        requester,
                         |extra_mb| self.spawn_split_on_card(model_id, segment, estimated, extra_mb),
                     )
                     .await;
@@ -12459,6 +12613,7 @@ impl ModelProcessPool {
             spawned_at: std::time::Instant::now(),
             last_used: AtomicU64::new(0),
             ran_a_request: AtomicBool::new(false),
+            owner_last_used: AtomicU64::new(NEVER_USED),
             asked_to_load,
             kv_holders: std::sync::Mutex::new(std::collections::HashMap::new()),
             awaiting_first_step: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -12595,6 +12750,7 @@ impl ModelProcessPool {
                 if tx
                     .send(BatchSchedulerMsg::Forward {
                         fwd: forward,
+                        requester,
                         resp_tx,
                     })
                     .await
@@ -12687,7 +12843,13 @@ impl ModelProcessPool {
                 RunShape::of(forward.tp_meta.is_some()),
             )
             .await;
-        self.note_load_refusal(forward.request_id, &model_id, forward.layer_range, &handle);
+        self.note_load_refusal(
+            forward.request_id,
+            &model_id,
+            forward.layer_range,
+            &handle,
+            requester,
+        );
         let handle = handle?;
         if starts_a_pass {
             handle.note_pass_range(forward.request_id, forward.layer_range);
@@ -12788,7 +12950,7 @@ impl ModelProcessPool {
         // Register a response channel BEFORE sending so the reader actor can
         // route any early error/reply. Unregistered on drop via ResponseGuard.
         let (resp_tx, mut resp_rx) = mpsc::channel(RESPONSE_CHANNEL_CAPACITY);
-        let (mut guard, _) = handle.register_response(request_id, resp_tx, true);
+        let (mut guard, _) = handle.register_response(request_id, resp_tx, true, requester);
         let attempt_token = guard.token;
         // A forward leaves this request's cache on the worker for the next one,
         // so the worker stays in use after `guard` is gone (`kv_holders`).
@@ -12921,16 +13083,17 @@ impl ModelProcessPool {
             conversation: d.conversation_positions(),
             leaves_mb: self.room_a_guest_leaves_mb(beside),
         };
+        let guessing_for = if d.for_the_owner {
+            Requester::Owner
+        } else {
+            Requester::Swarm
+        };
         let handle = self
             .get_or_spawn(
                 &model_id,
                 d.layer_range,
                 tenancy,
-                drafter_requester(if d.for_the_owner {
-                    Requester::Owner
-                } else {
-                    Requester::Swarm
-                }),
+                drafter_requester(guessing_for),
                 RunShape::Plain,
             )
             .await?;
@@ -12941,7 +13104,7 @@ impl ModelProcessPool {
         }
         handle.note_guessing_for(beside);
         let (resp_tx, mut resp_rx) = mpsc::channel(RESPONSE_CHANNEL_CAPACITY);
-        let (mut guard, _) = handle.register_response(request_id, resp_tx, true);
+        let (mut guard, _) = handle.register_response(request_id, resp_tx, true, guessing_for);
         let attempt_token = guard.token;
         handle.note_conversation(request_id);
         {
@@ -13031,9 +13194,13 @@ impl ModelProcessPool {
     /// forwards taught ([`Self::learn_far_run`]). Asked only of a live worker:
     /// a guess never loads a model. Empty where the stand-in has not learned
     /// enough yet.
+    ///
+    /// `requester` is whose request the guesses serve
+    /// (`pipeline::worker_requester`).
     pub async fn head_guess(
         &self,
         g: crate::inference::worker_ipc::IpcHeadGuess,
+        requester: Requester,
         cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
     ) -> Result<Vec<u32>, SwarmError> {
         let model_id = g.model_id.clone();
@@ -13045,7 +13212,7 @@ impl ModelProcessPool {
             )));
         };
         let (resp_tx, mut resp_rx) = mpsc::channel(RESPONSE_CHANNEL_CAPACITY);
-        let (mut guard, _) = handle.register_response(request_id, resp_tx, true);
+        let (mut guard, _) = handle.register_response(request_id, resp_tx, true, requester);
         let attempt_token = guard.token;
         {
             let mut writer = handle.writer.lock().await;
@@ -13112,10 +13279,14 @@ impl ModelProcessPool {
     /// of a live worker: a guess never loads a model. Empty where `d.gamma` is
     /// 0; a tree's shape beside its tokens where `d.tree` asked one (#437); an
     /// error ends the drafter for the reply.
+    ///
+    /// `requester` is whose request the guesses serve
+    /// (`pipeline::worker_requester`).
     pub async fn block_draft(
         &self,
         d: crate::inference::worker_ipc::IpcBlockDraft,
         rows: &[u8],
+        requester: Requester,
     ) -> Result<crate::inference::worker_ipc::Drafted, SwarmError> {
         let model_id = d.model_id.clone();
         let request_id = d.request_id;
@@ -13125,7 +13296,7 @@ impl ModelProcessPool {
             )));
         };
         let (resp_tx, mut resp_rx) = mpsc::channel(RESPONSE_CHANNEL_CAPACITY);
-        let (mut guard, _) = handle.register_response(request_id, resp_tx, true);
+        let (mut guard, _) = handle.register_response(request_id, resp_tx, true, requester);
         let attempt_token = guard.token;
         {
             let mut writer = handle.writer.lock().await;
@@ -13199,12 +13370,23 @@ impl ModelProcessPool {
     ///
     /// All inputs must target the same `model_id`. Returns an error if the
     /// batch is empty or targets mixed models.
+    ///
+    /// `users[i]` is whose request `forwards[i]` is: each slot is stamped as
+    /// that requester's use ([`WorkerHandle::idle_secs_for`], #483 (a)).
     pub async fn forward_batch(
         &self,
         forwards: Vec<crate::types::LayerForward>,
+        users: &[Requester],
     ) -> Result<Vec<crate::types::LayerResult>, SwarmError> {
         if forwards.is_empty() {
             return Err(SwarmError::Validation("forward_batch: empty input".into()));
+        }
+        if users.len() != forwards.len() {
+            return Err(SwarmError::Internal(format!(
+                "forward_batch: {} forwards but {} requesters",
+                forwards.len(),
+                users.len()
+            )));
         }
         let model_id = forwards[0].model_id.clone();
         if forwards.iter().any(|f| f.model_id != model_id) {
@@ -13214,9 +13396,10 @@ impl ModelProcessPool {
         }
         // Every forward in a batch shares a model AND a layer range — see
         // `batch_eligible`, which is what put them in one batch. A batch is
-        // decode steps whose prompt passes loaded this worker, and it does not
-        // say whose requests it carries, so a load here (the worker went
-        // between them) is weighed as the swarm's — the narrower cap (#266).
+        // decode steps whose prompt passes loaded this worker, so a load here
+        // (the worker went between them) is weighed as the swarm's — the
+        // narrower cap (#266) — whoever's steps it carries (`users` only
+        // stamps whose use each step was).
         let handle = self
             .get_or_spawn(
                 &model_id,
@@ -13229,7 +13412,13 @@ impl ModelProcessPool {
             )
             .await;
         for f in &forwards {
-            self.note_load_refusal(f.request_id, &model_id, f.layer_range, &handle);
+            self.note_load_refusal(
+                f.request_id,
+                &model_id,
+                f.layer_range,
+                &handle,
+                Requester::Swarm,
+            );
         }
         let handle = handle?;
         if handle.dead.load(Ordering::Acquire) {
@@ -13242,12 +13431,12 @@ impl ModelProcessPool {
         let n = forwards.len();
         let mut receivers: Vec<(Uuid, u64, SlotRx)> = Vec::with_capacity(n);
         let mut guards: Vec<ResponseGuard> = Vec::with_capacity(n);
-        for f in &forwards {
+        for (f, &user) in forwards.iter().zip(users) {
             let (tx, rx) = mpsc::channel(RESPONSE_CHANNEL_CAPACITY);
             // A BatchForward is one fused matmul over N requests; the worker
             // cannot skip a single member, so cancelling one is meaningless.
             // Matches `cancelled_request_id`'s exclusion.
-            let (g, _) = handle.register_response(f.request_id, tx, false);
+            let (g, _) = handle.register_response(f.request_id, tx, false, user);
             handle.note_conversation(f.request_id);
             // A batch carries decode steps only (`model_worker` refuses a
             // sequence-0 member), so this only ever ends a wait.
@@ -13606,7 +13795,7 @@ impl ModelProcessPool {
                 RunShape::Plain,
             )
             .await;
-        self.note_load_refusal(request_id, model_id, layer_range, &handle);
+        self.note_load_refusal(request_id, model_id, layer_range, &handle, requester);
         let handle = handle?;
 
         // Kept for the post-generation stop-marker trim below; `sampling` is
@@ -13635,7 +13824,7 @@ impl ModelProcessPool {
         }
 
         let (resp_tx, mut resp_rx) = mpsc::channel(RESPONSE_CHANNEL_CAPACITY);
-        let (mut guard, _) = handle.register_response(request_id, resp_tx, true);
+        let (mut guard, _) = handle.register_response(request_id, resp_tx, true, requester);
         let attempt_token = guard.token;
         // Counted once this request is registered, so two sent at once each
         // see the other: the worker diverts a request to guess only when it
@@ -15122,7 +15311,7 @@ mod tests {
         )
         .await;
         let owners = Arc::strong_count(&h);
-        let (guard, _) = h.register_response(Uuid::new_v4(), dummy_tx(), false);
+        let (guard, _) = h.register_response(Uuid::new_v4(), dummy_tx(), false, Requester::Swarm);
         assert_eq!(
             Arc::strong_count(&h),
             owners,
@@ -15927,6 +16116,68 @@ mod tests {
         h
     }
 
+    /// **The owner's request takes the card from a model only the swarm has
+    /// used lately** (#483 (a)): a peer's model answered a second ago keeps a
+    /// 6,000 MB card from another PEER's model (the idle floor), never from
+    /// the owner's — the plan's verdict and the admission's reclaim alike.
+    /// The owner's own use protects it from the owner too, and a reply in
+    /// flight from everyone (#93). Field report on 0.3.300 (2026-11-20): the
+    /// owner's 14B ran beside Gemma 4 12B partly on the processor, 5.1 tok/s
+    /// against ~20.
+    #[tokio::test]
+    async fn the_owners_request_takes_the_card_from_a_model_only_the_swarm_used() {
+        let p = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-483a-owner"));
+        p.set_gpu_layers(-1);
+        p.set_vram_budget_mb(6_000);
+        let tenant = ModelId("peers-gemma".into());
+        let wanted = ModelId("owners-14b".into());
+        let h =
+            admit_and_insert_gpu_worker(&p, &tenant, 3_138, std::time::Duration::from_secs(3600))
+                .await;
+        // A peer's reply ended just now.
+        drop(h.register_response(Uuid::new_v4(), dummy_tx(), false, Requester::Swarm));
+        assert!(h.idle_secs() < vram_make_room_min_idle_secs());
+
+        assert_eq!(p.idle_vram_reclaimable_mb(&wanted, Requester::Swarm), 0);
+        assert_eq!(p.idle_vram_reclaimable_mb(&wanted, Requester::Owner), 3_138);
+        assert_eq!(
+            p.fits_in_budget(&wanted, 4_000, 6_000, Requester::Swarm),
+            Some(false)
+        );
+        assert_eq!(
+            p.fits_in_budget(&wanted, 4_000, 6_000, Requester::Owner),
+            Some(true)
+        );
+
+        // Mid-reply, nobody takes it.
+        let busy = Uuid::new_v4();
+        h.note_conversation(busy);
+        assert_eq!(p.idle_vram_reclaimable_mb(&wanted, Requester::Owner), 0);
+        h.forget_conversation(busy);
+
+        // The owner's own use protects it from the owner as from anyone.
+        drop(h.register_response(Uuid::new_v4(), dummy_tx(), false, Requester::Owner));
+        assert_eq!(p.idle_vram_reclaimable_mb(&wanted, Requester::Owner), 0);
+        h.owner_last_used.store(NEVER_USED, Ordering::Relaxed);
+
+        // The swarm's admission leaves it; the owner's takes it.
+        assert_eq!(
+            p.free_vram_for_admission(&wanted, 4_000, Requester::Swarm)
+                .await,
+            0
+        );
+        assert!(p.workers.contains_key(&tenant));
+        assert_eq!(
+            p.free_vram_for_admission(&wanted, 4_000, Requester::Owner)
+                .await,
+            3_138
+        );
+        assert!(
+            !p.workers.contains_key(&tenant),
+            "the peer's model gave the card back"
+        );
+    }
+
     /// A card with an idle 3B on it (3138 MB) and an 8B worker spawned for one
     /// layer of a split — the live node's state on 2026-09-27 when a request for
     /// the whole 8B 503'd after 11.8 s.
@@ -16151,7 +16402,7 @@ mod tests {
     async fn a_plan_counts_the_card_an_idle_model_gives_a_split() {
         let (p, m, _idle, h) = seventy_b_beside_an_idle_model("/tmp/swarmllm-355-plan").await;
         let (on_card, total) = p
-            .card_share_for_planning(&m)
+            .card_share_for_planning(&m, Requester::Swarm)
             .expect("the 70B splits across the card and the processor");
         assert_eq!(total, 80);
         let run = p
@@ -16161,13 +16412,13 @@ mod tests {
         // A drafter's memory is not the split's either.
         h.drafts_for_another_model.store(true, Ordering::Release);
         let (drafter_on_card, _) = p
-            .card_share_for_planning(&m)
+            .card_share_for_planning(&m, Requester::Swarm)
             .expect("still a split, on the free 2,862 MB");
         h.drafts_for_another_model.store(false, Ordering::Release);
 
         h.note_conversation(uuid::Uuid::new_v4());
         let (busy_on_card, _) = p
-            .card_share_for_planning(&m)
+            .card_share_for_planning(&m, Requester::Swarm)
             .expect("still a split, on the free 2,862 MB");
         assert_eq!(drafter_on_card, busy_on_card);
         let busy_run = p
@@ -16217,9 +16468,12 @@ mod tests {
             let estimated = p.estimate_gpu_footprint_mb(&m, Some(segment), KvCharge::Typical);
             let beside_it = p.spawn_split_on_card(&m, segment, estimated, 0);
             let freed = p
-                .free_vram_for_split(&m, p.split_for(&m, &[segment]), |extra_mb| {
-                    p.spawn_split_on_card(&m, segment, estimated, extra_mb)
-                })
+                .free_vram_for_split(
+                    &m,
+                    p.split_for(&m, &[segment]),
+                    Requester::Swarm,
+                    |extra_mb| p.spawn_split_on_card(&m, segment, estimated, extra_mb),
+                )
                 .await;
             if kept {
                 assert_eq!(freed, 0, "{case}: never unloaded for a split");
@@ -16248,9 +16502,12 @@ mod tests {
     async fn a_whole_run_is_planned_with_the_card_a_drafter_of_it_alone_gives() {
         let (p, m, _idle, h) = seventy_b_beside_an_idle_model("/tmp/swarmllm-442-plan").await;
         h.note_guessing_for(&m);
-        assert_eq!(p.idle_vram_reclaimable_for_split_mb(&m, SplitFor::Part), 0);
         assert_eq!(
-            p.idle_vram_reclaimable_for_split_mb(&m, SplitFor::Whole),
+            p.idle_vram_reclaimable_for_split_mb(&m, SplitFor::Part, Requester::Swarm),
+            0
+        );
+        assert_eq!(
+            p.idle_vram_reclaimable_for_split_mb(&m, SplitFor::Whole, Requester::Swarm),
             3_138
         );
         assert_eq!(p.split_for(&m, &[(0, 80)]), SplitFor::Whole);
@@ -16322,13 +16579,13 @@ mod tests {
                 .await;
         Arc::get_mut(&mut h).expect("one owner").gpu_estimate_mb = 5_005;
         assert!(
-            !pool.promotion_weighed(&mistral, &h, false),
+            !pool.promotion_weighed(&mistral, &h, false, Requester::Swarm),
             "the card is still held: stay"
         );
 
         card.store(7_958, Ordering::Relaxed); // `ollama stop`
         assert!(
-            pool.promotion_weighed(&mistral, &h, false),
+            pool.promotion_weighed(&mistral, &h, false, Requester::Swarm),
             "7,958 MB stand free now: the stored 1,700 MB reading must not keep it on the processor"
         );
 
@@ -16343,7 +16600,7 @@ mod tests {
         .await;
         Arc::get_mut(&mut busy).expect("one owner").gpu_estimate_mb = 5_005;
         let before = reads.load(Ordering::Relaxed);
-        assert!(!pool.promotion_weighed(&mistral, &busy, false));
+        assert!(!pool.promotion_weighed(&mistral, &busy, false, Requester::Swarm));
         assert_eq!(
             reads.load(Ordering::Relaxed),
             before,
@@ -16533,7 +16790,7 @@ mod tests {
 
         assert_eq!(pool.effective_gpu_layers(&qwen), 0, "pinned: the processor");
         assert!(
-            !pool.promotion_weighed(&qwen, &h, false),
+            !pool.promotion_weighed(&qwen, &h, false, Requester::Swarm),
             "inside its hold, an empty card is not weighed"
         );
 
@@ -16545,7 +16802,7 @@ mod tests {
             "a fresh spawn asks the card again"
         );
         assert!(
-            pool.promotion_weighed(&qwen, &h, false),
+            pool.promotion_weighed(&qwen, &h, false, Requester::Swarm),
             "the hold has run out and 11,000 MB stand free: back to the card"
         );
         assert!(
@@ -16599,19 +16856,19 @@ mod tests {
             only.charged_mb.store(1_400, Ordering::Release);
         }
         assert!(
-            !pool.promotion_weighed(&mistral, &h, false),
+            !pool.promotion_weighed(&mistral, &h, false, Requester::Swarm),
             "Ollama still holds the card: stay split"
         );
 
         card.store(7_958, Ordering::Relaxed); // `ollama stop`
         assert!(
-            pool.promotion_weighed(&mistral, &h, false),
+            pool.promotion_weighed(&mistral, &h, false, Requester::Swarm),
             "7,958 MB for a 5,005 MB model: the split must move whole"
         );
 
         ceiling.store(5_004, Ordering::Relaxed);
         let before = reads.load(Ordering::Relaxed);
-        assert!(!pool.promotion_weighed(&mistral, &h, false));
+        assert!(!pool.promotion_weighed(&mistral, &h, false, Requester::Swarm));
         assert_eq!(
             reads.load(Ordering::Relaxed),
             before,
@@ -16673,7 +16930,11 @@ mod tests {
         let hour = std::time::Duration::from_secs(3600);
         admit_and_insert_gpu_worker(&pool, &target, 3138, hour).await;
 
-        assert!(!pool.admit_to_gpu_as(&drafter, 3000, TYPICAL_GUEST, 0).await);
+        assert!(
+            !pool
+                .admit_to_gpu_as(&drafter, 3000, TYPICAL_GUEST, 0, Requester::Swarm)
+                .await
+        );
         assert!(
             pool.workers.get(&target).is_some(),
             "the target keeps the card"
@@ -16686,7 +16947,7 @@ mod tests {
 
         // The control: the same load as a tenant reclaims the idle model.
         assert!(
-            pool.admit_to_gpu_as(&drafter, 3000, Tenancy::Tenant, 0)
+            pool.admit_to_gpu_as(&drafter, 3000, Tenancy::Tenant, 0, Requester::Swarm)
                 .await
         );
         assert!(pool.workers.get(&target).is_none());
@@ -16767,7 +17028,8 @@ mod tests {
                 leaves_mb: p.room_a_guest_leaves_mb(&target),
             };
             assert_eq!(
-                p.admit_to_gpu_as(&drafter, guest_mb, spawn, 0).await,
+                p.admit_to_gpu_as(&drafter, guest_mb, spawn, 0, Requester::Swarm)
+                    .await,
                 on_card,
                 "the spawn's own admission agrees"
             );
@@ -17151,7 +17413,10 @@ mod tests {
         pool.set_vram_budget_mb(7_000);
         pool.test_cost_curve
             .insert(target.clone(), (fixed, per_layer));
-        assert!(pool.planning_on_card(&target), "fixture: a card plan");
+        assert!(
+            pool.planning_on_card(&target, Requester::Swarm),
+            "fixture: a card plan"
+        );
         let alone = pool
             .max_hostable_layers_for_planning(&target, Requester::Swarm)
             .expect("a bound");
@@ -17200,7 +17465,10 @@ mod tests {
             p
         };
         let pool = pool_with("/tmp/swarmllm-beside-guest-card");
-        assert!(pool.planning_on_card(&target), "fixture: a card plan");
+        assert!(
+            pool.planning_on_card(&target, Requester::Swarm),
+            "fixture: a card plan"
+        );
         let guest_mb = pool.estimate_gpu_footprint_mb(&drafter, Some(range), KvCharge::Typical);
         assert!(guest_mb > 0, "fixture: the drafter is priced");
         let alone = pool
@@ -17313,7 +17581,10 @@ mod tests {
             p
         };
         let pool = pool_with("/tmp/swarmllm-beside-guest-leaves");
-        assert!(pool.planning_on_card(&target), "fixture: a card plan");
+        assert!(
+            pool.planning_on_card(&target, Requester::Swarm),
+            "fixture: a card plan"
+        );
         let beside = pool
             .max_hostable_layers_beside_guest(
                 &target,
@@ -17704,7 +17975,7 @@ mod tests {
         pool.test_footprint_inputs
             .insert(small.clone(), qwen3_1_7b());
         let plan = [(0u32, 27u32)];
-        let plan_mb = pool.machine_mb_a_plan_adds(&target, &plan, &[]);
+        let plan_mb = pool.machine_mb_a_plan_adds(&target, &plan, &[], Requester::Swarm);
         assert!(
             (6_000..12_000).contains(&plan_mb),
             "fixture: the split of [0..27) puts most of it in system memory: {plan_mb} MB"
@@ -17936,7 +18207,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
         let (tx, _rx) = mpsc::channel(RESPONSE_CHANNEL_CAPACITY);
-        let (_later, displaced) = h.register_response(id, tx, false);
+        let (_later, displaced) = h.register_response(id, tx, false, Requester::Swarm);
         assert!(
             displaced.is_some(),
             "the later call took the first one's place"
@@ -18045,8 +18316,8 @@ mod tests {
             (p, data_dir)
         };
         let (probe, probe_dir) = setup("probe");
-        let held_mb = probe.fresh_spawn_machine_mb(&model, held);
-        let asked_mb = probe.fresh_spawn_machine_mb(&model, asked);
+        let held_mb = probe.fresh_spawn_machine_mb(&model, held, Requester::Swarm);
+        let asked_mb = probe.fresh_spawn_machine_mb(&model, asked, Requester::Swarm);
         let (_, per_layer_mb) = probe
             .segment_cost_curve(&model, false)
             .expect("fixture: a readable header");
@@ -18120,9 +18391,9 @@ mod tests {
         };
         let (probe, probe_dir) = setup("probe");
         let (held_mb, three_mb, asked_mb) = (
-            probe.fresh_spawn_machine_mb(&model, held),
-            probe.fresh_spawn_machine_mb(&model, (3, 6)),
-            probe.fresh_spawn_machine_mb(&model, asked),
+            probe.fresh_spawn_machine_mb(&model, held, Requester::Swarm),
+            probe.fresh_spawn_machine_mb(&model, (3, 6), Requester::Swarm),
+            probe.fresh_spawn_machine_mb(&model, asked, Requester::Swarm),
         );
         let (_, per_layer_mb) = probe
             .segment_cost_curve(&model, false)
@@ -18382,14 +18653,26 @@ mod tests {
             "fixture: the replacement would load — the fit alone would retire the worker"
         );
         let kept = p
-            .held_layers_a_fresh_spawn_keeps_on_card(&model, asked, &[held], asked)
+            .held_layers_a_fresh_spawn_keeps_on_card(
+                &model,
+                asked,
+                &[held],
+                asked,
+                Requester::Swarm,
+            )
             .expect("priced from the header");
         assert!(
             kept < 3,
             "fixture: the replacement's processor run takes held layers ({kept})"
         );
         assert_eq!(
-            p.held_layers_a_fresh_spawn_keeps_on_card(&model, held, &[held], asked),
+            p.held_layers_a_fresh_spawn_keeps_on_card(
+                &model,
+                held,
+                &[held],
+                asked,
+                Requester::Swarm
+            ),
             Some(3),
             "fixture: a spawn of just what it holds would keep all three there"
         );
@@ -18413,7 +18696,13 @@ mod tests {
         // only if its own spawn does.
         let partial = (3, 7);
         let kept_of_partial = p
-            .held_layers_a_fresh_spawn_keeps_on_card(&model, partial, &[held], partial)
+            .held_layers_a_fresh_spawn_keeps_on_card(
+                &model,
+                partial,
+                &[held],
+                partial,
+                Requester::Swarm,
+            )
             .expect("priced from the header");
         assert!(
             kept_of_partial < 2,
@@ -18427,7 +18716,13 @@ mod tests {
         // there, and the replacement may go ahead.
         p.set_vram_budget_mb(asked_mb * 2);
         assert_eq!(
-            p.held_layers_a_fresh_spawn_keeps_on_card(&model, asked, &[held], asked),
+            p.held_layers_a_fresh_spawn_keeps_on_card(
+                &model,
+                asked,
+                &[held],
+                asked,
+                Requester::Swarm
+            ),
             Some(3)
         );
         assert!(p.replacement_keeps_the_card(&model, asked, &h));
@@ -18564,7 +18859,13 @@ mod tests {
             "fixture: every held layer on the card"
         );
         assert_eq!(
-            p.held_layers_a_fresh_spawn_keeps_on_card(&model, asked, &[held], asked),
+            p.held_layers_a_fresh_spawn_keeps_on_card(
+                &model,
+                asked,
+                &[held],
+                asked,
+                Requester::Swarm
+            ),
             Some(3),
             "the replacement's card takes the range's end — every held layer"
         );
@@ -18735,16 +19036,16 @@ mod tests {
         let (p, _) = setup("idle");
         admit_and_insert_gpu_worker(&p, &idle, 2000, hour).await;
         assert_eq!(
-            p.would_fit_on_gpu(&wanted),
+            p.would_fit_on_gpu(&wanted, Requester::Swarm),
             Some(true),
             "idle for an hour: admission frees it, so the 7B fits"
         );
         assert!(
-            !p.serves_on_cpu(&wanted),
+            !p.serves_on_cpu(&wanted, Requester::Swarm),
             "and the speed answer is the card's"
         );
         assert_eq!(
-            p.gpu_estimate_and_fit(&wanted).1,
+            p.gpu_estimate_and_fit(&wanted, Requester::Swarm).1,
             Some(true),
             "the listing agrees"
         );
@@ -18753,16 +19054,16 @@ mod tests {
         let h = admit_and_insert_gpu_worker(&busy, &idle, 2000, hour).await;
         h.note_conversation(Uuid::new_v4());
         assert_eq!(
-            busy.would_fit_on_gpu(&wanted),
+            busy.would_fit_on_gpu(&wanted, Requester::Swarm),
             Some(false),
             "a model in use keeps the card"
         );
-        assert!(busy.serves_on_cpu(&wanted));
+        assert!(busy.serves_on_cpu(&wanted, Requester::Swarm));
 
         let (recent, _) = setup("recent");
         admit_and_insert_gpu_worker(&recent, &idle, 2000, std::time::Duration::ZERO).await;
         assert_eq!(
-            recent.would_fit_on_gpu(&wanted),
+            recent.would_fit_on_gpu(&wanted, Requester::Swarm),
             Some(false),
             "used moments ago: the idle floor protects it"
         );
@@ -18820,29 +19121,29 @@ mod tests {
         let h = admit_and_insert_gpu_worker(&p, &m, 1500, std::time::Duration::ZERO).await;
         h.record_charged_segment((20, 28), 0);
         assert_eq!(
-            p.would_fit_on_gpu(&m),
+            p.would_fit_on_gpu(&m, Requester::Swarm),
             Some(false),
             "layers 20-28 on the card are not the whole model on it"
         );
         assert_eq!(
-            p.gpu_estimate_and_fit(&m).1,
+            p.gpu_estimate_and_fit(&m, Requester::Swarm).1,
             Some(false),
             "the listing agrees"
         );
         assert!(
-            p.serves_on_cpu(&m),
+            p.serves_on_cpu(&m, Requester::Swarm),
             "and the speed answer is not the card's"
         );
 
         // The same worker grown to cover every layer: already paid for.
         h.record_charged_segment((0, 20), 0);
         assert_eq!(
-            p.would_fit_on_gpu(&m),
+            p.would_fit_on_gpu(&m, Requester::Swarm),
             Some(true),
             "every layer on the card is the whole model, whatever the budget reads"
         );
         assert_eq!(
-            p.gpu_estimate_and_fit(&m).1,
+            p.gpu_estimate_and_fit(&m, Requester::Swarm).1,
             Some(true),
             "the listing agrees"
         );
@@ -18855,12 +19156,12 @@ mod tests {
         let h = admit_and_insert_gpu_worker(&q, &m, 1500, std::time::Duration::ZERO).await;
         h.record_charged_segment((20, 28), 0);
         assert_eq!(
-            q.would_fit_on_gpu(&m),
+            q.would_fit_on_gpu(&m, Requester::Swarm),
             Some(true),
             "the memory the segment holds goes to the whole model"
         );
         assert_eq!(
-            q.gpu_estimate_and_fit(&m).1,
+            q.gpu_estimate_and_fit(&m, Requester::Swarm).1,
             Some(true),
             "the listing agrees"
         );
@@ -18886,17 +19187,17 @@ mod tests {
         s.workers.insert(m.clone(), h.clone());
         h.record_charged_segment((0, 28), 0);
         assert_eq!(
-            s.would_fit_on_gpu(&m),
+            s.would_fit_on_gpu(&m, Requester::Swarm),
             Some(false),
             "every layer held, eight on the processor: the model does not fit the card"
         );
         assert_eq!(
-            s.gpu_estimate_and_fit(&m).1,
+            s.gpu_estimate_and_fit(&m, Requester::Swarm).1,
             Some(false),
             "the listing agrees"
         );
         assert!(
-            s.serves_on_cpu(&m),
+            s.serves_on_cpu(&m, Requester::Swarm),
             "and the priced search may compete with running it here"
         );
     }
@@ -19666,7 +19967,7 @@ mod tests {
             "spawned and charged, never asked to load"
         );
         let (tx, _rx) = mpsc::channel(1);
-        let _guard = h.register_response(Uuid::new_v4(), tx, false);
+        let _guard = h.register_response(Uuid::new_v4(), tx, false, Requester::Swarm);
         assert_eq!(
             DepartedWorker::from(&*h).card_mb_it_frees(),
             4_300,
@@ -19777,6 +20078,7 @@ mod tests {
             spawned_at,
             last_used: AtomicU64::new(0),
             ran_a_request: AtomicBool::new(false),
+            owner_last_used: AtomicU64::new(NEVER_USED),
             asked_to_load: Arc::new(AtomicBool::new(false)),
             kv_holders: std::sync::Mutex::new(std::collections::HashMap::new()),
             awaiting_first_step: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -19823,12 +20125,15 @@ mod tests {
         // As the spawn records it (`get_or_spawn`).
         h.record_segment_placed_as_spawned((0, 28));
         p.workers.insert(split.clone(), h);
-        assert_eq!(p.card_share_for_planning(&split), Some((13, 28)));
+        assert_eq!(
+            p.card_share_for_planning(&split, Requester::Swarm),
+            Some((13, 28))
+        );
         let whole = ModelId("whole-on-card".into());
         let h = fake_worker_handle_spawned(false, None, false, std::time::Instant::now()).await;
         h.record_segment_placed_as_spawned((0, 28));
         p.workers.insert(whole.clone(), h);
-        assert_eq!(p.card_share_for_planning(&whole), None);
+        assert_eq!(p.card_share_for_planning(&whole, Requester::Swarm), None);
 
         // Experts kept in RAM (#138 (3)): every layer is on the card, which
         // the summary says, and the planner is given the layers whose experts
@@ -19848,7 +20153,10 @@ mod tests {
         assert!(h.short_of_the_card());
         h.record_segment_placed_as_spawned((0, 48));
         p.workers.insert(moe.clone(), h);
-        assert_eq!(p.card_share_for_planning(&moe), Some((25, 48)));
+        assert_eq!(
+            p.card_share_for_planning(&moe, Requester::Swarm),
+            Some((25, 48))
+        );
         let summary = p
             .worker_summaries()
             .into_iter()
@@ -19902,7 +20210,10 @@ mod tests {
         );
         assert_eq!(h.layers_on_card(), 13 + 4 + 2);
         p.workers.insert(m.clone(), h);
-        assert_eq!(p.card_share_for_planning(&m), Some((19, 40)));
+        assert_eq!(
+            p.card_share_for_planning(&m, Requester::Swarm),
+            Some((19, 40))
+        );
         let told = p.resident_model_layers();
         assert_eq!(
             (told[0].layers, told[0].card_layers),
@@ -19922,7 +20233,7 @@ mod tests {
         h.record_segment_placed_as_spawned((0, 28));
         assert_eq!(h.layers_on_card(), 0);
         q.workers.insert(m.clone(), h);
-        assert_eq!(q.card_share_for_planning(&m), None);
+        assert_eq!(q.card_share_for_planning(&m, Requester::Swarm), None);
         assert_eq!(q.resident_model_layers()[0].card_layers, Some(0));
         assert_eq!(
             q.resident_model_layers()[0].card_free_at_load_mb,
@@ -20015,7 +20326,7 @@ mod tests {
         };
         let (p, m) = pool(4_400, (14, 28)).await;
         assert_eq!(
-            p.would_fit_on_gpu(&m),
+            p.would_fit_on_gpu(&m, Requester::Swarm),
             Some(false),
             "fixture: too big whole"
         );
@@ -20027,16 +20338,16 @@ mod tests {
             "fixture: room for some layers more, not the whole model: {growth}"
         );
         assert_eq!(
-            p.card_share_for_planning(&m),
+            p.card_share_for_planning(&m, Requester::Swarm),
             Some((14 + growth as usize, 28)),
             "every layer a plan may give it within its bound runs on the card"
         );
         // A model the card holds whole: its layers run on the card wherever.
         let (p, m) = pool(900, (14, 28)).await;
-        assert_eq!(p.card_share_for_planning(&m), None);
+        assert_eq!(p.card_share_for_planning(&m, Requester::Swarm), None);
         // Every layer held, all on the card: one device.
         let (p, m) = pool(4_400, (0, 28)).await;
-        assert_eq!(p.card_share_for_planning(&m), None);
+        assert_eq!(p.card_share_for_planning(&m, Requester::Swarm), None);
     }
 
     /// A split asks whether this node's part runs whole on the card before it
@@ -20295,7 +20606,7 @@ mod tests {
             .insert(m.clone(), fake_worker_handle_on(false, None, true).await);
 
         assert_eq!(
-            p.would_fit_on_gpu(&m),
+            p.would_fit_on_gpu(&m, Requester::Swarm),
             None,
             "there is no card and no budget, so there is nothing to fit into. \
              Before this the resident check read placement and answered Some(true)"
@@ -22327,7 +22638,10 @@ mod admission_tests {
             ["--gpu-layers", "0"]
         );
         // The planner prices it by the layers whose experts run on the card.
-        assert_eq!(p.card_share_for_planning(&m), Some((48 - in_ram, 48)));
+        assert_eq!(
+            p.card_share_for_planning(&m, Requester::Swarm),
+            Some((48 - in_ram, 48))
+        );
     }
 
     /// Gemma 4 E2B Q4_K_M's shape (its file's MB figures, as MiB): 35 layers, 3,447, 1,927 of it the
@@ -23150,7 +23464,8 @@ mod admission_tests {
         p.set_vram_budget_mb(6_511);
         let m = ModelId("whole-first-range".into());
         assert!(
-            !p.admit_to_gpu_as(&m, 6_351, Tenancy::Tenant, 261).await,
+            !p.admit_to_gpu_as(&m, 6_351, Tenancy::Tenant, 261, Requester::Swarm)
+                .await,
             "6,351 + 261 > 6,511: not whole"
         );
         assert_eq!(
@@ -23160,13 +23475,15 @@ mod admission_tests {
         );
         assert!(p.fits_whole_leaving(6_351, 0), "control: whole alone fits");
         assert!(
-            p.admit_to_gpu_as(&m, 6_351, Tenancy::Tenant, 0).await,
+            p.admit_to_gpu_as(&m, 6_351, Tenancy::Tenant, 0, Requester::Swarm)
+                .await,
             "nothing to leave: admitted whole, as before"
         );
         assert_eq!(p.vram_committed_mb(), 6_351, "charged its own share only");
         let other = ModelId("whole-first-range-room".into());
         assert!(
-            p.admit_to_gpu_as(&other, 100, Tenancy::Tenant, 50).await,
+            p.admit_to_gpu_as(&other, 100, Tenancy::Tenant, 50, Requester::Swarm)
+                .await,
             "6,351 + 100 + 50 <= 6,511: whole, and the room is weighed, not charged"
         );
         assert_eq!(p.vram_committed_mb(), 6_451);
@@ -23739,7 +24056,7 @@ mod admission_tests {
         let (h, _end) = worker_sized_for(Some(KvCharge::Typical)).await;
         p.workers.insert(other.clone(), h.clone());
         let (tx, _rx) = mpsc::channel(1);
-        let (_busy, _) = h.register_response(Uuid::new_v4(), tx, false);
+        let (_busy, _) = h.register_response(Uuid::new_v4(), tx, false, Requester::Swarm);
         assert!(
             !p.make_room_for_a_longer_prompt(&other, h, rid, segment, 8_000)
                 .await
@@ -23885,7 +24202,7 @@ mod admission_tests {
             "the card holds none of it now: no fresh split to plan"
         );
         assert!(
-            !p.planning_on_card(&m),
+            !p.planning_on_card(&m, Requester::Swarm),
             "its layers are weighed on the processor"
         );
         assert_eq!(p.vram_budget_mb(), Some(100), "and the reading is kept");
@@ -24180,14 +24497,20 @@ mod admission_tests {
         let rid = Uuid::new_v4();
         let refused: Result<(), SwarmError> =
             Err(SwarmError::LocalMemoryUnavailable("8 layers 19..27".into()));
-        p.note_load_refusal(rid, &m, (19, 27), &refused);
+        p.note_load_refusal(rid, &m, (19, 27), &refused, Requester::Swarm);
         let smaller: Result<(), SwarmError> =
             Err(SwarmError::LocalMemoryUnavailable("5 layers 43..48".into()));
-        p.note_load_refusal(rid, &m, (43, 48), &smaller);
+        p.note_load_refusal(rid, &m, (43, 48), &smaller, Requester::Swarm);
         let other = Uuid::new_v4();
         let dead: Result<(), SwarmError> = Err(SwarmError::ServiceUnavailable("dead".into()));
-        p.note_load_refusal(other, &m, (0, 48), &dead);
-        p.note_load_refusal(other, &m, (0, 48), &Ok::<(), SwarmError>(()));
+        p.note_load_refusal(other, &m, (0, 48), &dead, Requester::Swarm);
+        p.note_load_refusal(
+            other,
+            &m,
+            (0, 48),
+            &Ok::<(), SwarmError>(()),
+            Requester::Swarm,
+        );
 
         assert_eq!(p.take_layers_refused(rid), Some(5));
         assert_eq!(p.take_layers_refused(rid), None, "taken once");
@@ -24235,15 +24558,21 @@ mod admission_tests {
         let m = ModelId("no-such-model".into());
         // No geometry to read: both must say "unknowable", not "no".
         assert_eq!(
-            p.gpu_estimate_and_fit(&m),
-            (p.estimated_gpu_mb(&m), p.would_fit_on_gpu(&m))
+            p.gpu_estimate_and_fit(&m, Requester::Swarm),
+            (
+                p.estimated_gpu_mb(&m),
+                p.would_fit_on_gpu(&m, Requester::Swarm)
+            )
         );
-        assert_eq!(p.gpu_estimate_and_fit(&m), (None, None));
+        assert_eq!(p.gpu_estimate_and_fit(&m, Requester::Swarm), (None, None));
         // A budget alone does not make an unreadable model judgeable.
         p.set_vram_budget_mb(6000);
         assert_eq!(
-            p.gpu_estimate_and_fit(&m),
-            (p.estimated_gpu_mb(&m), p.would_fit_on_gpu(&m))
+            p.gpu_estimate_and_fit(&m, Requester::Swarm),
+            (
+                p.estimated_gpu_mb(&m),
+                p.would_fit_on_gpu(&m, Requester::Swarm)
+            )
         );
     }
 
@@ -24254,27 +24583,39 @@ mod admission_tests {
         let p = pool();
         let m = ModelId("asked-for".into());
         assert_eq!(
-            p.fits_in_budget(&m, 0, 6000),
+            p.fits_in_budget(&m, 0, 6000, Requester::Swarm),
             None,
             "no geometry is unknowable"
         );
         assert_eq!(
-            p.fits_in_budget(&m, 4000, 0),
+            p.fits_in_budget(&m, 4000, 0, Requester::Swarm),
             None,
             "no budget is unknowable"
         );
-        assert_eq!(p.fits_in_budget(&m, 4000, 6000), Some(true));
-        assert_eq!(p.fits_in_budget(&m, 6001, 6000), Some(false));
         assert_eq!(
-            p.fits_in_budget(&m, 6000, 6000),
+            p.fits_in_budget(&m, 4000, 6000, Requester::Swarm),
+            Some(true)
+        );
+        assert_eq!(
+            p.fits_in_budget(&m, 6001, 6000, Requester::Swarm),
+            Some(false)
+        );
+        assert_eq!(
+            p.fits_in_budget(&m, 6000, 6000, Requester::Swarm),
             Some(true),
             "exactly full fits"
         );
         // Charged models are counted against the budget, not ignored — a charge
         // with no live worker behind it (a spawn under way) is never reclaimable.
         assert!(p.admit_to_gpu(&ModelId("resident".into()), 4000));
-        assert_eq!(p.fits_in_budget(&m, 2500, 6000), Some(false));
-        assert_eq!(p.fits_in_budget(&m, 2000, 6000), Some(true));
+        assert_eq!(
+            p.fits_in_budget(&m, 2500, 6000, Requester::Swarm),
+            Some(false)
+        );
+        assert_eq!(
+            p.fits_in_budget(&m, 2000, 6000, Requester::Swarm),
+            Some(true)
+        );
     }
 
     /// With no budget configured, behaviour must be exactly as before — this
@@ -24956,16 +25297,25 @@ mod admission_tests {
             ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-serves-on-cpu-test"));
         let model = ModelId("m".into());
         pool.set_gpu_detected(false);
-        assert!(pool.serves_on_cpu(&model), "no card detected");
+        assert!(
+            pool.serves_on_cpu(&model, Requester::Swarm),
+            "no card detected"
+        );
         pool.set_gpu_detected(true);
         pool.gpu_layers
             .store(0, std::sync::atomic::Ordering::Relaxed);
-        assert!(pool.serves_on_cpu(&model), "told to use the processor");
+        assert!(
+            pool.serves_on_cpu(&model, Requester::Swarm),
+            "told to use the processor"
+        );
         pool.gpu_layers
             .store(-1, std::sync::atomic::Ordering::Relaxed);
         // A build without CUDA runs everything on the processor; with CUDA, a
         // card that is present and not known to be too small is not degraded.
-        assert_eq!(pool.serves_on_cpu(&model), !cfg!(feature = "candle-cuda"));
+        assert_eq!(
+            pool.serves_on_cpu(&model, Requester::Swarm),
+            !cfg!(feature = "candle-cuda")
+        );
     }
 }
 

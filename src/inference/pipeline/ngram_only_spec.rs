@@ -315,6 +315,7 @@ impl FarRunGuesses {
                     token,
                     gamma: take,
                 },
+                crate::inference::pipeline::worker_requester(&exec.request),
                 None,
             )
             .await?;

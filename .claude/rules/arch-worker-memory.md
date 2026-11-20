@@ -54,6 +54,10 @@ A resource taken before an `.await` is returned by a guard that releases on DROP
 - The owner's prompt and short checks (`cpu_pools::check_pool`; A/B `SWARMLLM_CHECK_POOL=narrow`) run on `ResourceConfig::owner_prefill_threads`; the swarm's prompts AND its 2-32 position checks at the contribution width on physical cores (`cpu_pools::swarm_check_threads`; A/B `SWARMLLM_CHECK_POOL=owner-only`).
 - A one-token decode keeps its calibrated width, widened for the OWNER's step only where processor work is routed experts in RAM (`SplitModel::processor_works_only_on_experts`, #399; A/B `SWARMLLM_OWNER_DECODE=contribution`). A wider pick must beat the default (`cpu_pools::WIDEN_MARGIN_PCT`), is re-checked (#396; A/B `SWARMLLM_DECODE_CONFIRM=0`) and proved in blocks (`cpu_pools::PROVE_BLOCK_STEPS`, #453; A/B `SWARMLLM_DECODE_PROVE=0`).
 - **Memory:** `ModelProcessPool::ram_budget_now(requester)` is REQUIRED everywhere a budget is read and picks the cap via `RamBudget::judging` — swarm `inference_ram_budget_mb`, owner `ResourceConfig::owners_ram_budget_mb`; anti-swap headroom binds both. The scheduler names it with `pipeline::requester_for_override`. A drafter is weighed as the request it guesses for (`process_pool::drafter_requester`; #351; A/B `SWARMLLM_DRAFTER_CAP=swarm`). What the OWNER may run is **`vram::owners_model_budget_mb`** (`fits_here`); `node_model_budget_mb` stays the swarm's (#438).
+- **The card too** (#483 (a)): a reclaim reads idle time as the ASKER sees it — **`WorkerHandle::idle_secs_for(asking)`**. The swarm's request sees every use; the owner's sees only the owner's own (`owner_last_used`). So the owner's request takes the card from a model only the swarm used lately.
+  - `asking` is REQUIRED from `vram_reclaim_candidates` through both reclaims and every planner reader (`fits_in_budget`, `split_budget_for_planning`, `serves_on_cpu`, …).
+  - `register_response` REQUIRES the requester.
+  - Never mid-reply (`in_use`).
 
 → `docs/invariants/memory.md` § "The contribution level caps the swarm's work, not the owner's prompt (2026-09-26)"
 

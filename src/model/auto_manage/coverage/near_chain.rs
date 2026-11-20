@@ -1490,7 +1490,12 @@ impl AutoShardManager {
         let held: Vec<(u32, u32)> = self
             .shared_state
             .model_process_pool
-            .held_layer_ranges_for_planning(model_id)
+            // The near chain serves the swarm: its layers are weighed as the
+            // swarm's spawn places them.
+            .held_layer_ranges_for_planning(
+                model_id,
+                crate::inference::process_pool::Requester::Swarm,
+            )
             .iter()
             .map(|held| held.range)
             .collect();

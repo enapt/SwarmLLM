@@ -917,6 +917,22 @@ idle model …" naming the 12B. **Next: should an OWNER's ask take the card from
 (the peer's next forward refused and re-planned elsewhere; never mid-reply, #93)? Prior art to look up first: vLLM's
 priority scheduling and preemption, Ollama's eviction order. Closest rule here: #442 (a drafter holding the card kept
 the same 14B at 5.5 tok/s; a WHOLE placement may now take it).
+**(a) F1 FIXED 2026-11-20 — the owner's request takes the card from a model only the swarm used lately.** Idle time is
+read as the asker sees it (`WorkerHandle::idle_secs_for`): the swarm's request sees every use, the owner's only the
+owner's own (`owner_last_used`). `asking` is REQUIRED through both reclaims and every planner reader, so the plan and the
+spawn agree; never mid-reply (`in_use`, #93). The swarm's next request for that model is re-planned around this node.
+Prior art: Ollama's `findRunnerToUnload` (`sched.go`: a runner with a request in flight is never evicted, the idle one
+goes first — no owner, so whoever asks waits behind whoever is busy); BOINC (GPU work suspended while the computer's
+user is active); vLLM's priority preemption (recompute later — it has nowhere else to run; a swarm does). Taken:
+in-flight protection and the owner's precedence; not taken: preemption. Test
+`the_owners_request_takes_the_card_from_a_model_only_the_swarm_used` (fails with the owner's view switched off).
+Evidence: `docs/invariants/memory.md` § "The card too". **Left in (a):** **F2** — after one ask placed partly on the
+processor, the owner's NEXT asks within 5 s of each other never weigh promotion (`promotion_is_worth_weighing` reads the
+worker's own idle; the benchmark-loop trap), so a nightly's four back-to-back asks keep the first placement. Race to keep
+closed: a request registering between the check and the retirement (`grow_worker` retires on `in_use` alone). The
+`promotion_weighed` read costs an nvidia-smi call (~0.1 s), so a floor-less check needs a rate limit. **Residual** — a
+tenant mid-reply when the owner asks: the owner's request is placed as before, drained (Ollama) or preempted (vLLM)
+never; revisit only if a field report shows it.
 
 (b) **70B: 0 of 2, `LocalMemoryUnavailable`, with a laptop peer online.** By design the caller is told this node's own
 memory refused (`router::report_after_a_replan`: "our own memory shortfall is always reported" — its owner can act on

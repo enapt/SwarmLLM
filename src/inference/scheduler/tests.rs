@@ -8491,7 +8491,7 @@ fn the_planner_weighs_a_local_model_the_loader_would_split_on_the_card() {
     let (state, local, mid) = a_card_holder_of_a_model_it_must_split();
     let pool = &state.model_process_pool;
     assert!(
-        pool.serves_on_cpu(&mid),
+        pool.serves_on_cpu(&mid, crate::inference::process_pool::Requester::Swarm),
         "fixture: the speed answer must be 'processor', as in the field"
     );
     let in_ram_alone = pool
@@ -8665,7 +8665,7 @@ fn a_local_model_the_loader_splits_is_priced_with_the_cards_share() {
     let (state, local, mid) = a_card_holder_of_a_model_it_must_split_on(Some(card));
     let (on_card, total) = state
         .model_process_pool
-        .card_share_for_planning(&mid)
+        .card_share_for_planning(&mid, crate::inference::process_pool::Requester::Swarm)
         .expect("fixture: the loader splits this model");
     assert!(
         on_card > 0 && on_card < total,
@@ -8709,7 +8709,11 @@ fn a_local_model_the_loader_splits_is_priced_with_the_cards_share() {
         "a split runs {on_card} of {total} layers on the card: between the two ({expected})"
     );
     assert!(
-        (scheduler.local_speed_off_the_card(&mid) - expected).abs() < 1e-3,
+        (scheduler
+            .local_speed_off_the_card(&mid, crate::inference::process_pool::Requester::Swarm)
+            - expected)
+            .abs()
+            < 1e-3,
         "the hand-off gate's baseline is the same blend"
     );
     // A segment the card holds — this node's share of a split — runs at the
@@ -8767,7 +8771,7 @@ fn a_card_short_of_the_whole_model_shares_the_rest_with_a_peers_card() {
     let (state, local, mid) = a_card_holder_of_a_model_it_must_split_on(Some(card));
     let (on_card, total) = state
         .model_process_pool
-        .card_share_for_planning(&mid)
+        .card_share_for_planning(&mid, crate::inference::process_pool::Requester::Swarm)
         .expect("fixture: the loader splits this model");
     assert!(
         on_card > 0 && on_card < total,
@@ -8990,7 +8994,13 @@ fn a_replan_after_a_refused_range_gives_this_node_fewer_new_layers() {
     let refused: Result<(), crate::error::SwarmError> = Err(
         crate::error::SwarmError::LocalMemoryUnavailable("8 layers 20..28".into()),
     );
-    pool.note_load_refusal(rid, &mid, (20, 28), &refused);
+    pool.note_load_refusal(
+        rid,
+        &mid,
+        (20, 28),
+        &refused,
+        crate::inference::process_pool::Requester::Swarm,
+    );
     state.note_local_memory_refusal(rid);
 
     let after = local_candidate_for(&state, &local, &mid, rid);
@@ -9044,9 +9054,13 @@ fn a_replan_after_a_refused_prompt_holds_this_node_to_the_layers_that_fit() {
     let refused: Result<(), crate::error::SwarmError> = Err(
         crate::error::SwarmError::LocalMemoryUnavailable("8 layers 20..28".into()),
     );
-    state
-        .model_process_pool
-        .note_load_refusal(rid, &mid, (20, 28), &refused);
+    state.model_process_pool.note_load_refusal(
+        rid,
+        &mid,
+        (20, 28),
+        &refused,
+        crate::inference::process_pool::Requester::Swarm,
+    );
     state.note_local_memory_refusal(rid);
     assert_eq!(state.local_layers_fitting_for_request(rid), Some(5));
     assert_eq!(state.local_layers_refused_for_request(rid), Some(8));

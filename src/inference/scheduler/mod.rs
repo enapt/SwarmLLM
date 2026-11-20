@@ -3621,7 +3621,11 @@ impl PipelineScheduler {
     /// [`split_tokens_per_sec`]). The ONE answer for every route that would run
     /// such a model here — the search's local candidate and the whole-model
     /// hand-off gate's baseline (#129).
-    fn local_speed_off_the_card(&self, model_id: &ModelId) -> f32 {
+    fn local_speed_off_the_card(
+        &self,
+        model_id: &ModelId,
+        requester: crate::inference::process_pool::Requester,
+    ) -> f32 {
         let processor = self.local_processor_speed();
         let card =
             self.shared_state.gpu_info.as_ref().and_then(|g| {
@@ -3632,7 +3636,7 @@ impl PipelineScheduler {
             card,
             self.shared_state
                 .model_process_pool
-                .card_share_for_planning(model_id),
+                .card_share_for_planning(model_id, requester),
         )
     }
 
@@ -3914,10 +3918,19 @@ impl PipelineScheduler {
         // the request would actually get — a node whose card is too small for
         // this model was priced at its card's speed, which is a speed it was
         // not going to deliver. And the whole-model hand-off below.
+        // Whose request this is: the owner's spawn takes the card from a
+        // model only the swarm has used lately (#483 (a)), so the device is
+        // read as THEIR spawn would read it.
+        let requester = crate::inference::pipeline::requester_for_override(
+            self.shared_state.route_plan_override(request_id).as_ref(),
+        );
         let local_runs_on_processor = std::cell::OnceCell::new();
         let local_on_processor = || {
-            *local_runs_on_processor
-                .get_or_init(|| self.shared_state.model_process_pool.serves_on_cpu(model_id))
+            *local_runs_on_processor.get_or_init(|| {
+                self.shared_state
+                    .model_process_pool
+                    .serves_on_cpu(model_id, requester)
+            })
         };
 
         // Gather all candidates: nodes that have shards for this model
@@ -4099,7 +4112,8 @@ impl PipelineScheduler {
                         // runs when the model does not fit the card whole, so
                         // the request would get the processor here — with the
                         // card's share of a card/processor split.
-                        local_cpu_tokens_per_sec: self.local_speed_off_the_card(model_id),
+                        local_cpu_tokens_per_sec: self
+                            .local_speed_off_the_card(model_id, requester),
                         prompt_tokens,
                     },
                     purpose,
@@ -5138,6 +5152,13 @@ impl PipelineScheduler {
         keep: crate::types::KeepAsked,
     ) -> Vec<NodeCandidate> {
         let prompt_tokens = prompt.tokens;
+        // Bounded by the memory cap of whoever asked — the owner's, or the
+        // swarm's for a split a peer delegated here — as the spawn will weigh
+        // this request (#266), and its card read as their spawn reclaims it
+        // (#483 (a)).
+        let requester = crate::inference::pipeline::requester_for_override(
+            self.shared_state.route_plan_override(request_id).as_ref(),
+        );
         // Which computers this request may reach (None = any): this node
         // alone for a model kept on this computer or a request kept here
         // (#251), else private mode's set with any cross-pool extras the owner
@@ -5520,7 +5541,7 @@ impl PipelineScheduler {
             let local_card_share = if is_local {
                 self.shared_state
                     .model_process_pool
-                    .card_share_for_planning(&manifest.id)
+                    .card_share_for_planning(&manifest.id, requester)
             } else {
                 None
             };
@@ -5557,7 +5578,7 @@ impl PipelineScheduler {
                 if let Some((_, card, _)) = local_split_speeds {
                     card
                 } else if local_on_processor {
-                    self.local_speed_off_the_card(&manifest.id)
+                    self.local_speed_off_the_card(&manifest.id, requester)
                 } else {
                     crate::model::auto_manage::vram::node_tokens_per_sec_7b(local_device_name)
                         .unwrap_or(0.0)
@@ -5720,7 +5741,7 @@ impl PipelineScheduler {
             let held_ranges = if is_local {
                 self.shared_state
                     .model_process_pool
-                    .held_layer_ranges_for_planning(&manifest.id)
+                    .held_layer_ranges_for_planning(&manifest.id, requester)
             } else {
                 reported
                     .as_ref()
@@ -5755,12 +5776,6 @@ impl PipelineScheduler {
             };
             let mut published_room = None;
             let mut range_weights = None;
-            // Bounded by the memory cap of whoever asked — the owner's, or the
-            // swarm's for a split a peer delegated here — as the spawn will
-            // weigh this request (#266).
-            let requester = crate::inference::pipeline::requester_for_override(
-                self.shared_state.route_plan_override(request_id).as_ref(),
-            );
             // Room, and what loading the model would cost, from ONE residency
             // reading per candidate, so the memory bound and the load price
             // cannot disagree about what is already held.

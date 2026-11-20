@@ -699,7 +699,10 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
         // One reading of the model's geometry answers both. Asked separately
         // these parse `gguf_header.bin` and scan the model directory twice per
         // model, per request.
-        let (estimated_gpu_mb, fits_on_gpu) = pool.gpu_estimate_and_fit(&model_id);
+        // The dashboard is the owner's: "fits" as the owner's own load would
+        // find the card (#483 (a)).
+        let (estimated_gpu_mb, fits_on_gpu) =
+            pool.gpu_estimate_and_fit(&model_id, crate::inference::process_pool::Requester::Owner);
         let estimated_vram = estimated_gpu_mb.unwrap_or_else(|| {
             crate::model::auto_manage::estimate_model_vram_mb(m.total_size_bytes)
         });

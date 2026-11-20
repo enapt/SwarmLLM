@@ -3019,6 +3019,73 @@ peer cannot claim the owner's width. Guard:
 `the_owner_segment_guard_catches_a_forward_that_says_nothing`); round trip:
 `a_forward_says_whether_it_is_the_owners`.
 
+### The card too: the owner's request takes it from a model only the swarm used lately (2026-11-20, FUTURE_WORK #483 (a))
+
+**What it replaced.** Both card reclaims (`free_vram_for_admission`,
+`free_vram_for_split`) and every planner reading of them (`fits_in_budget` →
+`reclaimable_vram_mb`, `idle_vram_reclaimable_mb`, `split_budget_for_planning`,
+`card_share_for_planning`, `held_layer_ranges_for_planning`, `serves_on_cpu`)
+took a worker only when it was not `in_use` AND had been idle
+`vram_make_room_min_idle_secs()` (5 s) — idle by ANY use. A model serving a
+peer's replies one after another is never idle 5 s, so the owner's own request
+for another model planned and loaded it partly on the processor, every time.
+A tester's nightly on 0.3.300 (2026-11-20): the owner's 14B alone ran 5.1 tok/s
+(usually ~20), 4 of 4, beside a Gemma 4 12B on the card. That cause is INFERRED
+— the tester's log was not read — but the code path is exact: `Requester` set the
+RAM cap (above) and never reached the card.
+
+**Prior art.** Ollama's scheduler (`server/sched.go`, `findRunnerToUnload`)
+never evicts a runner with a reference held (a request in flight) and takes the
+idle one first. It has no owner, so whoever asks waits behind whoever is busy.
+BOINC suspends GPU work while the computer's user is active: the volunteer's own
+use comes first, whatever the project was doing. vLLM's priority scheduling
+preempts the lower-priority sequence and recomputes it later, because it has
+nowhere else to run it. A swarm has somewhere else to run it, so the swarm
+tenant's next request is re-planned elsewhere and nothing is preempted.
+
+**The rule.** Idle time is read as the ASKER sees it —
+**`WorkerHandle::idle_secs_for(asking)`**:
+- the swarm's request sees every use (`idle_secs`, as before);
+- the owner's sees only the owner's own (`owner_last_used`, stamped at the same
+  two moments as `last_used` — `register_response` and `ResponseGuard`'s drop —
+  for `Requester::Owner` only; `NEVER_USED` reads as the worker's residency).
+
+`asking` is a REQUIRED argument from `vram_reclaim_candidates` through both
+reclaims and every planner reader listed above, so the plan and the spawn take
+the same card. `register_response`'s requester is REQUIRED as well, so no reply
+stamps use without saying whose it was. The batched decode path carries it per
+step (`BatchSchedulerMsg::Forward::requester`; `forward_batch(.., users)`).
+`in_use` still protects a worker MID-REPLY from both (#93). The owner's own use
+protects a model from the owner for the same 5 s, so two of the owner's models
+alternating do not evict each other.
+
+**What it costs the swarm.** A peer's next request for the model that gave way
+is re-planned around this node (`get_or_spawn` as the swarm's tenant reads the
+owner's model as recently used), or loads on whatever is left. Nothing a peer
+sends can claim the owner's view: `Requester` is set by the daemon
+(`pipeline::worker_requester`, `requester_for_override`), never off the wire. A
+peer sees this node refuse more often while its owner is using it. That reveals
+about as much as reply timing already does.
+
+**Callers that keep the swarm's view, and why:**
+- `replacement_keeps_the_card` and `peer_load_refusal`: a peer's up-front
+  question.
+- the near chain's `loaded_outside_near_segment`: it serves the swarm.
+- the batched load in `forward_batch`: its prompt passes already loaded it.
+
+The dashboard's "fits on the card" reads the owner's view.
+
+**Still open (FUTURE_WORK #483 (a)).** F2: a split worker the owner asks again
+within 5 s of its own last reply is never weighed for promotion
+(`promotion_is_worth_weighing` reads the worker's own idle). Also open: a tenant
+that is busy mid-reply when the owner asks. The owner's request is then placed
+as before (partly on the processor), and only promotion (F2) brings it back.
+Draining the tenant (Ollama) and preempting it (vLLM) were not taken.
+
+Test: `the_owners_request_takes_the_card_from_a_model_only_the_swarm_used`
+(fails with `idle_secs_for` reading `idle_secs` for the owner: 0 MB reclaimable
+instead of 3,138).
+
 **From the rules file (moved 2026-10-02):**
 
 **`process_pool::Requester`** is a REQUIRED argument of `ModelProcessPool::generate`

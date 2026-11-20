@@ -800,6 +800,7 @@ impl SplitBlockDrafter {
                     },
                 },
                 &payload,
+                crate::inference::pipeline::worker_requester(&exec.request),
             )
             .await
             .and_then(Guesses::read);
@@ -885,6 +886,7 @@ impl SplitBlockDrafter {
                     tree: 0,
                 },
                 &[],
+                crate::inference::pipeline::worker_requester(&exec.request),
             )
             .await;
         self.calls += 1;
