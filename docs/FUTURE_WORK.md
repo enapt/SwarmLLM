@@ -4414,7 +4414,10 @@ card). On the README's headline shape — the 14B half here, half in Australia, 
 this card (`~/swarmllm-gate/deep/fr/real_link_readme303`, main at `54876c4f9`, hold on/off/on/off/on) — code replies
 read 33.32, 33.64, 32.10 tok/s held against 36.81, 37.16 off, this side's forwards ~38 ms against ~27, drafting +15%.
 The 27B split gained (+13%, `split27_clock`; 25 vs 74-76 ms a forward) because its guesses run inside the segment's
-own worker. **Off by default** (`SWARMLLM_CARD_CLOCK_HOLD=1` turns it on); it never shipped on.
+own worker. **Off by default** (`SWARMLLM_CARD_CLOCK_HOLD=1` turns it on); it never shipped on. With it off, main
+matches published 0.3.302 on that shape (`~/swarmllm-gate/deep/fr/ab302main.sh`, alternating, 21:15-21:33Z): code 36.4,
+38.2, 38.1, 22.6 (.302) vs 37.6, 32.4, 37.6, 24.1 (main); prose 9.7-14.6 vs 8.4-14.5 — the same spread, the link noisy
+that hour (both builds dipped to 22-24 once).
 
 **What is needed**: hold a card only where it would otherwise stand idle — no other process of this node working
 on it. A worker cannot see another process's stream; the daemon can (`WorkerHandle::in_use`, the drafter beside its
