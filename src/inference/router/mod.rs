@@ -362,11 +362,11 @@ pub(crate) fn report_after_a_replan(
     if !(declined_again || no_route) {
         return later;
     }
-    let a_holder_was_busy = offered.as_ref().is_some_and(|o| {
-        o.holders
-            .iter()
-            .any(crate::error::HolderRoom::short_while_busy)
-    });
+    // Busy (#479) or paused for heat or an update with layers that would close
+    // the gap (#483 (b)): the room may be back in minutes.
+    let a_holder_was_busy = offered
+        .as_ref()
+        .is_some_and(|o| crate::error::room_short_for_a_moment(o.layers, o.num_layers, &o.holders));
     if refusals_counted_loads
         && !a_holder_was_busy
         && matches!(later, SwarmError::SwarmShortOfMemory { .. })
@@ -380,12 +380,15 @@ pub(crate) fn report_after_a_replan(
     // not give way yet (#479): a 70B was refused "room for about 73 of its 80
     // layers … trying again won't help" 19 s after that holder served another
     // model, and the next ask, 69 s later, planned 80 layers there and ran.
+    // So is a holder of the model paused for heat or an update whose layers
+    // would close the gap (#483 (b)): a 70B was told "trying again won't help"
+    // while the laptop holding half of it cooled.
+    let paused = offered
+        .as_ref()
+        .and_then(|o| crate::error::describe_paused_holders(o.num_layers, &o.holders));
     let short = offered.filter(|o| {
         o.layers.is_none_or(|layers| layers < o.num_layers)
-            && !o
-                .holders
-                .iter()
-                .any(crate::error::HolderRoom::short_while_busy)
+            && !crate::error::room_short_for_a_moment(o.layers, o.num_layers, &o.holders)
     });
     match short {
         Some(o) => SwarmError::SwarmShortOfMemory {
@@ -394,7 +397,9 @@ pub(crate) fn report_after_a_replan(
         },
         None => SwarmError::HoldersDeclined {
             model_id: model_id.to_string(),
-            reason: refusal_in_the_holders_words(if declined_again { &later } else { &first }),
+            reason: paused.unwrap_or_else(|| {
+                refusal_in_the_holders_words(if declined_again { &later } else { &first })
+            }),
         },
     }
 }

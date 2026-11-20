@@ -9729,6 +9729,111 @@ fn a_model_no_holder_could_ever_hold_is_refused_by_the_planner() {
     assert_eq!(assignment.segments.last().unwrap().layer_range.1, 32);
 }
 
+/// A holder paused for a moment — cooling (#440) or draining for an update
+/// (#444) — is no candidate, and the planner's "not enough memory" used to
+/// leave it out: a 70B was told "trying again won't help" while the 16 GB
+/// laptop holding it cooled (#483 (b), 2026-11-20). Where its layers would
+/// close the gap the refusal is the holders' moment — `HoldersDeclined`, try
+/// again shortly — naming it and why; a holder held back for a reason that
+/// lasts (a metered connection) changes nothing.
+#[test]
+fn a_shortfall_a_cooling_holder_would_close_is_the_holders_moment() {
+    let (state, local, b, c, model) = two_whole_model_card_peers();
+    let geometry = crate::model::auto_manage::vram::VramFootprintInputs {
+        quantized_weight_bytes: 4_000_000_000,
+        host_resident_bytes: 0,
+        head_bytes: 0,
+        unquantized_bytes_per_element: None,
+        vocab_size: 32_000,
+        embedding_length: 4096,
+        segment_layers: 32,
+        kv: crate::inference::split::kv_budget::KvPrice::uniform(
+            32,
+            8,
+            32,
+            128,
+            crate::inference::layers::KvAttention::Standard,
+        ),
+        rope_dim: 128,
+        effective_context: 4096,
+        is_first: true,
+        embedding_gatherable: true,
+        splits_across_devices: true,
+    };
+    state
+        .model_process_pool
+        .test_footprint_inputs
+        .insert(model.clone(), geometry);
+    let (fixed, per_layer) = state
+        .model_process_pool
+        .segment_cost_curve(&model, false)
+        .unwrap();
+    // `b` can only ever hold 11 of the 32 layers; `c`, which holds them all,
+    // takes no work this minute.
+    let set = |n: &crate::types::NodeId, f: &dyn Fn(&mut crate::types::NodeCapability)| {
+        f(state
+            .peer_registry
+            .get_mut(n)
+            .unwrap()
+            .capability
+            .as_mut()
+            .unwrap())
+    };
+    set(&b, &|cap| {
+        cap.model_memory_ceiling_mb = Some(fixed + per_layer * 11)
+    });
+    let hold_c = |because: Option<&str>| {
+        set(&c, &|cap| {
+            cap.can_serve_inference = because.is_none();
+            cap.inference_held_because = because.map(str::to_string);
+        })
+    };
+    let scheduler =
+        PipelineScheduler::with_local_processor_speed(state.clone(), LOCAL_PROCESSOR_TPS);
+    let plan = || {
+        scheduler.assemble_pipeline_for(
+            &model,
+            &local,
+            uuid::Uuid::new_v4(),
+            super::Purpose::Route,
+            None,
+            crate::types::KeepAsked::Unasked,
+        )
+    };
+    let c_short = c.to_string();
+
+    hold_c(Some(
+        crate::daemon::host_heat::PeerWorkHold::Heat {
+            stops_running: false,
+        }
+        .key(),
+    ));
+    let err = plan().expect_err("c is cooling and b holds 11 of 32");
+    assert!(
+        matches!(err, SwarmError::HoldersDeclined { .. }),
+        "c's 32 layers would close the gap when it has cooled: {err:?}"
+    );
+    let text = err.to_string();
+    assert!(
+        text.contains(&c_short) && text.contains("is cooling down"),
+        "{text}"
+    );
+
+    hold_c(Some(crate::daemon::host_heat::PeerWorkHold::Updating.key()));
+    let err = plan().expect_err("c is installing an update");
+    assert!(matches!(err, SwarmError::HoldersDeclined { .. }), "{err:?}");
+    assert!(err.to_string().contains("is installing an update"), "{err}");
+
+    // THE CONTROL: held back for a reason that lasts — the shortfall it is.
+    hold_c(Some(crate::daemon::host_heat::PeerWorkHold::Metered.key()));
+    let err = plan().expect_err("c is on a metered connection");
+    assert!(
+        matches!(err, SwarmError::SwarmShortOfMemory { .. }),
+        "a metered holder is no moment: {err:?}"
+    );
+    assert!(!err.to_string().contains(&c_short), "{err}");
+}
+
 fn publish_resident(state: &SharedState, node: &NodeId, model: &ModelId, range: (u32, u32)) {
     let mut p = state.peer_registry.get_mut(node).unwrap();
     let cap = p.capability.as_mut().unwrap();

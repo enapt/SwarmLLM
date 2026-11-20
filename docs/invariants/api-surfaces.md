@@ -2664,6 +2664,31 @@ so `report_after_a_replan` reads it (`HolderRoom::short_while_busy`) and reports
 on `SwarmShortOfMemory` choosing its hint, is the two-causes-one-variant shape the
 paragraph above forbids.
 
+**So is a holder that takes no work for a few minutes** (#483 (b), 2026-11-20).
+A holder paused for heat (#440, `inference_held_because: cooling`) or an update's
+drain (#444, `updating`) is no candidate, so neither shortfall writer saw it: on
+v0.3.301 a 70B was told "trying again won't help" while the 16 GB laptop holding
+it cooled (`tier_1120a`). `Scheduler::holders_paused_for_a_moment` finds them —
+the same holders, scope and reachability `gather_candidates` asks, read through
+`error::HolderPause::of` from the keys `PeerWorkHold::key` writes, so a lasting
+reason (metered, graphics gone, stalled) is never one — as rooms of 0 beside what
+they hold (`HolderRoom::paused`). Both writers ask one rule,
+`error::room_short_for_a_moment` (busy, or paused holders that would close the
+gap — `paused_holders_would_close_the_gap`, one-sided at what they HOLD, so a gap
+they could not close even back at work stays the swarm's size): the planner's
+verdict on its way out of greedy (`short_of_memory_beside_paused`, wrapping both
+greedy calls in `assemble_any_pipeline_for`) and the router's report, through the
+paused holders added to `OfferedMemory`. The reason is said in our words — who,
+how much it holds, why (`describe_paused_holders`) — and a shortfall it could
+not close names it (`describe_room_by_holder`). No new variant, hint or i18n key:
+`HoldersDeclined`'s next step ("try again in a few minutes") is the paused
+holder's. Prior art: Kubernetes' FailedScheduling counts a not-ready or tainted
+node apart from "Insufficient memory" and leaves the pod Pending to be retried;
+a chat request cannot wait unbounded, so it is told to retry instead. Tests
+`a_shortfall_a_cooling_holder_would_close_is_the_holders_moment` (metered is the
+control), `a_re_plan_short_while_a_holder_cools_is_the_holders_moment`; both fail
+with the gap test off.
+
 Two follow-ups a new `SwarmError` variant must not skip:
 
 - **`failure_is_penalty_worthy`** (`router/distributed_exec.rs`) defaults to

@@ -1020,8 +1020,14 @@ own `SwarmShortOfMemory` (`SharedState::peer_refusals_counted_loads`; #479's bus
 read as declined), and both tails failing report the pass not failing for its own restriction. Prior art: Kubernetes'
 scheduler words an unplaceable pod's failure itself, a census per node ("0/3 nodes are available: 2 Insufficient
 memory"), never a kubelet's advice. Left: a refusal arriving AT a forward (an older peer, or a forward refused after a
-"go ahead") still carries the peer's own words — it carries no figures to word; and `SwarmShortOfMemory`'s hint
-("trying again won't help") does not know a holder is only COOLING (#440) — the 70B's laptop was.
+"go ahead") still carries the peer's own words — it carries no figures to word. **The COOLING holder FIXED
+2026-11-20**: `SwarmShortOfMemory`'s "trying again won't help" did not know a holder was only paused (#440's heat hold;
+#444's update drain) — the 70B's laptop was. Both writers now weigh the connected holders paused for a moment
+(`Scheduler::holders_paused_for_a_moment`, `error::HolderPause`) and, where the layers they hold would close the gap
+(`error::room_short_for_a_moment`), report `HoldersDeclined` in our words ("… (holding 40 of its 80 layers) is cooling
+down and takes no new work for a few minutes"); a gap they could not close names them in the shortfall. A metered,
+graphics-gone or stalled holder is no moment. Prior art: Kubernetes' FailedScheduling counts a not-ready node apart from
+"Insufficient memory". Evidence: `docs/invariants/api-surfaces.md` § "Error type discipline".
 
 (c) **The shared 14B: `ModelIncompleteInSwarm`.** No change in 0.3.298..0.3.301 found that makes a correctly announced
 split read as incomplete. Producers: `SharedState::no_route_error` (no reachable holder of ANY part),

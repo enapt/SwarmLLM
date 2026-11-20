@@ -1819,6 +1819,7 @@ fn rooms_offered_at(
                 holds,
                 room: offered[node].map(|room| room.min(holds)),
                 room_held_by_other_models: busy.contains(node),
+                paused: None,
             }
         })
         .collect();
@@ -2039,16 +2040,61 @@ fn short_of_memory(
     // node among its holders said only "do not have room for all 80 of its
     // layers", while a peer offered 9 of the 17 it held (field report 2026-10-31).
     let (layers, holders) = rooms_offered_at(candidates, local_node_id, |c| {
-        if c.max_hostable_layers_at_ceiling.is_some() || &c.node_id != local_node_id {
-            c.max_hostable_layers_at_ceiling
-        } else if c.memory_refused_this_request {
-            c.max_hostable_layers
-        } else {
-            Some(layers_in(&c.available_ranges))
-        }
+        room_at_ceiling(c, local_node_id)
     });
     SwarmError::SwarmShortOfMemory {
         model_id,
+        room: crate::error::describe_room_by_holder(layers, num_layers, &holders),
+    }
+}
+
+/// The figure [`short_of_memory`] weighs each candidate at: its advertised
+/// ceiling, this node's own reading where it has none (see there).
+fn room_at_ceiling(c: &NodeCandidate, local_node_id: &NodeId) -> Option<u32> {
+    if c.max_hostable_layers_at_ceiling.is_some() || &c.node_id != local_node_id {
+        c.max_hostable_layers_at_ceiling
+    } else if c.memory_refused_this_request {
+        c.max_hostable_layers
+    } else {
+        Some(layers_in(&c.available_ranges))
+    }
+}
+
+/// [`short_of_memory`]'s verdict weighed again beside the holders that are
+/// PAUSED (`Scheduler::holders_paused_for_a_moment`, #483 (b)), which are no
+/// candidates and so not in it: where their layers would close the gap
+/// (`error::paused_holders_would_close_the_gap`) the holders' moment —
+/// `HoldersDeclined`, try again shortly — else the shortfall with them named.
+/// Any other error, or no paused holder, passes unchanged. The planners raise
+/// the verdict deep inside greedy, so it is weighed here, where every plan's
+/// error passes on its way out.
+fn short_of_memory_beside_paused(
+    error: SwarmError,
+    candidates: &[NodeCandidate],
+    num_layers: u32,
+    local_node_id: &NodeId,
+    paused: &[crate::error::HolderRoom],
+) -> SwarmError {
+    let SwarmError::SwarmShortOfMemory { model_id, .. } = &error else {
+        return error;
+    };
+    if paused.is_empty() {
+        return error;
+    }
+    let (layers, mut holders) = rooms_offered_at(candidates, local_node_id, |c| {
+        room_at_ceiling(c, local_node_id)
+    });
+    holders.extend(paused.iter().cloned());
+    if crate::error::paused_holders_would_close_the_gap(layers, num_layers, &holders) {
+        if let Some(reason) = crate::error::describe_paused_holders(num_layers, &holders) {
+            return SwarmError::HoldersDeclined {
+                model_id: model_id.clone(),
+                reason,
+            };
+        }
+    }
+    SwarmError::SwarmShortOfMemory {
+        model_id: model_id.clone(),
         room: crate::error::describe_room_by_holder(layers, num_layers, &holders),
     }
 }
@@ -4932,7 +4978,17 @@ impl PipelineScheduler {
                         encrypted,
                         lead_here,
                         purpose,
-                    )?
+                    )
+                    .map_err(|e| {
+                        self.beside_paused_holders(
+                            e,
+                            &manifest,
+                            local_node_id,
+                            keep,
+                            &candidates,
+                            num_layers,
+                        )
+                    })?
                 }
             }
         } else {
@@ -4944,7 +5000,17 @@ impl PipelineScheduler {
                 encrypted,
                 lead_here,
                 purpose,
-            )?
+            )
+            .map_err(|e| {
+                self.beside_paused_holders(
+                    e,
+                    &manifest,
+                    local_node_id,
+                    keep,
+                    &candidates,
+                    num_layers,
+                )
+            })?
         };
 
         // Merge contiguous segments on the same node into a single segment.
@@ -4960,7 +5026,10 @@ impl PipelineScheduler {
         if purpose.explains_a_real_request()
             && plan_exceeds_offered_memory(&segments, &candidates, local_node_id)
         {
-            let (layers, holders) = rooms_offered(&candidates, local_node_id);
+            let (layers, mut holders) = rooms_offered(&candidates, local_node_id);
+            // Beside them, the holders paused for heat or an update, which may
+            // be back before the caller gives up (#483 (b)).
+            holders.extend(self.holders_paused_for_a_moment(&manifest, local_node_id, keep));
             self.shared_state.note_planned_past_offered_memory(
                 request_id,
                 crate::daemon::state::OfferedMemory {
@@ -5196,6 +5265,90 @@ impl PipelineScheduler {
             .get(node_id)
             .and_then(|p| p.capability.as_ref().map(|c| c.can_serve_inference))
             .unwrap_or(true)
+    }
+
+    /// A planner's error weighed beside the holders paused for a moment
+    /// ([`short_of_memory_beside_paused`]); asks for them only when the error
+    /// is a shortfall.
+    fn beside_paused_holders(
+        &self,
+        error: SwarmError,
+        manifest: &ModelManifest,
+        local_node_id: &NodeId,
+        keep: crate::types::KeepAsked,
+        candidates: &[NodeCandidate],
+        num_layers: u32,
+    ) -> SwarmError {
+        if !matches!(error, SwarmError::SwarmShortOfMemory { .. }) {
+            return error;
+        }
+        let paused = self.holders_paused_for_a_moment(manifest, local_node_id, keep);
+        short_of_memory_beside_paused(error, candidates, num_layers, local_node_id, &paused)
+    }
+
+    /// The holders of `manifest` [`Self::gather_candidates`] passed over only
+    /// because they paused for heat or an update (`error::HolderPause`), as
+    /// rooms of 0 beside what they hold — so a verdict of "not enough memory"
+    /// can weigh the room that comes back in minutes (#483 (b): the 16 GB
+    /// laptop holding a 70B was cooling, and the caller was told retrying
+    /// would not help). The same holders, scope and reachability the gather
+    /// asks; a peer paused for any other reason, or serving, is not one.
+    fn holders_paused_for_a_moment(
+        &self,
+        manifest: &ModelManifest,
+        local_node_id: &NodeId,
+        keep: crate::types::KeepAsked,
+    ) -> Vec<crate::error::HolderRoom> {
+        let allowed_set = crate::pool::scope::request_scope(&self.shared_state, &manifest.id, keep);
+        let mut order: Vec<NodeId> = Vec::new();
+        let mut held: HashMap<NodeId, (crate::error::HolderPause, Vec<(u32, u32)>)> =
+            HashMap::new();
+        for shard in &manifest.shards {
+            let shard_id = ShardId {
+                model_id: manifest.id.clone(),
+                index: shard.index,
+            };
+            for node_id in self.shared_state.model_registry.shard_holders(&shard_id) {
+                if &node_id == local_node_id
+                    || allowed_set.as_ref().is_some_and(|a| !a.contains(&node_id))
+                    || (!self.shared_state.connected_node_ids.contains(&node_id)
+                        && !self.shared_state.peer_reachable_via_relay(&node_id))
+                {
+                    continue;
+                }
+                let pause = self.shared_state.peer_registry.get(&node_id).and_then(|p| {
+                    p.capability
+                        .as_ref()
+                        .filter(|c| !c.can_serve_inference)
+                        .and_then(|c| {
+                            crate::error::HolderPause::of(c.inference_held_because.as_deref())
+                        })
+                });
+                let Some(pause) = pause else {
+                    continue;
+                };
+                if !held.contains_key(&node_id) {
+                    order.push(node_id.clone());
+                }
+                held.entry(node_id)
+                    .or_insert_with(|| (pause, Vec::new()))
+                    .1
+                    .push(shard.layer_range);
+            }
+        }
+        order
+            .into_iter()
+            .map(|node| {
+                let (pause, ranges) = &held[&node];
+                crate::error::HolderRoom {
+                    holder: node.to_string(),
+                    holds: layers_in(ranges),
+                    room: Some(0),
+                    room_held_by_other_models: false,
+                    paused: Some(*pause),
+                }
+            })
+            .collect()
     }
 
     #[allow(clippy::too_many_arguments)]

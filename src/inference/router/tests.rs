@@ -709,6 +709,7 @@ fn a_shortfall_at_a_holder_running_another_model_is_the_holders_declining() {
         holds,
         room: Some(room),
         room_held_by_other_models: busy,
+        paused: None,
     };
     let refused = || {
         SwarmError::ServiceUnavailable(
@@ -847,6 +848,7 @@ fn a_re_plan_held_to_what_loads_reports_the_swarms_room_in_our_words() {
             holds: 80,
             room: Some(60),
             room_held_by_other_models: busy,
+            paused: None,
         }],
     };
     let no_advice_but_ours = |reported: &SwarmError| {
@@ -1675,5 +1677,63 @@ async fn a_request_its_reader_left_is_cancelled_with_what_it_was_shown() {
     assert!(
         listed.peer_may_be_at_fault,
         "a peer that went silent may be"
+    );
+}
+
+/// A re-plan's "not enough memory" beside a holder PAUSED for heat (#483 (b)):
+/// the 70B's 16 GB laptop was cooling, the other holders' room covered 40 of
+/// its 80 layers, and the caller was told retrying would not help. Where the
+/// paused holder's layers close the gap it is the holders' moment, said in our
+/// words with who and why; where they could not, the shortfall names it.
+#[test]
+fn a_re_plan_short_while_a_holder_cools_is_the_holders_moment() {
+    use crate::error::{HolderPause, HolderRoom, SwarmError};
+    let first = || {
+        SwarmError::ServiceUnavailable(
+            "computer aaaaaaaaaaaaaaaa has room for 40 of the 80 layers asked".into(),
+        )
+    };
+    let re_plan = || SwarmError::SwarmShortOfMemory {
+        model_id: "llama".into(),
+        room: "the computers holding it have room for about 40 of its 80 layers".into(),
+    };
+    let offered = |paused_holds: u32| crate::daemon::state::OfferedMemory {
+        layers: Some(40),
+        num_layers: 80,
+        holders: vec![
+            HolderRoom {
+                holder: "aaaaaaaaaaaaaaaa".into(),
+                holds: 80,
+                room: Some(40),
+                room_held_by_other_models: false,
+                paused: None,
+            },
+            HolderRoom {
+                holder: "5bfbd36e5bfbd36e".into(),
+                holds: paused_holds,
+                room: Some(0),
+                room_held_by_other_models: false,
+                paused: Some(HolderPause::Cooling),
+            },
+        ],
+    };
+    let reported =
+        super::report_after_a_replan(first(), re_plan(), "llama", Some(offered(80)), true);
+    let SwarmError::HoldersDeclined { reason, .. } = &reported else {
+        panic!("a cooling holder of all 80 layers is a moment: {reported}");
+    };
+    assert!(
+        reason.contains("5bfbd36e5bfbd36e") && reason.contains("is cooling down"),
+        "{reason}"
+    );
+
+    // It holds 20: back at work the holders still lack 20 — the swarm's size.
+    let reported =
+        super::report_after_a_replan(first(), re_plan(), "llama", Some(offered(20)), true);
+    // The re-plan's own verdict, which names the paused holder where the
+    // scheduler weighed it (`short_of_memory_beside_paused`).
+    assert!(
+        matches!(reported, SwarmError::SwarmShortOfMemory { .. }),
+        "a gap the paused holder could not close: {reported}"
     );
 }

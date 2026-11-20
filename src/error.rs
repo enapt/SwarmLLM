@@ -640,6 +640,48 @@ pub struct HolderRoom {
     /// yet (`NodeCandidate::room_held_by_other_models`, #479): room it may have
     /// again shortly.
     pub room_held_by_other_models: bool,
+    /// It takes no work at all this minute but will again within minutes
+    /// (#483 (b)): no candidate, so it offers nothing, and `room` is `Some(0)`.
+    pub paused: Option<HolderPause>,
+}
+
+/// Why a connected holder takes no work now but will again within minutes, as
+/// its capability says (`NodeCapability::inference_held_because`, written from
+/// `PeerWorkHold::key`): its heat hold (#440, resumes `COOL_FOR` after it
+/// cools) or an update's drain (#444, back after its restart). The other
+/// reasons — a lost graphics stack, a stalled dispatcher, a metered connection
+/// — last until someone acts, so they are no moment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HolderPause {
+    Cooling,
+    Updating,
+}
+
+impl HolderPause {
+    /// The pause a capability's `inference_held_because` names, if it is one.
+    pub fn of(held_because: Option<&str>) -> Option<Self> {
+        use crate::daemon::host_heat::PeerWorkHold;
+        let key = held_because?;
+        if key
+            == (PeerWorkHold::Heat {
+                stops_running: false,
+            })
+            .key()
+        {
+            Some(Self::Cooling)
+        } else if key == PeerWorkHold::Updating.key() {
+            Some(Self::Updating)
+        } else {
+            None
+        }
+    }
+
+    fn words(self) -> &'static str {
+        match self {
+            Self::Cooling => "is cooling down",
+            Self::Updating => "is installing an update",
+        }
+    }
 }
 
 impl HolderRoom {
@@ -650,6 +692,61 @@ impl HolderRoom {
     pub fn short_while_busy(&self) -> bool {
         self.room_held_by_other_models && self.room.is_none_or(|room| room < self.holds)
     }
+}
+
+/// Could the room the holders lack come back within minutes? Where a holder is
+/// short while another model's worker holds its memory ([`HolderRoom::short_while_busy`],
+/// #479), or the layers paused holders hold would close the gap
+/// ([`HolderRoom::paused`], #483 (b)) — counted one-sided, at what they HOLD,
+/// so a gap they could not close even back at work is still the swarm's size.
+/// The one answer for both writers of [`SwarmError::SwarmShortOfMemory`]
+/// (`scheduler::short_of_memory`'s caller and `router::report_after_a_replan`):
+/// true makes it [`SwarmError::HoldersDeclined`], whose advice is to try again
+/// shortly. Prior art: Kubernetes' FailedScheduling counts a not-ready node
+/// apart from "Insufficient memory" and leaves the pod Pending to be retried.
+pub fn room_short_for_a_moment(
+    offered_layers: Option<u32>,
+    num_layers: u32,
+    holders: &[HolderRoom],
+) -> bool {
+    holders.iter().any(HolderRoom::short_while_busy)
+        || paused_holders_would_close_the_gap(offered_layers, num_layers, holders)
+}
+
+/// The paused half of [`room_short_for_a_moment`]: some holder is paused and
+/// the layers paused holders hold, beside what the others offered, reach the
+/// model's. An unknown offer cannot rule it out.
+pub fn paused_holders_would_close_the_gap(
+    offered_layers: Option<u32>,
+    num_layers: u32,
+    holders: &[HolderRoom],
+) -> bool {
+    let paused: u32 = holders
+        .iter()
+        .filter(|h| h.paused.is_some())
+        .map(|h| h.holds)
+        .sum();
+    paused > 0 && offered_layers.is_none_or(|layers| layers.saturating_add(paused) >= num_layers)
+}
+
+/// The paused holders' state in our words, for [`SwarmError::HoldersDeclined`]'s
+/// reason: who, what it holds, and why it takes no work this minute. `None`
+/// where no holder is paused.
+pub fn describe_paused_holders(num_layers: u32, holders: &[HolderRoom]) -> Option<String> {
+    let named: Vec<String> = holders
+        .iter()
+        .filter_map(|h| {
+            h.paused.map(|pause| {
+                format!(
+                    "{} (holding {} of its {num_layers} layers) {} and takes no new work for a few minutes",
+                    h.holder,
+                    h.holds,
+                    pause.words()
+                )
+            })
+        })
+        .collect();
+    (!named.is_empty()).then(|| named.join("; "))
 }
 
 /// The holders [`describe_room_by_holder`] names before it says "and N more".
@@ -681,13 +778,19 @@ pub fn describe_room_by_holder(
     let named: Vec<String> = ordered
         .iter()
         .take(HOLDERS_NAMED)
-        .map(|h| match h.room {
-            Some(room) if room < h.holds => format!(
+        .map(|h| match (h.paused, h.room) {
+            (Some(pause), _) => format!(
+                "{} holds {} and {} — no work there for a few minutes",
+                h.holder,
+                h.holds,
+                pause.words()
+            ),
+            (None, Some(room)) if room < h.holds => format!(
                 "{} has room for {room} of the {} layers it holds",
                 h.holder, h.holds
             ),
-            Some(_) => format!("{} has room for all {} it holds", h.holder, h.holds),
-            None => format!(
+            (None, Some(_)) => format!("{} has room for all {} it holds", h.holder, h.holds),
+            (None, None) => format!(
                 "{} holds {} and did not say how much room it has",
                 h.holder, h.holds
             ),
@@ -1665,6 +1768,74 @@ pub fn error_hint(err: &SwarmError) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A paused holder is read from the same keys a capability is written with
+    /// (`PeerWorkHold::key`): heat and an update's drain are moments, a metered
+    /// connection is not; unknown words and no reason are none.
+    #[test]
+    fn a_holders_pause_is_read_from_the_key_its_capability_carries() {
+        use crate::daemon::host_heat::PeerWorkHold;
+        for stops_running in [false, true] {
+            assert_eq!(
+                HolderPause::of(Some(PeerWorkHold::Heat { stops_running }.key())),
+                Some(HolderPause::Cooling)
+            );
+        }
+        assert_eq!(
+            HolderPause::of(Some(PeerWorkHold::Updating.key())),
+            Some(HolderPause::Updating)
+        );
+        for other in [
+            Some(PeerWorkHold::Metered.key()),
+            Some("graphics_gone"),
+            Some("stalled"),
+            None,
+        ] {
+            assert_eq!(HolderPause::of(other), None, "{other:?}");
+        }
+    }
+
+    /// Counted one-sided, at what the paused holders HOLD: a gap they could
+    /// close is a moment, one they could not is the swarm's size, and an
+    /// offer nobody stated cannot rule the moment out.
+    #[test]
+    fn paused_holders_close_the_gap_only_with_the_layers_they_hold() {
+        let room = |holds, paused| HolderRoom {
+            holder: "h".into(),
+            holds,
+            room: Some(0),
+            room_held_by_other_models: false,
+            paused,
+        };
+        let cooling = Some(HolderPause::Cooling);
+        assert!(paused_holders_would_close_the_gap(
+            Some(40),
+            80,
+            &[room(40, cooling)]
+        ));
+        assert!(!paused_holders_would_close_the_gap(
+            Some(40),
+            80,
+            &[room(39, cooling)]
+        ));
+        assert!(paused_holders_would_close_the_gap(
+            None,
+            80,
+            &[room(1, cooling)]
+        ));
+        assert!(!paused_holders_would_close_the_gap(
+            Some(40),
+            80,
+            &[room(80, None)]
+        ));
+        assert!(room_short_for_a_moment(Some(40), 80, &[room(40, cooling)]));
+        assert!(
+            describe_paused_holders(80, &[room(40, None)]).is_none(),
+            "nobody paused, nothing to say"
+        );
+        let named = describe_room_by_holder(Some(40), 80, &[room(20, cooling)]);
+        assert!(named.contains("h holds 20 and is cooling down"), "{named}");
+    }
 
     #[test]
     fn hint_for_model_not_available() {
