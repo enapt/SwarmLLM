@@ -1251,7 +1251,9 @@ a rig that restarts the node between two identical runs (`tier_1119p` against `t
 > without an answer) and weighs only the rest (`admit_to_gpu_reusing`), charging the whole growth; a growth that
 > fits asks nothing. A/B `SWARMLLM_GROWTH_REUSES_POOL=0`. Prior art: vLLM counts its own PyTorch caching
 > allocator's reserved memory as its own; PyTorch serves an allocation from a reserved free block before the
-> driver. Left: (B) the refit (#365) eats the guesser's room (20 of 21 layers on the card where 17
+> driver. **Verified on the rig, run 2 (09:13-09:22Z, main `4f693a127`)**: the worker read 1,315 MB free with 160
+reusable; `[63,64)` was weighed 411 − 160 = 251 MB against 344 of room and loaded beside the lent head (#458); 4 of 4
+asks answered — 32-token warm 9.0 tok/s, 160 tokens code 5.7 / 7.2, prose 5.3 tok/s (here → Australia → here). Left: (B) the refit (#365) eats the guesser's room (20 of 21 layers on the card where 17
 > were planned, 20:07Z, guess head refused); (3c) the next-token block's card room at the spawn. **Why the ladder cannot place the tail
 > elsewhere** (traced 2026-11-19): the refusal is `charge_additional_segment`'s first rung (`process_pool.rs` ~8156-8194);
 > the split rung (`charge_segment_as_split`) runs next but `split_for_card` puts the output head on the card whatever
@@ -2564,6 +2566,12 @@ bootstraps; a second, hour-long window runs 08:51-09:51Z (`w2_*.json`). And the 
 (1.6 MB) flood-published to every peer in the first round with peers — the day's repeat, or the short window chosen
 while a connected peer's capability had not yet arrived (`manifest_quiet_window` counts it as taking no digests);
 which one is not readable at info level (the round's line is DEBUG).
+**Read at `-v` on 0.3.301, 2026-11-20 08:36Z (a restart):** the first round, 14 s after the start, sent 0 and
+suppressed 40; the second (08:36:51) **sent 31**, suppressed 2, `quiet_window_secs=86400`; every round after it sent 0
+of 33. So the start's flood ran under the DAY's window, not the short one — the short-window branch is NOT what
+re-sends them; left: why a manifest gossiped within the day is sent again after a restart (the record of what was
+gossiped is not what survives it, or the first round's 40 counted no peers). The hour-long second window (w2) never
+ran: the forced-split rig took the live node at 08:24Z.
 
 #### #169 — Connection churn on multi-interface hosts: only the LAN dial is deterministic
 `P3` · network · **PARTIAL** — 2026-07-25 · history: archive § "Connection churn on multi-interface hosts — deterministic dialer partial", gotcha #353

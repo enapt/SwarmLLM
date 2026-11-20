@@ -3527,6 +3527,9 @@ nothing; the dry run (`growth_would_be_admitted`) weighs whole, asked before the
 art: vLLM counts the memory its own PyTorch caching allocator reserved as its own; PyTorch serves an allocation
 from a reserved free block before asking the driver. Tests: `a_growth_loads_first_into_what_its_workers_pool_holds_freed`
 (red under `SWARMLLM_GROWTH_REUSES_POOL=0`), `a_growths_question_about_the_pool_is_answered_through_the_reader`.
+On the same rig (run 2, 09:13Z): the worker answered `free_mb=1315 reusable_mb=160`, the admission logged
+`estimated_mb=411 reusing_mb=160 committed_mb=5727 budget_mb=6071 headroom_mb=93`, the tail loaded beside the lent
+head, and 4 of 4 asks were answered (code 5.7-7.2 tok/s, prose 5.3) where run 1 failed 4 of 4.
 
 ## A model process holds one copy of the output head (2026-11-16, FUTURE_WORK #458)
 
