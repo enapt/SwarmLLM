@@ -8166,6 +8166,12 @@ grep `^| N |`).
   (p90 87) off; the card at 1455-1538 MHz vs 315 during replies, ~36 W vs 26; replies prose 6.83-7.53 vs
   6.11-6.35 tok/s, code 7.63-8.08 vs 6.80-6.86 (~13%). Probe first (`~/swarmllm-gate/clock_probe`): pieces at half
   the time hold the clock, at a quarter it slides. A far computer gains the same on its side once it updates.
+  **Hardened the same evening (the pre-release review's two points)**: a piece starts only on an idle stream
+  (`cuStreamQuery`; the 4 ms period alone let a stream held up by another program gather pieces), and the hold is
+  timed from a step's END (a prompt pass over 1 s came back with its hold spent). Re-measured
+  (`~/swarmllm-gate/hold_query`, same pair, on/off/on, three asks each): this side 25/28 and 26/35 ms (median/p90)
+  held vs 74/186 off, 13,570 and 13,506 pieces with 5 and 1 turns found busy, 0 driver events; replies +6-8%
+  (Australia served ~400 ms a step that hour against ~121 earlier, so the far side dominated).
   Evidence: `docs/invariants/inference.md` § "A card between a split's forwards keeps its clocks".
 - #485 — `P1` — **A split whose chain ended on another computer never guessed (the Qwen 3.5 family).** Filed as "the
   guesser should run where the last layers are"; that premise was WRONG: the file's guess head beside the FIRST

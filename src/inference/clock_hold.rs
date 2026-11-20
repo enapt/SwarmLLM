@@ -24,9 +24,14 @@
 //! The hold starts at every step of a reply shared with other computers a
 //! worker is handed ([`starts_a_hold`]: this computer's segments, those it
 //! serves for others, and the guesses beside them) and ends [`HOLD_FOR`] after
-//! the last, pauses at a message's arrival (it waits only between pieces), and
-//! ends while the computer is paced for heat
-//! (`pace::work_ahead_may_run`), or for good on a launch that fails. A/B
+//! the last has been HANDLED — timed from its end, so a prompt pass longer
+//! than the hold still holds the round after it — pauses at a message's
+//! arrival (it waits only between pieces), and ends while the computer is
+//! paced for heat (`pace::work_ahead_may_run`), or for good on a launch that
+//! fails. A piece starts only on an idle stream (`cuStreamQuery`, as
+//! PyTorch's `Stream.query()` asks): work still queued there — a piece of
+//! ours held up by another program sharing the card — already keeps the card
+//! busy, so at most one piece of ours is ever queued. A/B
 //! `SWARMLLM_CARD_CLOCK_HOLD=0`.
 
 use std::time::{Duration, Instant};
@@ -57,15 +62,19 @@ pub(crate) struct ClockHold {
     until: Option<Instant>,
     since: Option<Instant>,
     pieces: u64,
+    /// Turns a piece was not started because the stream was still working.
+    busy: u64,
     failed: bool,
 }
 
 impl ClockHold {
-    /// A message was handed to this worker: one that is a step of a reply
-    /// shared with other computers ([`starts_a_hold`]) holds the card's
-    /// clocks until [`HOLD_FOR`] after it.
-    pub(crate) fn note_message(&mut self, msg: &DaemonMsg, now: Instant) {
-        if starts_a_hold(msg) {
+    /// A message has been HANDLED at `now`: one that was a step of a reply
+    /// shared with other computers (`step`, [`starts_a_hold`] asked before the
+    /// message was handed over) holds the card's clocks until [`HOLD_FOR`]
+    /// after its end — never after its arrival, which a long forward would
+    /// leave behind with the hold already spent.
+    pub(crate) fn note_handled(&mut self, step: bool, now: Instant) {
+        if step {
             self.note_forward(now);
         }
     }
@@ -110,11 +119,15 @@ impl ClockHold {
             return None;
         }
         match start_piece_on(card) {
-            Ok(true) => {
+            Ok(Launch::Started) => {
                 self.pieces += 1;
                 Some(PERIOD)
             }
-            Ok(false) => {
+            Ok(Launch::StreamBusy) => {
+                self.busy += 1;
+                Some(PERIOD)
+            }
+            Ok(Launch::NoCard) => {
                 self.end(now, "no card");
                 None
             }
@@ -132,6 +145,7 @@ impl ClockHold {
         if let Some(since) = self.since.take() {
             tracing::debug!(
                 pieces = self.pieces,
+                stream_busy = self.busy,
                 held_ms = now.saturating_duration_since(since).as_millis() as u64,
                 why,
                 "DIAG: the card's clocks were held between a split's forwards"
@@ -139,6 +153,7 @@ impl ClockHold {
         }
         self.until = None;
         self.pieces = 0;
+        self.busy = 0;
     }
 }
 
@@ -175,12 +190,37 @@ pub(crate) fn starts_a_hold(msg: &DaemonMsg) -> bool {
 #[cfg(feature = "candle-cuda")]
 const CLOCK_HOLD_PTX: &str = include_str!(concat!(env!("OUT_DIR"), "/clock_hold.ptx"));
 
-/// One [`PIECE`] on `device`'s stream; `Ok(false)` where it is no card.
-fn start_piece_on(device: &candle_core::Device) -> candle_core::Result<bool> {
+/// What [`start_piece_on`] did. Only a card build starts or finds a stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(feature = "candle-cuda"), allow(dead_code))]
+enum Launch {
+    /// A piece was queued on the card's stream.
+    Started,
+    /// The stream was still working (a piece of ours not yet run, or other
+    /// work): nothing was queued, the card is busy already.
+    StreamBusy,
+    /// The device is no card.
+    NoCard,
+}
+
+/// One [`PIECE`] on `device`'s stream, where that stream is idle.
+fn start_piece_on(device: &candle_core::Device) -> candle_core::Result<Launch> {
     #[cfg(feature = "candle-cuda")]
     if let candle_core::Device::Cuda(dev) = device {
-        use candle_core::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
+        use candle_core::cuda_backend::cudarc::driver::{sys, LaunchConfig, PushKernelArg};
         use candle_core::cuda_backend::WrapErr;
+        // Never a second piece behind one not yet run: a stream held up (by
+        // another program time-slicing the card) would otherwise gather one
+        // piece every PERIOD, and a forward arriving after them would wait
+        // for all of them.
+        let stream = dev.cuda_stream();
+        stream.context().bind_to_thread().w()?;
+        // SAFETY: ffi on the device's own live stream; the query waits for nothing.
+        let state = unsafe { sys::cuStreamQuery(stream.cu_stream()) };
+        if state == sys::CUresult::CUDA_ERROR_NOT_READY {
+            return Ok(Launch::StreamBusy);
+        }
+        state.result().w()?;
         let func =
             dev.get_or_load_custom_func("clock_hold_piece", "swarmllm_clock_hold", CLOCK_HOLD_PTX)?;
         let ns = PIECE.as_nanos() as u64;
@@ -197,10 +237,10 @@ fn start_piece_on(device: &candle_core::Device) -> candle_core::Result<bool> {
         builder.arg(&max_cycles);
         // SAFETY: ffi. The kernel reads its two arguments and touches no memory.
         unsafe { builder.launch(cfg) }.w()?;
-        return Ok(true);
+        return Ok(Launch::Started);
     }
     let _ = device;
-    Ok(false)
+    Ok(Launch::NoCard)
 }
 
 #[cfg(test)]
@@ -255,9 +295,9 @@ mod tests {
             assert!(!starts_a_hold(&quiet));
         }
         let mut hold = ClockHold::default();
-        hold.note_message(&DaemonMsg::ReadCardFree, Instant::now());
+        hold.note_handled(starts_a_hold(&DaemonMsg::ReadCardFree), Instant::now());
         assert!(hold.until.is_none());
-        hold.note_message(&batch, Instant::now());
+        hold.note_handled(starts_a_hold(&batch), Instant::now());
         assert_eq!(hold.until.is_some(), enabled());
     }
 }

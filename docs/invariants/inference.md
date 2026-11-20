@@ -9518,9 +9518,14 @@ times (49 ms in one run toward the US, 116-151 in another) are expected to fall 
 
 **What a change must keep.**
 - One piece queued at a time, on the device's ONE stream: a forward arriving behind it waits at most `PIECE`.
-  Queueing several (or a long one) puts their whole length in front of the next forward.
+  Queueing several (or a long one) puts their whole length in front of the next forward. **Enforced, not timed**
+  (the 0.3.303 review): a piece starts only where `cuStreamQuery` reads the stream idle (`Launch::StreamBusy`
+  otherwise, counted as `stream_busy` in the hold's DIAG) — the 4 ms period alone let a stream held up by another
+  program sharing the card gather a piece every period, up to ~0.5 s in front of the next forward.
 - Pieces start only in the worker loop's idle branch, between waits for a message; the hold starts at every
-  message `clock_hold::starts_a_hold` names (the admit-coalescing drain too) and lasts `HOLD_FOR` past the last:
+  message `clock_hold::starts_a_hold` names (the admit-coalescing drain too) and lasts `HOLD_FOR` past the last
+  one's END (`ClockHold::note_handled`, after the handler returns — timed from the arrival, a prompt pass over
+  a second came back with its hold already spent):
   `Forward`, `BatchForward`, and the guesses made beside a split — `Draft` (a drafter model's worker, which may be
   the only work on its card while the check runs abroad), `HeadGuess`, `BlockDraft`. The match names every variant,
   so a new message is weighed there. The `Draft`-only worker's dip is inferred from the same idle pattern, not

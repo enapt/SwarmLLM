@@ -560,7 +560,8 @@ pub async fn run_worker(
         let mut shutdown = false;
         if let Some((msg, payload)) = next_msg {
             pool_may_hold_freed = true;
-            clock_hold.note_message(&msg, std::time::Instant::now());
+            // A step's hold is timed from its END (`clock_hold::note_handled`).
+            let step = crate::inference::clock_hold::starts_a_hold(&msg);
             shutdown |= handle_daemon_msg(
                 msg,
                 payload,
@@ -583,6 +584,7 @@ pub async fn run_worker(
                 &prompt_progress,
             )
             .await;
+            clock_hold.note_handled(step, std::time::Instant::now());
 
             // Admit-coalescing: drain any further messages already queued on
             // the mpsc before the next decode tick runs. This lets Phase 4
@@ -594,7 +596,7 @@ pub async fn run_worker(
             for _ in 0..16 {
                 match ipc_rx.try_recv() {
                     Ok((m2, p2)) => {
-                        clock_hold.note_message(&m2, std::time::Instant::now());
+                        let step = crate::inference::clock_hold::starts_a_hold(&m2);
                         shutdown |= handle_daemon_msg(
                             m2,
                             p2,
@@ -617,6 +619,7 @@ pub async fn run_worker(
                             &prompt_progress,
                         )
                         .await;
+                        clock_hold.note_handled(step, std::time::Instant::now());
                     }
                     Err(_) => break,
                 }
