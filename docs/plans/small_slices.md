@@ -151,6 +151,11 @@ budget; prose profile, the 14B pair's measured prices; `flow_ring` with one far 
   measure the two stages apart first), the **head on a card**, then **short rings** (step 6, needs computers near
   each other). INFERRED from a calibrated model, not measured.
 
+  **The two stages measured apart (2026-11-20, #487)**: of the 117 ms, this side's 21-layer forward was median
+  71-76 ms where the card takes 25 — the card's governor dropped it to ~315 MHz in each round's ~250-450 ms abroad.
+  Held (`inference::clock_hold`): 25 ms, reply +13%. The far end's own forward (~120 ms served in Australia,
+  49-151 toward the US) is the next stage to read — the same dip is likely there until it updates.
+
 ### Step 3 — the throughput half: one stage carries several conversations' forwards as one
 
 - **Mechanism** (the 11-13 "shared buses", FUTURE_WORK #148): a card stage merges waiting forwards of DIFFERENT

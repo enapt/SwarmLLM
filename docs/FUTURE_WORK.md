@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #487**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #488**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -37,7 +37,8 @@ residual).
 slice, nobody's card locked by a whole model). The plan: `docs/plans/small_slices.md`. The bar (owner, same day):
 "minimum 20-30t/s" a reply. #485 closed (a split ending on a peer now guesses: the 27B here → US 3.1 → 5.0-6.2);
 #486 (rounds in flight) killed by its simulator (+4-10%); the bar needs slices wholly on cards in short rings
-(sim: 25-28 tok/s at 60 ms) — plan step 2b.**
+(sim: 25-28 tok/s at 60 ms) — plan step 2b. #487 closed: a card between a split's forwards dropped its
+clocks and ran this side's forward 3x slower (76 → 25 ms held; reply +13%, § Closed).**
 
 **2026-11-18: #477 (P1, field report) — a restart re-read every held part flat out — SHIPPED in v0.3.298 (§ Closed),
 checked on Windows too.**
@@ -8078,7 +8079,21 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-11-20, on main** (#485)
+**Closed 2026-11-20, on main** (#487, #485)
+- #487 — `P1` — **A card between a split's forwards dropped its clocks, and this side's forward ran 3 times slower.**
+  Found profiling the 27B split's ~108 ms a round on this side (plan step 2b, "measure the two stages apart"): the
+  worker's five-row forward of layers [0, 21) took 26 ms right after a slow one, then 49, 58, 65, 77, 88, 180 ms —
+  median 71 — while the forward launched in 2-3 ms (a recorded graph); the card read 210-420 MHz of 1755 through
+  the replies, idle for the ~250-450 ms each round spends abroad. Prior art: NVIDIA's forum ("first batch after
+  idle", 13 → 160 ms) — locked clocks need administrator rights; filler work while waiting costs a filler's length.
+  **Fixed**: `inference::clock_hold` — from every forward a worker is handed, for 1 s, a 2 ms one-block piece every
+  4 ms on the card's one stream (`kernels/clock_hold.cu`), only between waits for a message, never while paced for
+  heat. A/B `SWARMLLM_CARD_CLOCK_HOLD=0`. **Measured** (`~/swarmllm-gate/split27_clock`, the 27B here [0,21) → the
+  Australian 3060, arms on/off/on in one binary, five asks each): this side's forward 25 ms (p90 28-31) held vs 76
+  (p90 87) off; the card at 1455-1538 MHz vs 315 during replies, ~36 W vs 26; replies prose 6.83-7.53 vs
+  6.11-6.35 tok/s, code 7.63-8.08 vs 6.80-6.86 (~13%). Probe first (`~/swarmllm-gate/clock_probe`): pieces at half
+  the time hold the clock, at a quarter it slides. A far computer gains the same on its side once it updates.
+  Evidence: `docs/invariants/inference.md` § "A card between a split's forwards keeps its clocks".
 - #485 — `P1` — **A split whose chain ended on another computer never guessed (the Qwen 3.5 family).** Filed as "the
   guesser should run where the last layers are"; that premise was WRONG: the file's guess head beside the FIRST
   segment is fed the last layer's rows by whichever computer runs it (`BlockRowsAsk`, `SENDS_BLOCK_ROWS`). It

@@ -74,6 +74,12 @@ Judge a change by launch count (`SWARMLLM_COUNT_KERNELS=1`, never on in a benchm
 
 → `docs/invariants/inference.md` § "A decode token is bound by GPU submission COUNT, not bandwidth"
 
+## A card between a split's forwards keeps its clocks (2026-11-20, #487)
+
+A split's segment idles ~250-450 ms a round; the card's governor read it as idle (210-420 MHz of 1755) and the same 21-layer forward took 76 ms where it takes 25. **`inference::clock_hold::ClockHold`** holds it: from every `DaemonMsg::Forward` a worker is handed, for `HOLD_FOR` (1 s), a `PIECE` (2 ms, one block, `kernels/clock_hold.cu`) every `PERIOD` (4 ms) on the device's ONE stream, started only in the worker loop's idle branch (a message is waited for between pieces), never while paced for heat (`pace::work_ahead_may_run`), off for good on a failed launch. A piece ends by the card's timer or a cycle bound — never near the TDR watchdog. Never queue more than one piece. A/B `SWARMLLM_CARD_CLOCK_HOLD=0`.
+
+→ `docs/invariants/inference.md` § "A card between a split's forwards keeps its clocks"
+
 ## Several rows on a card go to llama.cpp's int8 tensor-core MMQ (2026-10-21, #325)
 
 Vendored `quantized/cuda.rs::dequantize_matmul` sends ≥ 9 rows — fewer where **`mmq_few_rows_line(dtype)`** says (read by `mmq_takes_few_rows` and the card tests), inside a graph capture too once the type is READY (`mmq_prepare_few_rows_once`: nothing on the capturing thread may raise the shared-memory limit, gotcha #841's class; A/B `SWARMLLM_QMATMUL_MMQ_CAPTURED=0`) — to llama.cpp's MMQ (`candle-kernels/src/ggml_mmq`) wherever `swarm_mmq_available()`. ⛔ All of it in `namespace swarm_ggml` (gotcha #927, guard `the_vendored_mmq_keeps_its_own_namespace`). ⛔ Nothing may reach llama.cpp's `CUDA_CHECK` / `GGML_ASSERT` (they abort): the launcher answers a status. ⛔ Every vendored kernel LIBRARY carries its floor's PTX (`build.rs` `ptx_beside`; guard `every_vendored_kernel_library_carries_ptx`; check with `CUDA_FORCE_PTX_JIT=1`). The Linux release adds 12.0 machine code to flash and MoE (`SWARMLLM_CUDA_MACHINE_CODE_ALSO`, #326), ⛔ never MMQ; CI: `examples/check_card_machine_code.sh`. A/B `SWARMLLM_QMATMUL_MMQ=dp4a`, `SWARMLLM_QMATMUL_MMQ_MIN_ROWS`, `SWARMLLM_QMATMUL_MMQ_MAX_ROWS`; `mmq_mma_products()` proves it fired. A refused launch turns MMQ off for the process (`MMQ_MMA_FAILED`); a product with no card memory falls back for ITSELF only (`MmqFailure::NoRoom`, `mmq_mma_no_room()`) — never latch on a transient condition.

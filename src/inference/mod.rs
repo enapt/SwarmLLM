@@ -5,6 +5,7 @@ pub(crate) mod attn_softmax;
 pub(crate) mod cancel;
 pub(crate) mod card_pace;
 pub mod chat_template;
+pub(crate) mod clock_hold;
 pub mod coupled_noise;
 pub(crate) mod cpu_pools;
 pub(crate) mod cuda_graph;

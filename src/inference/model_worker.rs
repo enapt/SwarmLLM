@@ -501,6 +501,8 @@ pub async fn run_worker(
     let mut far_runs = FarRuns::default();
     // Splits whose first segment this worker holds, drafting by block.
     let mut block_drafts = SplitBlockDrafts::default();
+    // The card's clocks held up between a split's forwards (`clock_hold`).
+    let mut clock_hold = crate::inference::clock_hold::ClockHold::default();
 
     loop {
         // Either block on the next IPC message (no slots are decoding) OR race
@@ -520,7 +522,20 @@ pub async fn run_worker(
             if ipc_rx.is_empty() && block_drafts.guess_ahead(&models, &|| ipc_rx.is_empty()) {
                 pool_may_hold_freed = true;
             }
-            if pool_may_hold_freed && crate::inference::cuda_pool::keep_enabled() {
+            // Between a split's forwards, a short piece on the card keeps its
+            // clocks up for the next (`clock_hold`); a message is waited for
+            // only between pieces.
+            let card = models.values().map(|m| m.device()).find(|d| d.is_cuda());
+            let piece = ipc_rx
+                .is_empty()
+                .then(|| clock_hold.start_piece(std::time::Instant::now(), card))
+                .flatten();
+            if let Some(wait) = piece {
+                match tokio::time::timeout(wait, ipc_rx.recv()).await {
+                    Ok(m) => m,
+                    Err(_next_piece) => continue,
+                }
+            } else if pool_may_hold_freed && crate::inference::cuda_pool::keep_enabled() {
                 match tokio::time::timeout(crate::inference::cuda_pool::IDLE_TRIM, ipc_rx.recv())
                     .await
                 {
@@ -545,6 +560,9 @@ pub async fn run_worker(
         let mut shutdown = false;
         if let Some((msg, payload)) = next_msg {
             pool_may_hold_freed = true;
+            if matches!(msg, DaemonMsg::Forward(_)) {
+                clock_hold.note_forward(std::time::Instant::now());
+            }
             shutdown |= handle_daemon_msg(
                 msg,
                 payload,
@@ -578,6 +596,9 @@ pub async fn run_worker(
             for _ in 0..16 {
                 match ipc_rx.try_recv() {
                     Ok((m2, p2)) => {
+                        if matches!(m2, DaemonMsg::Forward(_)) {
+                            clock_hold.note_forward(std::time::Instant::now());
+                        }
                         shutdown |= handle_daemon_msg(
                             m2,
                             p2,

@@ -36,6 +36,7 @@ fn build_fused_decode_ptx() {
         "kv_append.cu",
         "delta_rule.cu",
         "tree_rank.cu",
+        "clock_hold.cu",
     ];
 
     for k in KERNELS {

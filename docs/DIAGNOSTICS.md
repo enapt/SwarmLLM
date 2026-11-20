@@ -995,6 +995,21 @@ or `SWARMLLM_PROMPT_PASS_HOLD=0`, sweeps it at `kv_cache_ttl_secs`. A pass whose
 coordinator left the swarm is let go 300 s after an idle tick first finds it gone
 (`DIAG: released a prompt pass whose sender or coordinator left`).
 
+## "A split's forwards on this card are slow, and slower in a sawtooth" — the card's clocks (2026-11-20, #487)
+
+A card that works a few tens of milliseconds a round and waits hundreds for the far end is read as idle by its
+own governor. The signature, at `-v`: the worker's `DIAG: worker forward answered` (`received_to_computed_ms`) for
+the same shape runs in a sawtooth — fast three times right after a slow one, then climbing ~10 ms a round — while
+`DIAG: SplitModel forward pass complete` (`forward_ms`) stays at 2-3 (the launch, not the work). Confirm with the
+clock during the replies (`nvidia-smi --query-gpu=timestamp,clocks.gr,clocks.mem,power.draw --format=csv -lms 500`,
+local time; drop the windows the rig sits idle between asks): ~300 MHz against the card's boost is the governor.
+
+Since #487 a worker holds its clocks between forwards; the mechanism's line (debug, once per hold, with `pieces`,
+`held_ms`, `why`) is `DIAG: the card's clocks were held between a split's forwards`. A sawtooth with no such line: the
+switch is off (`SWARMLLM_CARD_CLOCK_HOLD=0`), the computer is paced for heat (`why="paced for heat"`), a launch
+failed (a WARN), or the far computer runs a release without it — its `served_ms` in `DIAG: segment result received`
+is where its own clocks show. ⚠ A split's speed measured before #487 was measured at the dipped clock on both ends.
+
 ## "Something is slow" — split user time from kernel time FIRST
 
 Before theorising about which code is slow, spend one command finding out

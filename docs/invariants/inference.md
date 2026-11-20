@@ -9477,3 +9477,55 @@ own models directory.
 
 **Moved from `arch-inference.md` (trimmed 2026-11-17):** Weights AND cache are charged as one figure: weighed apart, #451's drafter was put on a card that then refused it; loaded first, a 27B's 1.85 GB drafter ran a 12 GB card out of memory on every load - hence one figure, `block_drafter::charged`. `fits_beside_one_conversation` is vLLM's rule (a quarter refused it on a 16 GB machine's first segment). Scales: llama.cpp PR #29802 measured sqrt(hidden) keeping more; an unstated scale is the target's. `target_layers` stores id + 1; llama.cpp reads that layer's INPUT. On the processor the whole head read for every block row was most of a draft (Qwen3.5-4B: 155-172 -> 76-99 ms at 15 guesses); a whole model there attaches no drafter because the head writes faster and the drafter's 0.4-1.85 GB stays free. A drafter's `fc` read paid whole for one row in a round the block sat out, hence context rows are made at the next draft. z-lab's causal rule kept 6.47 against 5.98 a block on code, 1.44 against 1.30 on a story, over one fixed reply. On a card a split's card-held first segment attaches one too (2026-11-08 night: Qwen3.5-9B, first part on an RTX 3070, rest on a processor, 130 ms - code 1.7-1.9x, a class 2.2-2.4x, a story 1.4-1.5x; replies part at near ties as a card's checks do). Count is priced as one computer's: its own step (a one-token round over the split). #451 (ON since 2026-11-14): Qwen3.5-9B at 25/32 card layers, code 30.4 against 20.9 tok/s, prose and a story no slower; the output crosses to the card's head per draft; `drafter_home` needs a KNOWN processor-side budget and no borrowed head. Where no load attaches it, a computer fetches none and gives back one on disk.
 
+
+## A card between a split's forwards keeps its clocks (2026-11-20, FUTURE_WORK #487)
+
+**What it replaced.** Nothing: a worker serving a split's segment sat idle between forwards, and the card's own
+governor read that as an idle card. Profiled on Qwen3.8-27B, this computer's RTX 3070 Laptop running layers
+[0, 21) and a laptop in the US the rest (`~/swarmllm-gate/split27_prof`, published 0.3.302 at `-v`): the worker's
+own time for a five-row forward (`received_to_computed_ms`) ran in a sawtooth through every reply — 26, 26, 26,
+49, 58, 65, 77, 88, 183, 180, then 26 again — median 71 ms, while the forward itself launched in 2-3 ms
+(`forward_ms`, a recorded graph). The rig's telemetry read the card at 210-420 MHz through the replies. A slow
+forward is long enough for the governor to raise the clocks, the next three are fast, then the clocks sag
+through the ~400 ms the round spends abroad.
+
+**Prior art.** NVIDIA's forum knows the shape ("First batch after idle / between workloads is much slower",
+13 → 160 ms) and answers with locked clocks (`nvidia-smi -lgc`, or `lock-gpu-clocks`), which need administrator
+rights no node has; the user-space answer is filler work while waiting, whose cost is one filler's length of
+latency for the work that arrives behind it ("Reducing GPU idle time") — so pieces are short and never queued
+more than one. Nothing found on how much filler holds a governor, so it was measured first.
+
+**The probe** (`~/swarmllm-gate/clock_probe`, a standalone CUDA program, live node stopped): a ~27 ms
+memory-bound "forward" every 410 ms. Gaps idle: median 31.7, then 49.7 ms on a second idle run, max 59.7, the
+clock falling 1290 → 210 MHz. Gaps filled with one-block 2 ms spin pieces: 100% or 50% of the time held
+1755 MHz (this card's boost under its power limit) and the forward at 27.4 ms (p90 28.3-28.6); 25% held the
+memory-bound forward (28.2) but let the graphics clock slide to 555 MHz — a real forward is a graph of small
+kernels and needs the graphics clock, so the hold runs at half.
+
+**The A/B** (`~/swarmllm-gate/split27_clock`, one binary, arms on / `SWARMLLM_CARD_CLOCK_HOLD=0` / on, the 27B
+forced here [0, 21) → the Australian 3060 [21, 64), 127 ms, five asks an arm, 160-token replies):
+
+| arm | this side's forward (median / p90) | card during replies | reply tok/s, prose / code |
+|---|---|---|---|
+| on | 25 / 31 ms (n 270), 10 holds, 12,806 pieces | 1455 MHz (p10 1035), 35 W | 6.88, 7.22 / 7.77, 8.08 |
+| off | 76 / 87 ms (n 268), no hold | 315 MHz (p10 270), 26 W | 6.35, 6.11 / 6.86, 6.80 |
+| on | 25 / 28 ms (n 269), 10 holds, 12,942 pieces | 1538 MHz (p10 1215), 37 W | 7.53, 6.83 / 7.75, 7.63 |
+
+The far part of a round (elapsed ~263 ms, served ~121 ms in Australia) is the same in every arm; the reply is
+~13% faster from this side alone. A first arm toward the US laptop showed the same 26 ms (n 141) before that
+laptop paused for heat. The far computers are on 0.3.302 and do not hold their own cards yet; their served
+times (49 ms in one run toward the US, 116-151 in another) are expected to fall as they update.
+
+**What a change must keep.**
+- One piece queued at a time, on the device's ONE stream: a forward arriving behind it waits at most `PIECE`.
+  Queueing several (or a long one) puts their whole length in front of the next forward.
+- Pieces start only in the worker loop's idle branch, between waits for a message; the hold starts at every
+  `DaemonMsg::Forward` (the admit-coalescing drain too) and lasts `HOLD_FOR` past the last.
+- A piece ends by the card's `%globaltimer` OR three cycles a nanosecond of `clock64()`, so a timer that stood
+  still cannot hold the stream near Windows' two-second watchdog (TDR) — a TDR on this machine has wedged it.
+- No piece while the computer is paced for heat (`pace::work_ahead_may_run`): it is heat.
+- **Known costs**: ~10 W more while a split reply runs (35-37 W against 26 W on the 3070 Laptop); and a second
+  model's worker on the same card, mid-request while this one holds, shares the card with the pieces (half of
+  one block's time slices). Neither measured as a loss; a change that widens the hold re-measures both.
+- The processor-only work between forwards (the guess head in system memory, ~12 ms a guess) starts no piece,
+  so the clock still dips there (p10 1035-1215 MHz in the A/B).
