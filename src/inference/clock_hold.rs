@@ -89,6 +89,14 @@ impl ClockHold {
         card: Option<&candle_core::Device>,
     ) -> Option<Duration> {
         let until = self.until?;
+        let Some(card) = card else {
+            // No model here runs on a card: nothing to hold, nothing to report.
+            *self = Self {
+                failed: self.failed,
+                ..Self::default()
+            };
+            return None;
+        };
         let paced = !crate::inference::pace::work_ahead_may_run();
         if now >= until || paced || self.failed {
             self.end(
@@ -101,7 +109,7 @@ impl ClockHold {
             );
             return None;
         }
-        match start_piece_on(card?) {
+        match start_piece_on(card) {
             Ok(true) => {
                 self.pieces += 1;
                 Some(PERIOD)
@@ -213,6 +221,8 @@ mod tests {
         assert!(hold.until.is_none());
         hold.note_forward(t0);
         assert_eq!(hold.start_piece(t0, None), None);
+        // A worker with no model on a card drops the hold without a report.
+        assert!(hold.until.is_none() && hold.since.is_none());
         hold.note_forward(t0);
         hold.note_forward(t0 + Duration::from_millis(600));
         assert_eq!(hold.until, Some(t0 + Duration::from_millis(600) + HOLD_FOR));
