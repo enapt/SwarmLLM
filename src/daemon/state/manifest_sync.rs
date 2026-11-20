@@ -149,13 +149,19 @@ struct Connection {
 /// verified, which it is pulling, and what it has answered whom.
 ///
 /// Written only by the dispatcher (`note_seen` for every VERIFIED manifest
-/// whatever its transport, `versions_to_pull` for a digest, `answers_allowed`
-/// for a pull) and by the health monitor's round (`retry_overdue_pulls`, then
-/// `forget_stale`).
+/// whatever its transport, `note_taken` where registering one made this
+/// node's version exactly the sender's, `versions_to_pull` for a digest,
+/// `answers_allowed` for a pull) and by the health monitor's round
+/// (`retry_overdue_pulls`, then `forget_stale`).
 #[derive(Default)]
 pub struct ManifestSync {
     /// `(model, version) → (the declared context last seen with it, when)`.
     seen: DashMap<Version, (Option<u32>, Instant)>,
+    /// `model → (the version this node took from a peer's message, when)` —
+    /// the latest take per model, read by the health monitor's round
+    /// ([`Self::taken_at`]): a version handed over is its sender's to
+    /// announce, never a change of ours to broadcast (#91 (2n)).
+    taken: DashMap<ModelId, ([u8; 32], Instant)>,
     /// Versions a pull has asked for that have not arrived. Keyed by VERSION,
     /// not model: two peers holding two versions of one model are both
     /// information (`model::canonical` decides between them), and an answer
@@ -222,6 +228,36 @@ impl ManifestSync {
             }
         }
         self.seen.insert(key, (context_length, now));
+    }
+
+    /// Registering a peer's manifest of `model` made this node's version
+    /// exactly the sender's (`ModelRegistry::register_peer_manifest`), by any
+    /// transport. After a restart the peers' catch-ups, 0-3 s after they
+    /// connect, replace the copies read off disk, and the next manifest round
+    /// broadcast each one as a change of ours: 32 manifests of ~56 KB to
+    /// every peer, 29 s after a start (2026-11-20, #91 (2n)).
+    pub fn note_taken(&self, model: &ModelId, manifest_hash: [u8; 32]) {
+        if model.0.len() > MAX_MODEL_ID_BYTES {
+            return;
+        }
+        let now = Instant::now();
+        if !self.taken.contains_key(model) && self.taken.len() >= MAX_SEEN_VERSIONS {
+            self.taken
+                .retain(|_, (_, at)| now.saturating_duration_since(*at) < SEEN_FOR);
+            if self.taken.len() >= MAX_SEEN_VERSIONS {
+                return;
+            }
+        }
+        self.taken.insert(model.clone(), (manifest_hash, now));
+    }
+
+    /// When this node last took `model`'s version `manifest_hash` from a
+    /// peer's message — `None` where its latest take was another version, or
+    /// none is remembered.
+    pub fn taken_at(&self, model: &ModelId, manifest_hash: &[u8; 32]) -> Option<Instant> {
+        self.taken
+            .get(model)
+            .and_then(|entry| (entry.0 == *manifest_hash).then_some(entry.1))
     }
 
     /// Which versions of `digest` (sent by `from`) to pull, given the version
@@ -466,6 +502,8 @@ impl ManifestSync {
     fn forget_stale_at(&self, now: Instant) {
         self.seen
             .retain(|_, (_, at)| now.saturating_duration_since(*at) < SEEN_FOR);
+        self.taken
+            .retain(|_, (_, at)| now.saturating_duration_since(*at) < SEEN_FOR);
         self.forget_unanswerable(now);
         // A record emptied by a reset is kept while the reset is recent: drop
         // it, and the next connection found no reset to wait out — a peer that
@@ -497,6 +535,24 @@ impl ManifestSync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The latest take per model answers only for its own version, and a
+    /// day-old take is forgotten (#91 (2n)).
+    #[test]
+    fn a_take_answers_for_its_own_version_until_it_is_a_day_old() {
+        let sync = ManifestSync::default();
+        let m = ModelId("taken".into());
+        sync.note_taken(&m, [1; 32]);
+        assert!(sync.taken_at(&m, &[1; 32]).is_some());
+        assert!(sync.taken_at(&m, &[2; 32]).is_none(), "another version");
+        sync.note_taken(&m, [2; 32]);
+        assert!(
+            sync.taken_at(&m, &[1; 32]).is_none(),
+            "the latest take replaced it"
+        );
+        sync.forget_stale_at(Instant::now() + SEEN_FOR);
+        assert!(sync.taken_at(&m, &[2; 32]).is_none(), "a day old");
+    }
 
     const PEER: NodeId = NodeId([1; 32]);
 

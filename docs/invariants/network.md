@@ -3008,6 +3008,34 @@ the per-version keying above is untouched. Test:
 `returning_to_a_version_heard_before_we_left_it_is_announced` (red with any
 heard record counting). Rig: `ORDER=late` with A and C on the fix.
 
+### A change a peer handed over is its sender's to announce (2026-11-20, #91 (2n))
+
+The #224 line counts only a hearing after we left a version, and only GOSSIP is a
+hearing — so a version a peer handed over POINT TO POINT read as a change of
+ours. Read at `-v` on the live node's restart (2026-11-20 18:26:58-18:27:27Z,
+`~/swarmllm-gate/clock_soak`): the first round sent 0 and suppressed 44; between
+it and the second, 49 manifests were registered with a new hash, every one from
+a peer's catch-up (`transport=Direct`, 0-3 s after its connection, four senders)
+replacing the copy read off disk at the start (tinyllama's `manifest.json`:
+publisher 0, both part hashes blank; the 27B's: 20 of 32 blank). The second
+round **sent 32** (~56 KB each, flood-published to every peer). The 08:36Z
+restart that morning read the same (sent 0, then 31).
+
+Demers et al. 1987 draw the line: the site with an update spreads it (rumor
+mongering — gossipsub relays every gossiped copy on its own); pairwise
+anti-entropy — here the catch-up, digests and pulls — repairs what spreading
+missed and is not spread again. So `ModelRegistry::register_peer_manifest`
+answers whether this node's version became EXACTLY the sender's (a version our
+corrections altered — a hash from the origin, one we knew — is ours and still
+announced), dispatch notes it (`ManifestSync::note_taken`), and
+`manifest_needs_broadcast`'s REQUIRED `taken_from_a_peer_at` skips that change
+when it was taken after we announced the version we left
+(`taken_since_we_left`). #224's return to the agreed version was this node's OWN
+registration, never a take, so it still goes; a take before we announced (no
+version yet) and a full round's repeat are judged as before. Test:
+`a_version_taken_from_a_peer_is_not_broadcast_as_our_change` (red with the
+argument ignored); DIAG `taken_from_peers` on the round's line.
+
 ## A chained hop's refusal goes to the coordinator (2026-09-25)
 
 **What happened.** The first live run of a composite failover

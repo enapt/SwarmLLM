@@ -124,6 +124,13 @@ struct HolderRecord {
 /// 2026-10-03); the oldest goes first.
 const HEARD_HASHES_PER_PART: usize = 8;
 
+/// What [`ModelRegistry::register`] kept: whether this node's version of the
+/// model changed, and the version it holds now.
+struct Registered {
+    changed: bool,
+    manifest_hash: [u8; 32],
+}
+
 pub struct ModelRegistry {
     /// Known model manifests, keyed by model ID.
     manifests: DashMap<ModelId, ModelManifest>,
@@ -430,7 +437,22 @@ impl ModelRegistry {
         models
     }
 
-    pub fn register_manifest(&self, mut manifest: ModelManifest) {
+    pub fn register_manifest(&self, manifest: ModelManifest) {
+        let _ = self.register(manifest);
+    }
+
+    /// [`Self::register_manifest`] for a manifest a PEER sent: true where this
+    /// node's version CHANGED to exactly the sender's — its corrections (a
+    /// hash we knew, one from the origin) left nothing to tell apart. Such a
+    /// version is the sender's to announce, never broadcast here as a change
+    /// of ours (`ManifestSync::note_taken`, #91 (2n)).
+    pub fn register_peer_manifest(&self, manifest: ModelManifest) -> bool {
+        let theirs = manifest.manifest_hash;
+        self.register(manifest)
+            .is_some_and(|ours| ours.changed && ours.manifest_hash == theirs)
+    }
+
+    fn register(&self, mut manifest: ModelManifest) -> Option<Registered> {
         // Universal net against copied-folder model names (`<model>.FULLBACKUP`,
         // `<model>.old`). This is the single point every adoption path funnels
         // through — gossip ingress, DB reload on startup, local disk scan,
@@ -444,7 +466,7 @@ impl ModelRegistry {
                  must come from the model, not a copied directory. Rename it to \
                  the real model id if this is genuine."
             );
-            return;
+            return None;
         }
         // A layer count past any model llama.cpp loads sizes a flag per layer
         // on every plan — refused here too, so no path that adopts a manifest
@@ -456,7 +478,7 @@ impl ModelRegistry {
                 num_layers = manifest.num_layers,
                 "Refusing manifest: it declares more layers than any model can have"
             );
-            return;
+            return None;
         }
         // Every hash this manifest carries is heard, whatever the merges below
         // keep: an origin-derived hash outranks a peer's in the manifest, and the
@@ -515,7 +537,7 @@ impl ModelRegistry {
                          a different one."
                     );
                 }
-                return;
+                return None;
             }
         }
         // Announce at INFO only when something actually changed.
@@ -833,7 +855,12 @@ impl ModelRegistry {
         } else {
             tracing::debug!(model = %manifest.id, "DIAG: register_manifest (unchanged)");
         }
+        let manifest_hash = manifest.manifest_hash;
         self.manifests.insert(manifest.id.clone(), manifest);
+        Some(Registered {
+            changed,
+            manifest_hash,
+        })
     }
 
     /// Do these two manifests describe the same *file*, or two different builds
@@ -2949,6 +2976,46 @@ mod tests {
             hex::encode(first),
             hex::encode(second),
             "the same manifest corrected twice must land on the same hash"
+        );
+    }
+
+    /// A peer's manifest counts as TAKEN only where this node's version
+    /// changed to exactly the sender's (#91 (2n)): the same version again is
+    /// no change, and a version our corrections altered (a hash from the
+    /// origin) is ours, not the sender's — that one is still announced.
+    #[test]
+    fn a_peers_manifest_is_taken_only_when_our_version_becomes_exactly_theirs() {
+        use crate::model::manifest::ModelManifestExt;
+        let registry = ModelRegistry::with_local_node(NodeId([1u8; 32]));
+        let mut from_disk = test_manifest("m", "M");
+        from_disk.shards = vec![test_shard(7, [0u8; 32])];
+        from_disk.manifest_hash = from_disk.compute_hash();
+        registry.register_manifest(from_disk);
+
+        let mut senders = test_manifest("m", "M");
+        senders.publisher = NodeId([5u8; 32]);
+        senders.shards = vec![test_shard(7, [0xabu8; 32])];
+        senders.manifest_hash = senders.compute_hash();
+        assert!(
+            registry.register_peer_manifest(senders.clone()),
+            "our version became exactly the sender's"
+        );
+        assert!(
+            !registry.register_peer_manifest(senders.clone()),
+            "the same version again changed nothing"
+        );
+
+        let other = ModelRegistry::with_local_node(NodeId([1u8; 32]));
+        other.record_origin_verified_hash(
+            ShardId {
+                model_id: ModelId("m".into()),
+                index: 7,
+            },
+            [0x59u8; 32],
+        );
+        assert!(
+            !other.register_peer_manifest(senders),
+            "the origin's hash made the version ours, not the sender's"
         );
     }
 

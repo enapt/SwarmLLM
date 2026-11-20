@@ -2299,7 +2299,19 @@ pub(crate) async fn dispatch_network_messages(
                                                     .model_registry
                                                     .get_manifest(&manifest.id)
                                                     .is_none();
-                                                shared_state.model_registry.register_manifest(manifest.clone());
+                                                // A version this node took whole from the
+                                                // sender is the sender's to announce: the
+                                                // manifest round does not broadcast it as a
+                                                // change of ours (#91 (2n)).
+                                                if shared_state
+                                                    .model_registry
+                                                    .register_peer_manifest(manifest.clone())
+                                                {
+                                                    shared_state.models.manifest_sync.note_taken(
+                                                        &manifest.id,
+                                                        manifest.manifest_hash,
+                                                    );
+                                                }
                                                 // Wake auto-manage when a genuinely new model appears
                                                 if is_new {
                                                     shared_state.models.auto_manage_notify.notify_one();

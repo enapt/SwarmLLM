@@ -653,17 +653,45 @@ pub(crate) fn upload_claim(
 /// the agreed hash and its heal waited for one). RFC 6206 §4.2 draws the same
 /// line: a node's own change of state starts a new interval, and only
 /// consistent transmissions heard within the current interval suppress.
+///
+/// `taken_from_a_peer_at` — when this node last took exactly this version
+/// from a peer's message (`ManifestSync::taken_at`). A change it took after
+/// announcing the version it leaves is not its own change: the version is the
+/// sender's to announce (Demers et al. 1987: the site with the update spreads
+/// it, pairwise anti-entropy — the catch-up, digests and pulls — repairs
+/// what spreading missed and is not spread again). It suppresses only that
+/// change, never a full round's repeat: a version one peer handed over is not
+/// one the swarm heard. #91 (2n): after a restart the peers' catch-ups
+/// replaced the copies read off disk and the next round broadcast 32 of them.
 fn manifest_needs_broadcast(
     last_announced: Option<&([u8; 32], std::time::Instant)>,
     current_hash: &[u8; 32],
     full_round: bool,
     swarm_heard_at: Option<std::time::Instant>,
+    taken_from_a_peer_at: Option<std::time::Instant>,
 ) -> bool {
     let swarm_heard_it = swarm_heard_at.is_some_and(|heard| match last_announced {
         Some((prev, since)) if prev != current_hash => heard > *since,
         _ => true,
     });
-    !swarm_heard_it && (full_round || last_announced.is_none_or(|(prev, _)| prev != current_hash))
+    let changed = last_announced.is_none_or(|(prev, _)| prev != current_hash);
+    !swarm_heard_it
+        && (full_round
+            || (changed
+                && !taken_since_we_left(last_announced, current_hash, taken_from_a_peer_at)))
+}
+
+/// Whether this node's version `current_hash` was taken from a peer's message
+/// after it announced the version it is leaving — a change that is not ours
+/// ([`manifest_needs_broadcast`]).
+fn taken_since_we_left(
+    last_announced: Option<&([u8; 32], std::time::Instant)>,
+    current_hash: &[u8; 32],
+    taken_from_a_peer_at: Option<std::time::Instant>,
+) -> bool {
+    taken_from_a_peer_at.is_some_and(|taken| {
+        matches!(last_announced, Some((prev, since)) if prev != current_hash && taken > *since)
+    })
 }
 
 /// How long a download tracking entry can sit unchanged before being treated
@@ -1969,6 +1997,7 @@ impl HealthMonitor {
 
         let mut sent = 0usize;
         let mut suppressed = 0usize;
+        let mut taken_from_peers = 0usize;
         // With no peer connected nobody hears a broadcast: GossipSub keeps it
         // for the first peer to subscribe, which the catch-up below tells
         // point to point anyway, and this round's window cannot know whether
@@ -1989,13 +2018,28 @@ impl HealthMonitor {
                 &manifest.manifest_hash,
                 quiet,
             );
+            let taken_at = self
+                .shared_state
+                .models
+                .manifest_sync
+                .taken_at(&manifest.id, &manifest.manifest_hash);
             if !manifest_needs_broadcast(
                 self.last_announced_manifests.get(&manifest.id),
                 &manifest.manifest_hash,
                 full_round,
                 swarm_heard_at,
+                taken_at,
             ) {
-                if swarm_heard_at.is_some() {
+                if taken_since_we_left(
+                    self.last_announced_manifests.get(&manifest.id),
+                    &manifest.manifest_hash,
+                    taken_at,
+                ) {
+                    // A peer handed this version over: it is now the one
+                    // this node stands by, announced by its sender.
+                    self.note_announced(&manifest.id, manifest.manifest_hash);
+                    taken_from_peers += 1;
+                } else if swarm_heard_at.is_some() {
                     // The swarm has this hash, so it no longer counts as a
                     // change still owed — otherwise it would go out as one the
                     // moment the window lapsed, on an ordinary round.
@@ -2084,15 +2128,17 @@ impl HealthMonitor {
         self.manifests_heard_stored = self
             .shared_state
             .persist_manifests_heard(self.manifests_heard_stored);
-        if sent > 0 || suppressed > 0 || repeated > 0 {
+        if sent > 0 || suppressed > 0 || taken_from_peers > 0 || repeated > 0 {
             tracing::debug!(
                 sent,
                 suppressed,
+                taken_from_peers,
                 repeated_digests = repeated,
                 full_round,
                 quiet_window_secs = quiet.as_secs(),
                 "DIAG: broadcast model manifests (suppressed = the swarm was gossiped \
-                 that exact manifest within the quiet window)"
+                 that exact manifest within the quiet window; taken_from_peers = a \
+                 change a peer handed over, its sender's to announce)"
             );
         }
     }
@@ -3279,7 +3325,7 @@ pub(crate) mod tests {
         let hash = [7u8; 32];
         let since = std::time::Instant::now();
         assert!(
-            !manifest_needs_broadcast(Some(&(hash, since)), &hash, false, None),
+            !manifest_needs_broadcast(Some(&(hash, since)), &hash, false, None, None),
             "a manifest a peer has already been sent, unchanged, on an ordinary \
              round, is the 825 KB this node must stop republishing every 30 s"
         );
@@ -3295,15 +3341,15 @@ pub(crate) mod tests {
         let other = [9u8; 32];
         let since = std::time::Instant::now();
         assert!(
-            manifest_needs_broadcast(None, &hash, false, None),
+            manifest_needs_broadcast(None, &hash, false, None, None),
             "never announced — nobody has it"
         );
         assert!(
-            manifest_needs_broadcast(Some(&(other, since)), &hash, false, None),
+            manifest_needs_broadcast(Some(&(other, since)), &hash, false, None, None),
             "changed since we announced it — peers hold a stale one"
         );
         assert!(
-            manifest_needs_broadcast(Some(&(hash, since)), &hash, true, None),
+            manifest_needs_broadcast(Some(&(hash, since)), &hash, true, None, None),
             "a full round repairs a lost message, so it sends what nobody has \
              repeated within the quiet window"
         );
@@ -3323,17 +3369,66 @@ pub(crate) mod tests {
         let since = std::time::Instant::now();
         let heard = since + std::time::Duration::from_secs(1);
         assert!(
-            !manifest_needs_broadcast(Some(&(hash, since)), &hash, true, Some(heard)),
+            !manifest_needs_broadcast(Some(&(hash, since)), &hash, true, Some(heard), None),
             "a full round must not repeat what another holder said minutes ago \
              — that repetition, from every holder, was 87% of received gossip"
         );
         assert!(
-            !manifest_needs_broadcast(Some(&(other, since)), &hash, false, Some(heard)),
+            !manifest_needs_broadcast(Some(&(other, since)), &hash, false, Some(heard), None),
             "a change we learned from gossip is one the swarm already has"
         );
         assert!(
-            !manifest_needs_broadcast(None, &hash, true, Some(heard)),
+            !manifest_needs_broadcast(None, &hash, true, Some(heard), None),
             "a model we just picked up, whose manifest the swarm just heard"
+        );
+    }
+
+    /// **A change a peer HANDED OVER is not ours to broadcast** (#91 (2n)).
+    /// The field's shape, 2026-11-20 18:26:58-18:27:27Z: a restart registered
+    /// the copies read off disk, the first round let each stand as heard, the
+    /// peers' catch-ups 0-3 s later replaced them with the senders' versions,
+    /// and the next round broadcast 32 of them as changes of ours. A change
+    /// taken BEFORE we left the version — or our own change — still goes, and
+    /// a full round's repeat is not excused by one peer's message.
+    #[test]
+    fn a_version_taken_from_a_peer_is_not_broadcast_as_our_change() {
+        let from_disk = [7u8; 32];
+        let senders = [9u8; 32];
+        let round_one = std::time::Instant::now();
+        let taken = round_one + std::time::Duration::from_secs(2);
+        assert!(
+            !manifest_needs_broadcast(
+                Some(&(from_disk, round_one)),
+                &senders,
+                false,
+                None,
+                Some(taken)
+            ),
+            "the sender's version, taken after we announced ours, is the sender's news"
+        );
+        assert!(
+            manifest_needs_broadcast(Some(&(from_disk, round_one)), &senders, false, None, None),
+            "a change nobody handed over is ours, and goes out"
+        );
+        assert!(
+            manifest_needs_broadcast(
+                Some(&(from_disk, taken)),
+                &senders,
+                false,
+                None,
+                Some(round_one)
+            ),
+            "taken before we announced the version we left: peers have since taken ours"
+        );
+        assert!(
+            manifest_needs_broadcast(
+                Some(&(senders, round_one)),
+                &senders,
+                true,
+                None,
+                Some(taken)
+            ),
+            "a full round repeats what the swarm did not hear, whoever handed it over"
         );
     }
 
@@ -3356,7 +3451,8 @@ pub(crate) mod tests {
                 Some(&(deleted, left_it)),
                 &agreed,
                 false,
-                Some(heard_agreed)
+                Some(heard_agreed),
+                None
             ),
             "peers that took the version we announced since have not heard this one"
         );
@@ -3365,7 +3461,8 @@ pub(crate) mod tests {
                 Some(&(deleted, left_it)),
                 &agreed,
                 false,
-                Some(left_it + std::time::Duration::from_secs(1))
+                Some(left_it + std::time::Duration::from_secs(1)),
+                None
             ),
             "heard again after we left it — the swarm has it"
         );

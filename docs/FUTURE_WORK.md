@@ -2592,6 +2592,21 @@ of 33. So the start's flood ran under the DAY's window, not the short one — th
 re-sends them; left: why a manifest gossiped within the day is sent again after a restart (the record of what was
 gossiped is not what survives it, or the first round's 40 counted no peers). The hour-long second window (w2) never
 ran: the forced-split rig took the live node at 08:24Z.
+**Cause read 2026-11-20 18:26:58-18:27:27Z, and fixed** (the clock soak's restart at `-v`,
+`~/swarmllm-gate/clock_soak`): neither guess. The first round sent 0 and suppressed 44; between it and the second,
+**49 manifests were registered with a new hash, every one from a peer's point-to-point catch-up** (`transport=Direct`,
+0-3 s after its connection, four senders) replacing the copy read off disk at the start (tinyllama's `manifest.json`:
+publisher 0, both part hashes blank; the 27B's: 20 of 32 blank). Only gossip counts as heard, and the #224 rule counts
+a hearing only after we left a version, so the second round **sent 32** (~56 KB each, flood-published) as changes of
+ours. Prior art: Demers et al. 1987 — the site with an update spreads it; pairwise anti-entropy (our catch-up, digests
+and pulls) repairs what spreading missed and is not spread again. Now a version this node TOOK whole from a peer
+(`ModelRegistry::register_peer_manifest`: our version changed to exactly the sender's) is noted
+(`ManifestSync::note_taken`) and the round's changed arm leaves it to its sender (`manifest_needs_broadcast`'s REQUIRED
+`taken_from_a_peer_at`, `taken_since_we_left`); a full round's repeat and our own changes (#224's return to the agreed
+version) are judged as before. Test `a_version_taken_from_a_peer_is_not_broadcast_as_our_change` (red with the argument
+ignored); rig `outvoted_rig.sh ORDER=late` (#224's heal) PASS on the fix (B took the checked holders' part after 372 s); DIAG `taken_from_peers` on the round's line.
+Left: the copies on DISK stay stale (a model given back keeps its blank-hash `manifest.json`), so a restart after
+the day's window still gossips the disk copy once; a take before the first round (nothing announced yet) is still sent.
 
 #### #169 — Connection churn on multi-interface hosts: only the LAN dial is deterministic
 `P3` · network · **PARTIAL** — 2026-07-25 · history: archive § "Connection churn on multi-interface hosts — deterministic dialer partial", gotcha #353
