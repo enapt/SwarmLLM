@@ -1451,6 +1451,11 @@ struct WorkerHandle {
     /// Written by the reader actor, read by [`ModelProcessPool::context_fits`].
     /// On the handle, so the figure dies with the worker that measured it.
     context_fits: Arc<std::sync::atomic::AtomicU32>,
+    /// What this worker's guessers keep on the card and the output head it
+    /// would lend, as it last reported them (`WorkerMsg::CardBeside`), and how
+    /// much of the first `charged_mb` already counts ([`CardBeside`]). On the
+    /// handle, so the figures die with the worker that holds the memory.
+    card_beside: Arc<CardBeside>,
     /// This worker's own decode speed ([`OwnDecodeSpeed`]), written by
     /// [`ModelProcessPool::note_decode_step`] and published by
     /// [`ModelProcessPool::resident_model_layers`]. On the handle for the
@@ -1645,6 +1650,7 @@ fn worker_msg_request_id(msg: &WorkerMsg) -> Option<Uuid> {
         | WorkerMsg::CardAllocationProbe { .. }
         | WorkerMsg::ModelLoadTimed { .. }
         | WorkerMsg::ContextFits { .. }
+        | WorkerMsg::CardBeside { .. }
         // Read by the spawn before the reader starts; one arriving here
         // came after the spawn stopped waiting for it, and is dropped.
         | WorkerMsg::CardFree { .. }
@@ -1763,6 +1769,8 @@ struct SideBand {
     load_rate: Arc<LoadRate>,
     /// This worker's `WorkerHandle::context_fits`.
     context_fits: Arc<std::sync::atomic::AtomicU32>,
+    /// This worker's `WorkerHandle::card_beside`, its reported half.
+    card_beside: Arc<CardBeside>,
     /// This worker's `WorkerHandle::asked_to_load`, set on a reported load.
     asked_to_load: Arc<AtomicBool>,
     /// The daemon's stop signal ([`ModelProcessPool::watch_daemon_stop`]):
@@ -1814,6 +1822,7 @@ async fn reader_actor(
         slow_card,
         load_rate,
         context_fits,
+        card_beside,
         asked_to_load,
         daemon_stopping,
     } = side;
@@ -1906,6 +1915,22 @@ async fn reader_actor(
                         model = %model_id,
                         tokens = ?tokens,
                         "DIAG: the context the loaded model holds here"
+                    );
+                    continue;
+                }
+                // What its guessers keep on the card, and the head it would
+                // lend (#481 (5)); the pool folds the first into the charge.
+                if let WorkerMsg::CardBeside {
+                    guessers_bytes,
+                    lends_head_bytes,
+                } = msg
+                {
+                    card_beside.note_report(guessers_bytes, lends_head_bytes);
+                    tracing::debug!(
+                        model = %model_id,
+                        guessers_mb = guessers_bytes >> 20,
+                        lends_head_mb = lends_head_bytes >> 20,
+                        "DIAG: what the worker's guessers keep on the card"
                     );
                     continue;
                 }
@@ -3513,6 +3538,38 @@ pub(crate) struct FreshLoadRoom {
 /// prices the segment, an overwrite would silently forget the first one.
 fn add_reserved(map: &dashmap::DashMap<ModelId, u64>, model_id: &ModelId, mb: u64) {
     *map.entry(model_id.clone()).or_insert(0) += mb;
+}
+
+/// What a worker's guessers keep on the card beyond the ranges it was charged
+/// for, and the card-held output head it would lend a later range ending the
+/// model (`WorkerMsg::CardBeside`, #481 (5)), in MB.
+///
+/// The reported half is written by the reader actor as reports arrive; the
+/// charged half only by [`ModelProcessPool::charge_what_its_guessers_hold`],
+/// under `spawn_lock`, which moves the worker's charge (`charged_mb` and the
+/// model's `vram_reserved_mb`) by the difference. A departure releases
+/// `charged_mb` whole, so what was folded in goes with it.
+#[derive(Debug, Default)]
+pub(crate) struct CardBeside {
+    reported_mb: AtomicU64,
+    lends_head_mb: AtomicU64,
+    charged_mb: AtomicU64,
+}
+
+impl CardBeside {
+    fn note_report(&self, guessers_bytes: u64, lends_head_bytes: u64) {
+        const MIB: u64 = 1024 * 1024;
+        self.reported_mb
+            .store(guessers_bytes.div_ceil(MIB), Ordering::Release);
+        // Rounded down: a growth is never priced below what it loads.
+        self.lends_head_mb
+            .store(lends_head_bytes / MIB, Ordering::Release);
+    }
+
+    /// The card-held output head the worker lends, MB.
+    fn lends_head_mb(&self) -> u64 {
+        self.lends_head_mb.load(Ordering::Acquire)
+    }
 }
 
 /// What a departing worker owed, read off its handle before it is dropped.
@@ -5846,10 +5903,10 @@ impl ModelProcessPool {
 
     /// The card memory a spawn of `segment` leaves for the other ranges the
     /// plan gives this node ([`PlannedHere`], #481 (5)): what growing the
-    /// worker by each will charge the card — its layers at growth's per-layer
-    /// rate ([`Self::growth_figures`]). 0 with no such plan, for a processor
-    /// plan, or with `SWARMLLM_SPAWN_LEAVES_PLANNED=0` (the A/B: the spawn
-    /// fills the card as before).
+    /// worker by each will charge the card ([`Self::range_growth_mb`], the
+    /// price [`Self::growth_figures`] charges). 0 with no such plan, for a
+    /// processor plan, or with `SWARMLLM_SPAWN_LEAVES_PLANNED=0` (the A/B: the
+    /// spawn fills the card as before).
     fn room_for_the_plans_other_ranges(&self, model_id: &ModelId, segment: (u32, u32)) -> u64 {
         if std::env::var("SWARMLLM_SPAWN_LEAVES_PLANNED").as_deref() == Ok("0") {
             return 0;
@@ -5857,16 +5914,106 @@ impl ModelProcessPool {
         let others = self
             .planned_here
             .beside(model_id, segment, std::time::Instant::now());
-        if others.is_empty() {
-            return 0;
-        }
-        let Some((_, card_per_layer_mb)) = self.segment_cost_curve(model_id, true) else {
-            return 0;
-        };
         others
             .iter()
-            .map(|r| u64::from(r.1.saturating_sub(r.0)).saturating_mul(card_per_layer_mb))
+            .map(|&r| self.range_growth_mb(model_id, r, true, 0).unwrap_or(0))
             .fold(0, u64::saturating_add)
+    }
+
+    /// What `range` adds to a live worker of `model_id`, on the card
+    /// (`on_gpu`) or in the machine: the estimator's price of the range
+    /// itself — its own layers' weights and caches, and the output head where
+    /// it ends the model — less the process overhead the worker already pays
+    /// ([`Self::segment_cost_curve`]'s fixed term). The ONE price of a growth
+    /// ([`Self::growth_figures`]) and of the room a spawn keeps for one
+    /// ([`Self::room_for_the_plans_other_ranges`]).
+    ///
+    /// Priced off the curve's line instead — the mean layer, with both ends'
+    /// tables spread over every layer — Qwen3.8-27B's `[63,64)` came to
+    /// 261 MB where the loader put 1,336 MB of weights on the card: the layer
+    /// (an attention one, heavier than the mean) and the 994 MB output head.
+    /// The card admitted it with 36 MB to spare, the worker found no room for
+    /// its cache, and the retry pinned the whole model to the processor
+    /// (2026-11-19, #481 (5)). A head a first segment keeps for its guesses is
+    /// charged to that worker once it reports it (`CardBeside`,
+    /// [`Self::charge_what_its_guessers_hold`]) and lent to the range, which is
+    /// then not charged it (`lent_head_mb` below).
+    ///
+    /// Prior art: llama.cpp places the output head as a layer of its own
+    /// (`dev_output = get_layer_buft_list(n_layer)` in `llama-model.cpp`),
+    /// budgeted on the device that holds it, never spread over the others.
+    ///
+    /// The line where the header cannot be read, or with
+    /// `SWARMLLM_GROWTH_PRICE=line` (the A/B).
+    ///
+    /// `lent_head_mb`: the card-held output head the growing worker lends a
+    /// range ending the model (`CardBeside::lends_head_mb`, 0 at a spawn) — the
+    /// load borrows it instead of reading the file's (#458), so such a range on
+    /// the card is not charged it again ([`Self::output_head_lent_mb`]). Charged
+    /// it, the same 27B's `[63,64)` asked 1,405 MB beside a first range already
+    /// holding that head for its guesses, and was refused (2026-11-19).
+    fn range_growth_mb(
+        &self,
+        model_id: &ModelId,
+        range: (u32, u32),
+        on_gpu: bool,
+        lent_head_mb: u64,
+    ) -> Option<u64> {
+        use crate::model::auto_manage::vram::{estimate_worker_ram_mb, estimate_worker_vram_mb};
+        let (fixed_mb, per_layer_mb) = self.segment_cost_curve(model_id, on_gpu)?;
+        let line = u64::from(range.1.saturating_sub(range.0))
+            .max(1)
+            .saturating_mul(per_layer_mb);
+        // A fixture's curve is the test's own statement of the price.
+        #[cfg(test)]
+        if self.test_cost_curve.contains_key(model_id) {
+            return Some(line);
+        }
+        if std::env::var("SWARMLLM_GROWTH_PRICE").as_deref() == Ok("line") {
+            return Some(line);
+        }
+        let Some(inputs) = self.footprint_inputs(model_id, Some(range)) else {
+            return Some(line);
+        };
+        let priced = if on_gpu {
+            estimate_worker_vram_mb(&inputs)
+        } else {
+            estimate_worker_ram_mb(&inputs)
+        };
+        let lent = if on_gpu {
+            self.output_head_lent_mb(model_id, range, lent_head_mb)
+        } else {
+            0
+        };
+        Some(priced.saturating_sub(fixed_mb).saturating_sub(lent))
+    }
+
+    /// How much of `range`'s price a worker lending a `lent_head_mb` output
+    /// head on its card takes off: the file's `output.weight` where `range`
+    /// ends the model, never more than the lend. 0 for a weight-tied model —
+    /// its head is the token table, which the lend never stands in for
+    /// (`split::lent_output_head` matches `output.weight` only) — for a range
+    /// that does not end the model, an unreadable header, or with sharing off
+    /// (`SWARMLLM_SHARE_OUTPUT_HEAD=0`).
+    fn output_head_lent_mb(&self, model_id: &ModelId, range: (u32, u32), lent_head_mb: u64) -> u64 {
+        if lent_head_mb == 0 || !crate::inference::split::share_output_head_on() {
+            return 0;
+        }
+        let model_dir = crate::model::shard::model_dir(&self.data_dir, &model_id.0);
+        let header = model_dir.join(crate::model::shard::HEADER_FILENAME);
+        let Ok(cached) = self.header_cache.read(&header) else {
+            return 0;
+        };
+        let ct = &cached.content_without_vocabulary;
+        let Ok(meta) = crate::inference::split::GgufTensorMeta::from_content(ct) else {
+            return 0;
+        };
+        if (range.1 as usize) < meta.block_count {
+            return 0;
+        }
+        ct.tensor_infos.get("output.weight").map_or(0, |info| {
+            (crate::inference::split::tensor_byte_size(info) / (1024 * 1024)).min(lent_head_mb)
+        })
     }
 
     /// [`Self::partial_gpu_layers`] for a spawn whose worker read the card
@@ -8249,8 +8396,9 @@ impl ModelProcessPool {
 
     /// What growing `handle` by `segment` is charged, on the device the worker
     /// was charged against (`WorkerHandle::holds_gpu_memory`, decided once at
-    /// spawn by `charges_ram`): the range's own figure off the admission curve,
-    /// and what the ranges it strictly contains already hold. The worker drops
+    /// spawn by `charges_ram`): the range's own price ([`Self::range_growth_mb`],
+    /// its layers and, where it ends the model, the output head), and what the
+    /// ranges it strictly contains already hold. The worker drops
     /// those BEFORE it loads, so the peak it reaches is the new range LESS what
     /// they held — and the peak is what admission exists to bound. Weighing the
     /// full width against a total that still included them refused a
@@ -8265,11 +8413,13 @@ impl ModelProcessPool {
         segment: (u32, u32),
         handle: &WorkerHandle,
     ) -> Option<(u64, u64)> {
-        let layers = u64::from(segment.1.saturating_sub(segment.0)).max(1);
-        let (_fixed_mb, per_layer_mb) =
-            self.segment_cost_curve(model_id, handle.holds_gpu_memory())?;
         Some((
-            per_layer_mb.saturating_mul(layers),
+            self.range_growth_mb(
+                model_id,
+                segment,
+                handle.holds_gpu_memory(),
+                handle.card_beside.lends_head_mb(),
+            )?,
             handle.subsumed_charge(segment).mb,
         ))
     }
@@ -8292,6 +8442,90 @@ impl ModelProcessPool {
             !matches!(self.card_verdict(net_mb), Verdict::Refused { .. })
         } else {
             !matches!(self.ram_verdict(net_mb, requester), Verdict::Refused { .. })
+        }
+    }
+
+    /// Fold what `handle`'s guessers keep on the card ([`CardBeside`], as the
+    /// worker last reported it) into its charge: the worker's `charged_mb` and
+    /// the model's `vram_reserved_mb` move by the difference from what was
+    /// folded in before. A card worker only — a processor worker's guessers
+    /// sit in machine memory its RAM charge already grants as conversation
+    /// room (`record_cpu_kv_budget`). The caller holds `spawn_lock`, the lock
+    /// every other change to a live worker's charge runs under.
+    ///
+    /// Without it the ledger's figure for a worker was its ranges alone:
+    /// Qwen3.8-27B's first range here kept the 994 MB output head for its guess
+    /// head beside a 4,732 MB charge (2026-11-19), and the card budget read the
+    /// difference as another program's (`compute_vram_budget`: used −
+    /// committed) — as did the dashboard's "other programs" figure. The room an
+    /// admission weighs is the same either way (the budget less what is
+    /// committed is the card's free memory less the reserve); what changes is
+    /// that no reader takes our own memory for someone else's, and that under
+    /// the owner's card cap (`max_gpu_vram_mb`, `min(cap, usable)`) our
+    /// guessers count against it. A/B `SWARMLLM_CHARGE_GUESSERS=0`.
+    ///
+    /// Prior art: vLLM's `determine_available_memory` profiles what its OWN
+    /// instance holds after the load (a `MemorySnapshot` baseline before it),
+    /// so other processes' memory is the baseline and never its own excess.
+    fn charge_what_its_guessers_hold(&self, model_id: &ModelId, handle: &Arc<WorkerHandle>) {
+        // A worker no longer the model's live one has been, or is being,
+        // released: its charge is not to be moved.
+        let live = !handle.dead.load(Ordering::Acquire)
+            && self
+                .workers
+                .get(model_id)
+                .is_some_and(|w| Arc::ptr_eq(w.value(), handle));
+        if !live
+            || !handle.holds_gpu_memory()
+            || std::env::var("SWARMLLM_CHARGE_GUESSERS").as_deref() == Ok("0")
+        {
+            return;
+        }
+        let beside = &handle.card_beside;
+        let reported = beside.reported_mb.load(Ordering::Acquire);
+        let was = beside.charged_mb.swap(reported, Ordering::AcqRel);
+        if reported == was {
+            return;
+        }
+        if reported > was {
+            let more = reported - was;
+            add_reserved(&self.vram_reserved_mb, model_id, more);
+            handle.charged_mb.fetch_add(more, Ordering::AcqRel);
+        } else {
+            let less = was - reported;
+            self.release_vram_charge(model_id, less);
+            // Under `spawn_lock`, where every other writer of it runs.
+            let current = handle.charged_mb.load(Ordering::Acquire);
+            handle
+                .charged_mb
+                .fetch_sub(less.min(current), Ordering::AcqRel);
+        }
+        tracing::info!(
+            model = %model_id,
+            guessers_mb = reported,
+            was_mb = was,
+            worker_charged_mb = handle.charged_mb.load(Ordering::Acquire),
+            "DIAG: the worker's charge now counts what its guessers keep on the card (#481 (5))"
+        );
+    }
+
+    /// [`Self::charge_what_its_guessers_hold`] for every live worker, so the
+    /// ledger follows a report without waiting for the worker's next growth —
+    /// the figures the dashboard and a reclaim read. Run from the idle tick,
+    /// and only where `spawn_lock` is free: it is held for a whole load, and a
+    /// tick that waited for one would stall the unloads behind it; the next
+    /// tick folds what this one skipped.
+    pub fn charge_what_guessers_hold_on_every_card(&self) {
+        let Ok(_guard) = self.spawn_lock.try_lock() else {
+            return;
+        };
+        let workers: Vec<(ModelId, Arc<WorkerHandle>)> = self
+            .workers
+            .iter()
+            .map(|e| (e.key().clone(), e.value().clone()))
+            .collect();
+        for (model_id, handle) in workers {
+            self.charge_what_its_guessers_hold(&model_id, &handle);
         }
     }
 
@@ -8344,6 +8578,7 @@ impl ModelProcessPool {
         // Serialised against spawns for the same read-decide-charge atomicity
         // the admission gates already rely on.
         let _guard = self.spawn_lock.lock().await;
+        self.charge_what_its_guessers_hold(model_id, handle);
         if handle.serves_segment(segment, shape) {
             return Ok(());
         }
@@ -12567,6 +12802,8 @@ impl ModelProcessPool {
         command.env(crate::inference::worker_ipc::DAEMON_READS_CONTEXT_FITS, "1");
         // ...and the room a refused prompt wanted (#454).
         command.env(crate::inference::worker_ipc::DAEMON_READS_PROMPT_ROOM, "1");
+        // ...and what its guessers keep on the card (#481 (5)).
+        command.env(crate::inference::worker_ipc::DAEMON_READS_CARD_BESIDE, "1");
         // The pace it starts at (#440 step 4): a worker spawned while the
         // computer is hot is paced from its first step.
         let pace_at_spawn = self.pace_permille.load(Ordering::Acquire);
@@ -12712,6 +12949,7 @@ impl ModelProcessPool {
         let responses: ResponseMap = Arc::new(DashMap::new());
         let dead = Arc::new(AtomicBool::new(false));
         let context_fits = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let card_beside = Arc::new(CardBeside::default());
         let asked_to_load = Arc::new(AtomicBool::new(false));
         let reader_handle = tokio::spawn(reader_actor(
             read_half,
@@ -12725,6 +12963,7 @@ impl ModelProcessPool {
                 slow_card: self.slow_card.clone(),
                 load_rate: self.load_rate.clone(),
                 context_fits: context_fits.clone(),
+                card_beside: card_beside.clone(),
                 asked_to_load: asked_to_load.clone(),
                 daemon_stopping: self.daemon_stopping.get().cloned(),
             },
@@ -12762,6 +13001,7 @@ impl ModelProcessPool {
             room_sized_for: None,
             card_free_at_load_mb: None,
             context_fits,
+            card_beside,
             own_decode: std::sync::Mutex::new(OwnDecodeSpeed::default()),
             drafts_for_another_model: AtomicBool::new(false),
             guesses_for: std::sync::Mutex::new(Vec::new()),
@@ -20234,6 +20474,7 @@ mod tests {
                 slow_card: p.slow_card.clone(),
                 load_rate: p.load_rate.clone(),
                 context_fits: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+                card_beside: Arc::new(CardBeside::default()),
                 asked_to_load: asked_to_load.clone(),
                 daemon_stopping: None,
             },
@@ -20336,6 +20577,7 @@ mod tests {
             room_sized_for: None,
             card_free_at_load_mb: None,
             context_fits: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            card_beside: Arc::new(CardBeside::default()),
             own_decode: std::sync::Mutex::new(OwnDecodeSpeed::default()),
             drafts_for_another_model: AtomicBool::new(false),
             guesses_for: std::sync::Mutex::new(Vec::new()),
@@ -21486,6 +21728,168 @@ mod tests {
             .map(|(n, d, k)| (n.as_str(), d.as_slice(), *k))
             .collect();
         header_only_model(tag, model, &table)
+    }
+
+    /// A range that ends the model is charged its output head when it grows a
+    /// worker, and the room a spawn of the rest keeps for it is that same
+    /// price (#481 (5)). Priced at the mean layer, Qwen3.8-27B's `[63,64)` was
+    /// 261 MB where its load put 1,336 MB on the card, and the worker found no
+    /// room for its cache (2026-11-19).
+    #[test]
+    fn a_range_that_ends_the_model_is_charged_its_output_head() {
+        const MIB: u64 = 1024 * 1024;
+        let model = ModelId("growth-ends-the-model".into());
+        let data_dir = header_only_seventy_b_even_layers("growth-ends", &model);
+        let pool = ModelProcessPool::new(data_dir.clone());
+        // Q6_K: 210 bytes per 256 weights; Q8_0: 34 per 32.
+        let head_mb = 8192u64 * 64_000 / 256 * 210 / MIB;
+        let layer_mb = 8192u64 * 24_576 / 32 * 34 / MIB;
+        for on_card in [true, false] {
+            let price = |range| {
+                pool.range_growth_mb(&model, range, on_card, 0)
+                    .expect("a header")
+            };
+            let (middle, last) = (price((3, 4)), price((7, 8)));
+            assert!(
+                middle >= layer_mb,
+                "{middle} MB for a {layer_mb} MB layer (card: {on_card})"
+            );
+            assert!(
+                last >= middle + head_mb,
+                "{last} MB for the last layer and its {head_mb} MB head, {middle} MB for a \
+                 middle one (card: {on_card})"
+            );
+        }
+        pool.planned_here
+            .note(&model, &[(0, 7), (7, 8)], std::time::Instant::now());
+        assert_eq!(
+            pool.room_for_the_plans_other_ranges(&model, (0, 7)),
+            pool.range_growth_mb(&model, (7, 8), true, 0).unwrap()
+        );
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    /// A range that ends the model, grown on a worker that lends an output
+    /// head on its card, is not charged that head again — the load borrows it
+    /// (#458) — and never more than the lend; a range short of the end, or a
+    /// worker in system memory, is priced as before (#481 (5)). Charged it,
+    /// Qwen3.8-27B's `[63,64)` asked 1,405 MB beside a first range already
+    /// holding the head for its guesses, and was refused (2026-11-19).
+    #[test]
+    fn a_range_ending_the_model_is_not_charged_a_head_its_worker_lends() {
+        const MIB: u64 = 1024 * 1024;
+        let model = ModelId("growth-lent-head".into());
+        let data_dir = header_only_seventy_b_even_layers("growth-lent", &model);
+        let pool = ModelProcessPool::new(data_dir.clone());
+        // Q6_K: 210 bytes per 256 weights.
+        let head_mb = 8192u64 * 64_000 / 256 * 210 / MIB;
+        let price = |range, on_card, lent| {
+            pool.range_growth_mb(&model, range, on_card, lent)
+                .expect("a header")
+        };
+        let alone = price((7, 8), true, 0);
+        assert_eq!(alone - price((7, 8), true, head_mb), head_mb);
+        assert_eq!(
+            alone - price((7, 8), true, 100),
+            100,
+            "never more than the lend"
+        );
+        assert_eq!(
+            price((7, 8), true, 5 * head_mb),
+            alone - head_mb,
+            "never more than the head"
+        );
+        assert_eq!(price((3, 4), true, head_mb), price((3, 4), true, 0));
+        assert_eq!(price((7, 8), false, head_mb), price((7, 8), false, 0));
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    /// What a card worker's guessers keep on the card joins its charge once
+    /// reported, once, and leaves it when they go (#481 (5)), so the ledger
+    /// never reads our own memory as another program's. Qwen3.8-27B's first
+    /// range kept a 994 MB head beside a 4,732 MB charge (2026-11-19). A
+    /// processor worker's report moves no card charge, nor does a worker no
+    /// longer its model's live one.
+    #[tokio::test]
+    async fn a_workers_charge_counts_what_its_guessers_keep_on_the_card() {
+        const MIB: u64 = 1024 * 1024;
+        let p = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-card-beside"));
+        let model = ModelId("guessed".into());
+        let h = fake_worker_handle_on(false, None, false).await;
+        h.charged_mb.store(4_732, Ordering::Release);
+        add_reserved(&p.vram_reserved_mb, &model, 4_732);
+        p.workers.insert(model.clone(), h.clone());
+        h.card_beside.note_report(994 * MIB, 994 * MIB);
+        p.charge_what_guessers_hold_on_every_card();
+        assert_eq!(p.vram_committed_mb(), 4_732 + 994);
+        assert_eq!(h.charged_mb.load(Ordering::Acquire), 4_732 + 994);
+        assert_eq!(h.card_beside.lends_head_mb(), 994);
+        p.charge_what_guessers_hold_on_every_card();
+        assert_eq!(p.vram_committed_mb(), 4_732 + 994, "folded once");
+        h.card_beside.note_report(227 * MIB, 0);
+        p.charge_what_guessers_hold_on_every_card();
+        assert_eq!(p.vram_committed_mb(), 4_732 + 227);
+        assert_eq!(h.charged_mb.load(Ordering::Acquire), 4_732 + 227);
+        // A processor worker's guessers sit in memory its RAM charge grants.
+        let c = fake_worker_handle_on(false, Some(CpuReason::Configured), true).await;
+        p.workers
+            .insert(ModelId("on-the-processor".into()), c.clone());
+        c.card_beside.note_report(500 * MIB, 0);
+        p.charge_what_guessers_hold_on_every_card();
+        assert_eq!(p.vram_committed_mb(), 4_732 + 227);
+        // A worker replaced under its model is not the one charged.
+        let replaced = fake_worker_handle_on(false, None, false).await;
+        replaced.card_beside.note_report(800 * MIB, 0);
+        p.charge_what_its_guessers_hold(&model, &replaced);
+        assert_eq!(p.vram_committed_mb(), 4_732 + 227);
+        assert_eq!(replaced.charged_mb.load(Ordering::Acquire), 0);
+    }
+
+    /// The worker's report of what its guessers keep on the card reaches the
+    /// handle's figures through the reader, as the load timing does.
+    #[tokio::test]
+    async fn a_reported_card_beside_reaches_the_workers_figures() {
+        let (name, daemon_end, mut worker_end) = test_socket_pair().await;
+        let (read_half, _write_half) = split_ipc(daemon_end);
+        let p = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-card-beside-read"));
+        let card_beside = Arc::new(CardBeside::default());
+        let reader = tokio::spawn(reader_actor(
+            read_half,
+            Arc::new(DashMap::new()),
+            Arc::new(AtomicBool::new(false)),
+            ModelId("guessed".into()),
+            SideBand {
+                prefix_manifest_tx: None,
+                prefix_probe_tx: None,
+                progress_tx: None,
+                slow_card: p.slow_card.clone(),
+                load_rate: p.load_rate.clone(),
+                context_fits: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+                card_beside: card_beside.clone(),
+                asked_to_load: Arc::new(AtomicBool::new(false)),
+                daemon_stopping: None,
+            },
+        ));
+        send_worker(
+            &mut worker_end,
+            &WorkerMsg::CardBeside {
+                guessers_bytes: 994 << 20,
+                lends_head_bytes: (994 << 20) + 5,
+            },
+            &[],
+        )
+        .await
+        .expect("send");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while card_beside.reported_mb.load(Ordering::Acquire) == 0
+            && std::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(card_beside.reported_mb.load(Ordering::Acquire), 994);
+        assert_eq!(card_beside.lends_head_mb(), 994);
+        reader.abort();
+        let _ = std::fs::remove_file(&name);
     }
 
     /// A model holding IQ4_XS (type 23) or IQ4_NL (type 20) weights is one the

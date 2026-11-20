@@ -1222,7 +1222,7 @@ a rig that restarts the node between two identical runs (`tier_1119p` against `t
 > worker (`starts_a_pass`, `release_an_earlier_pass` — only over layers that request's earlier pass was sent for here,
 > `pass_ranges`: the first version also released a chain's OTHER range here and retired the 27B's card worker
 > mid-request, split27_1119q 17:16Z; its growth fell 261 MB short because the first range's worker held a refused
-> guess head's 994 MB in its card pool, read as another program's — a load now trims the pool as it ends,
+> guess head's 994 MB in its card pool, so the card had that much less free — a load now trims the pool as it ends,
 > `give_back_what_the_load_freed`). Prior art: vLLM frees an aborted or preempted sequence's
 > blocks before it is rescheduled, never counting them against itself. Left: a worker already RESIDENT whole for the
 > first range (an earlier request of another shape) still refuses the tail's growth; the router's re-plan with fewer
@@ -1230,11 +1230,22 @@ a rig that restarts the node between two identical runs (`tier_1119p` against `t
 > 18:16Z): `[63,64)` was charged 261 MB and its load put the layer and the 994 MB output head on the card, 1,336 MB;
 > the cache found no room, the worker was ended and the retry ran the whole 27B on the processor (every request
 > answered, 4.4-7.5 tok/s). Pricing the range as it loads (llama.cpp places the head as a layer of its own,
-> `dev_output`) left the right room at the spawn, but the first range's worker then held ~630 MB more than its charge,
-> the live budget read it as another program's (`compute_vram_budget`: used − committed), and the growth was refused
-> with no route — 4 of 4 failed (split27_1119t 18:44Z), so it was set aside (`docs/invariants/memory.md` § "The tail's
-> growth is priced at the mean layer"). Next: reconcile a worker's charge to what it holds on the card (its pool's
-> in-use, reported after a load and a prompt pass), then ship the honest price. **Why the ladder cannot place the tail
+> `dev_output`) left the right room at the spawn, but the first range's guess head then read the 994 MB output head
+> onto the card (charged only to its own conversation budget), and the growth asked 1,405 MB — that SAME head again,
+> though #458 lends it — and was refused with no route: 4 of 4 failed (split27_1119t 18:44Z). ⚠ Corrected 2026-11-20:
+> this entry said the room went because the live budget read the worker's ~630 MB excess as another program's; who
+> it is blamed on changes no admission (`estimate ≤ free − reserve` either way) — the head really sat on the card
+> (`docs/invariants/memory.md` § "The tail's growth is priced at the mean layer"). **Built on main 2026-11-20, rig
+> next:** the honest price ships with the head charged once — the worker reports what its guessers keep on the card
+> and the head it would lend (`WorkerMsg::CardBeside`), its charge counts the first
+> (`charge_what_its_guessers_hold`, A/B `SWARMLLM_CHARGE_GUESSERS=0`), and a range ending the model is priced without
+> a lent head (`output_head_lent_mb`; A/B `SWARMLLM_GROWTH_PRICE=line`, `SWARMLLM_SHARE_OUTPUT_HEAD=0`): 1119t's tail
+> asks ~411 MB, not 1,405. Prior art: vLLM's `determine_available_memory` (its own memory profiled against a
+> `MemorySnapshot` baseline), llama.cpp's `llama_memory_breakdown` (each context's buffers per device), vLLM EAGLE/MTP
+> sharing the target's `lm_head`. Left, read on the forced-split rig: (C) whether ~411 MB is found beside a head that
+> took 994 of the 1,405 MB the spawn left — if not, weigh a growth against the free memory the WORKER reads, its
+> pool's reusable bytes included; (B) the refit (#365) eats the guesser's room (20 of 21 layers on the card where 17
+> were planned, 20:07Z, guess head refused); (3c) the next-token block's card room at the spawn. **Why the ladder cannot place the tail
 > elsewhere** (traced 2026-11-19): the refusal is `charge_additional_segment`'s first rung (`process_pool.rs` ~8156-8194);
 > the split rung (`charge_segment_as_split`) runs next but `split_for_card` puts the output head on the card whatever
 > the layers do (~4003, #342), so a one-layer range ending the model fits the card or nothing, and the last rung (retire)

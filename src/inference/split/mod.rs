@@ -307,7 +307,7 @@ static LENT_OUTPUT_HEAD: std::sync::Mutex<Option<QMatMul>> = std::sync::Mutex::n
 /// Does a range share the output head its model process already holds
 /// (#458)? A/B `SWARMLLM_SHARE_OUTPUT_HEAD=0`: every range reads its own copy,
 /// as before.
-fn share_output_head_on() -> bool {
+pub(crate) fn share_output_head_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("SWARMLLM_SHARE_OUTPUT_HEAD").as_deref() != Ok("0"))
 }

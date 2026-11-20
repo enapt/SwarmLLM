@@ -599,6 +599,12 @@ impl AutoShardManager {
                         .model_process_pool
                         .release_abandoned_prompt_passes(&|node| state.still_in_the_swarm(node))
                         .await;
+                    // What workers' guessers keep on the card joins their
+                    // charge, so the ledger never reads it as another
+                    // program's (#481 (5)).
+                    state
+                        .model_process_pool
+                        .charge_what_guessers_hold_on_every_card();
                     self.try_idle_vram_unload(
                         self.shared_state.cfg().auto_manage.idle_unload_secs,
                     )

@@ -2099,6 +2099,8 @@ impl SplitModel {
         // The file's next-token-prediction block, a guess head (#425); only
         // the Qwen 3.5 branch loads one.
         let mut mtp: Option<super::mtp::MtpHead> = None;
+        // What that block keeps on the card (`SplitModel::guessers_card_bytes`).
+        let mut mtp_card_bytes: u64 = 0;
 
         if matches!(model_arch, ModelArch::DeepSeek2) {
             // ── DeepSeek-V2/V3: MLA + MoE loading ──
@@ -2625,6 +2627,11 @@ impl SplitModel {
                     };
                     if let Some(b) = device_budget.as_mut() {
                         *b -= here;
+                    }
+                    // Past the last layer, no estimate of a range counts it
+                    // (`segment_weights` reads layers below the end).
+                    if on_card {
+                        mtp_card_bytes = here;
                     }
                     if let Some(h) = host_kv_budget_bytes.as_mut().filter(|_| beside > 0) {
                         *h -= beside;
@@ -3560,6 +3567,7 @@ impl SplitModel {
             block_drafter_state: swarmllm_types::BlockDrafterState::Unknown,
             drafter_head: None,
             drafter_head_bytes: 0,
+            mtp_card_bytes,
             drafter_hot: None,
             plain_steps: Default::default(),
             stand_in_prior: None,

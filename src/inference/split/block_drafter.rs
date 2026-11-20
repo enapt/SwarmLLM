@@ -313,6 +313,12 @@ pub(crate) fn plan_in(dir: &Path) -> Option<BlockPlan> {
 }
 
 impl BlockDrafter {
+    /// Where its weights and cache live: the target's device, or system
+    /// memory beside a card/processor split (`drafter_home`).
+    pub(crate) fn device(&self) -> &Device {
+        &self.device
+    }
+
     /// Load `path` for `target`, refusing a file it cannot run as written:
     /// not a `dflash` file, a part this loader does not build (DFlash 2's
     /// convolutions and selector, a draft vocabulary, scaled logits, M-RoPE

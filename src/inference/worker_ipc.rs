@@ -191,6 +191,11 @@ pub(crate) const DAEMON_READS_CONTEXT_FITS: &str = "SWARMLLM_DAEMON_READS_CONTEX
 /// [`DAEMON_READS_LOAD_TIMING`] (gotcha #765).
 pub(crate) const DAEMON_READS_PROMPT_ROOM: &str = "SWARMLLM_DAEMON_READS_PROMPT_ROOM";
 
+/// Set by the daemon in every worker's environment: this daemon decodes
+/// `WorkerMsg::CardBeside` (#481 (5)). Gated like
+/// [`DAEMON_READS_LOAD_TIMING`].
+pub(crate) const DAEMON_READS_CARD_BESIDE: &str = "SWARMLLM_DAEMON_READS_CARD_BESIDE";
+
 /// Whether the daemon that spawned this worker reads
 /// `WorkerMsg::PromptRoomWanted`. Read once, where a refusal is sent.
 pub(crate) fn daemon_reads_prompt_room() -> bool {
@@ -329,6 +334,22 @@ pub enum WorkerMsg {
     /// ⚠ Sent only when the daemon said it reads it
     /// ([`DAEMON_READS_PROMPT_ROOM`]) — see `CardAllocationProbe`.
     PromptRoomWanted { request_id: Uuid, positions: u64 },
+    /// What the models this worker holds keep on the card that no charge of
+    /// their ranges counts — their guessers (`SplitModel::guessers_card_bytes`,
+    /// summed) — and the quantized output head one of them holds on the card,
+    /// which a range ending the model loaded here later borrows instead of
+    /// reading (`SplitModel::output_head_card_bytes`, #458), both in bytes.
+    /// Side-band, sent when either changes, read after a message that loaded
+    /// or dropped a model. The daemon's charge for the worker follows the
+    /// first, and a growth by the model's end is not charged the second
+    /// (#481 (5)).
+    ///
+    /// ⚠ Sent only when the daemon said it reads it
+    /// ([`DAEMON_READS_CARD_BESIDE`]) — see `CardAllocationProbe`.
+    CardBeside {
+        guessers_bytes: u64,
+        lends_head_bytes: u64,
+    },
     /// Error for a specific request.
     ///
     /// `fatal` marks a failure that corrupted or exhausted the worker's device
@@ -1176,6 +1197,7 @@ enum WorkerMsgTag {
     ContextFits,
     CardFree,
     PromptRoomWanted,
+    CardBeside,
     Error,
     PrefixManifestUpdate,
     PrefixFetchProbe,
@@ -1492,6 +1514,7 @@ mod tests {
                 WorkerMsg::ContextFits { .. } => WorkerMsgTag::ContextFits,
                 WorkerMsg::CardFree { .. } => WorkerMsgTag::CardFree,
                 WorkerMsg::PromptRoomWanted { .. } => WorkerMsgTag::PromptRoomWanted,
+                WorkerMsg::CardBeside { .. } => WorkerMsgTag::CardBeside,
                 WorkerMsg::Error { .. } => WorkerMsgTag::Error,
                 WorkerMsg::PrefixManifestUpdate { .. } => WorkerMsgTag::PrefixManifestUpdate,
                 WorkerMsg::PrefixFetchProbe { .. } => WorkerMsgTag::PrefixFetchProbe,
@@ -1516,6 +1539,10 @@ mod tests {
                 free_bytes: Some(7_291 << 20),
             },
             WorkerMsg::CardFree { free_bytes: None },
+            WorkerMsg::CardBeside {
+                guessers_bytes: 994 << 20,
+                lends_head_bytes: 994 << 20,
+            },
             WorkerMsg::Drafted {
                 request_id: Uuid::nil(),
                 tokens: vec![],

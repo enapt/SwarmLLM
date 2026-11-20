@@ -3469,12 +3469,49 @@ Priced instead as the estimator prices the range itself (`footprint_inputs(Some(
 llama.cpp places the head as a layer of its own, `dev_output = get_layer_buft_list(n_layer)`), the spawn left 1,405 MB
 (13 of 21 layers on the card, refitted to 14, charged 4,732 MB) — and `~/swarmllm-gate/split27_1119t` (18:44Z) was
 refused at the growth, **4 of 4 requests failed**: the first range's worker used ~5,359 MB (its pool's in-use at the idle
-trim; 5,664-5,888 reserved) against its 4,732 MB charge, and the live budget reads that excess as ANOTHER program's
-(`compute_vram_budget`: used − committed), so the room was gone before the growth asked; the re-plan found no route
-("room for about 63 of its 64 layers"). A slow answer had become none, so it was set aside (patch:
-`~/swarmllm-gate/split27_1119t/growth_price_aside.patch`). What it needs: a worker's charge reconciled to what it really
-holds on the card (the estimate missed ~630 MB at 14 card layers of a Qwen 3.5 first range and over-counted ~380 MB at
-19), so its own excess never reads as another program's; then the honest price can ship, with the room it leaves.
+trim; 5,664-5,888 reserved) against its 4,732 MB charge; the growth asked 1,405 MB and was refused; the re-plan found
+no route ("room for about 63 of its 64 layers"). A slow answer had become none, so it was set aside (patch:
+`~/swarmllm-gate/split27_1119t/growth_price_aside.patch`).
+
+⚠ **Corrected 2026-11-20 — the excess did not take the room by being read as another program's.** This paragraph said
+the live budget read the worker's excess as ANOTHER program's (`compute_vram_budget`: used − committed), "so the room
+was gone before the growth asked". Who the excess is blamed on changes no admission: the budget is
+`total − (used − committed) − reserve` and admission asks `committed + estimate ≤ budget`, which is
+`estimate ≤ free − reserve` whatever `committed` says (with no card cap; under `max_gpu_vram_mb` the budget is
+`min(cap, usable)` and the excess, uncounted, let us hold more than the cap). The room was REALLY used: the first
+range's guess head read the 994 MB output head onto the card (`loader::shards`, `model.device`; "guess head beside the
+split's first segment … head_mb=994 … budget_left_mb=Some(751) … kept=true" at 18:45:10; the 227 MB next-token block
+went to the processor with layer 20, `on_card=false`), charged only to the worker's own conversation budget — no
+estimate of a range short of the model's end counts a head (`segment_weights`). And the growth then asked for that same
+head AGAIN: `[63,64)`'s honest price includes `output.weight`, which #458 lends the range from the head the process
+already holds. The miscounted charge did skew two other readers: the dashboard's "other programs held X of the card"
+(shipped in .301) and the room a reclaim is told an idle worker gives back.
+
+**The head is charged once, to the range that holds it (2026-11-20, #481 (5)).** A worker reports after each batch
+what its models' guessers keep on the card and the head a range ending the model would borrow
+(`WorkerMsg::CardBeside`, gated at the sender by `DAEMON_READS_CARD_BESIDE`; `SplitModel::guessers_card_bytes` — the
+next-token block while `mtp` still holds it on the card, the borrowed head while `drafter_head` is on the card, a block
+drafter on the card — computed from what the model still holds, since `keep_the_split_guess_head` can drop the block
+after the load; `SplitModel::output_head_card_bytes` the lend). The daemon folds the first into the worker's charge
+under `spawn_lock` (`ModelProcessPool::charge_what_its_guessers_hold`: `charged_mb` and `vram_reserved_mb` move by the
+difference, from the growth and the idle tick; a departure releases `charged_mb` whole; A/B
+`SWARMLLM_CHARGE_GUESSERS=0`), and a range ending a non-tied model grown on a worker lending a card head is priced
+without it (`range_growth_mb(.., lent_head_mb)` → `output_head_lent_mb`, never more than the lend or the file's
+`output.weight`; A/B `SWARMLLM_SHARE_OUTPUT_HEAD=0`). For 1119t's figures that is 4,732 + 994 MB charged and a
+`[63,64)` growth of ~411 MB, not 1,405. Prior art: vLLM's `determine_available_memory` profiles what its OWN instance
+holds after the load against a `MemorySnapshot` baseline, so another process's memory is the baseline and never its
+own excess; llama.cpp's `llama_memory_breakdown` reports each context's own buffers per device; vLLM's EAGLE/MTP heads
+share the target's `lm_head` rather than load a second. Tests: `a_workers_charge_counts_what_its_guessers_keep_on_the_card`,
+`a_range_ending_the_model_is_not_charged_a_head_its_worker_lends`, `a_reported_card_beside_reaches_the_workers_figures`
+(each red with its mechanism off), `a_range_that_ends_the_model_is_charged_its_output_head` (red under
+`SWARMLLM_GROWTH_PRICE=line`).
+
+What it does NOT settle, measured next on the forced split: the spawn left room for the head inside the tail's price
+(1,405 MB) and the guess head took 994 MB of it plus nothing for its block on the card, so the tail's ~411 MB is asked
+of about what is left — Fix C (weigh a growth against the free memory the WORKER reads, its pool's reusable bytes
+included) if it is still refused; the refit (#365) put 20 of 21 layers on the card where 17 were planned in the
+20:07Z run and refused the guess head (Fix B: the refit keeps the guesser's room); and the next-token block's room on
+the card at the spawn (#481 (3c), `~/swarmllm-gate/tier_1119q/guess_head_room_aside.patch`).
 
 ## A model process holds one copy of the output head (2026-11-16, FUTURE_WORK #458)
 

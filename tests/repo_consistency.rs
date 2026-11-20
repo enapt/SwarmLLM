@@ -9456,6 +9456,7 @@ const WORKER_MAP_READERS_THAT_SEND_NO_WORK: &[&str] = &[
     "context_fits",
     "card_split_of",
     "others_on_card_when_placed_mb",
+    "charge_what_its_guessers_hold",
 ];
 
 /// How far below the read a hand-out's stamp may sit: `live_worker` reaches it

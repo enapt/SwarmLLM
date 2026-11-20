@@ -104,7 +104,9 @@ Code waiting for a subprocess handles it dying instead (`spawn_worker` races `ch
 
 **`split::OutputHeadLent::of`** (in `model_worker::ensure_model_loaded`, BEFORE a covered range is dropped, single-rank ranges only) lends the head to the next load, taken only through **`split::lent_output_head`** — for a range ending the model and a first segment's borrowed head (`drafter_head`). ⛔ **A borrowing load runs on the LENDER's device** (`split::device_of_the_lent_head`, asked first by `loader::load_device`): a head shared across two `CudaDevice`s is freed on unordered streams (gotcha #1118); never relax to "same card". A/B `SWARMLLM_SHARE_OUTPUT_HEAD=0`.
 
-→ `docs/invariants/memory.md` § "A model process holds one copy of the output head"
+- **And the daemon charges it once** (#481 (5)): a worker reports what its guessers keep on the card and the head it would lend (`WorkerMsg::CardBeside` ← `SplitModel::guessers_card_bytes` / `output_head_card_bytes`, computed from what the model STILL holds); **`ModelProcessPool::charge_what_its_guessers_hold`** (under `spawn_lock`, from a growth and the idle tick) folds the first into `charged_mb` + `vram_reserved_mb`, and a range ending the model is priced without the lent head (`range_growth_mb`'s REQUIRED `lent_head_mb` → `output_head_lent_mb`). Blame is not room: admission is `estimate ≤ free − reserve` whoever `committed` names. A/B `SWARMLLM_CHARGE_GUESSERS=0`.
+
+→ `docs/invariants/memory.md` § "A model process holds one copy of the output head", § "The tail's growth is priced at the mean layer"
 
 ## A long prompt asks for the room back (2026-11-15, #454)
 
@@ -243,7 +245,7 @@ Prune's soft-unload narrows a model only when our CHARGED memory (`vram_committe
 
 **`split::loader::load_device` is the one place a worker picks the card** and raises the pool release threshold (`cuda_pool::keep_freed_memory`); `model_worker::run_worker` trims after `cuda_pool::IDLE_TRIM`. Any "free for this process" reading adds `cuda_pool::reusable_bytes`. Guard: `every_split_model_reaches_the_card_through_load_device`; A/B `SWARMLLM_CUDA_POOL_KEEP=0`.
 
-- **A load hands back what it freed as it ends** (`model_worker::give_back_what_the_load_freed`, before it measures its cost): a refused guess head's 994 MB held in the pool read as another program's to the daemon and the 27B's tail growth fell 261 MB short (2026-11-19). A/B `SWARMLLM_TRIM_AFTER_LOAD=0`.
+- **A load hands back what it freed as it ends** (`model_worker::give_back_what_the_load_freed`, before it measures its cost): a refused guess head's 994 MB kept in the pool left the card that much less free and the 27B's tail growth fell 261 MB short (2026-11-19). A/B `SWARMLLM_TRIM_AFTER_LOAD=0`.
 - **The driver keeps its margin too** (#385): the card's one reading asks **`cuda_pool::hold_driver_margin`**. A/B `SWARMLLM_CUDA_POOL_MARGIN=0`.
 - **A refusal is asked again ONCE** (#367 (d) (3a), PyTorch's `mallocAsync`): vendored **`CudaDevice::ask_again_after_a_refusal`** — every allocation of the device's own buffers, `clone_htod`'s included, never cudarc's allocating calls directly — synchronizes, trims the pool and asks again on `CUDA_ERROR_OUT_OF_MEMORY`, never inside a capture. A/B `SWARMLLM_CUDA_ASK_AGAIN=0`; fault `SWARMLLM_FAULT_CARD_OOM=<n>` (`SWARMLLM_FAULT_CARD_OOM_MIN_BYTES`).
 - **A forward still refused runs ONCE more after the saved prompts go** (#367 (d) (3b)): `forward_inner_impl` → `forward_once`; where **`executor::worth_running_again`** holds (a card, `permanent_gpu_failure` → `OutOfMemory`, caches in place: `KvCacheStore::positions_in_place`) **`KvCacheStore::let_saved_prompts_go`** (0 → no rerun) and `forward_once` again. Never a loop, never a conversation's cache.

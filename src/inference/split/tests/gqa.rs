@@ -302,6 +302,7 @@ fn qwen2_forward_with_biases() {
         block_drafter_state: swarmllm_types::BlockDrafterState::Unknown,
         drafter_head: None,
         drafter_head_bytes: 0,
+        mtp_card_bytes: 0,
         drafter_hot: None,
         plain_steps: Default::default(),
         stand_in_prior: None,

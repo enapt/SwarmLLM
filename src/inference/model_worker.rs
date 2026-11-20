@@ -476,6 +476,11 @@ pub async fn run_worker(
     let daemon_reads_context_fits = crate::inference::worker_ipc::daemon_reads_card_probe(
         std::env::var_os(crate::inference::worker_ipc::DAEMON_READS_CONTEXT_FITS).as_deref(),
     );
+    let daemon_reads_card_beside = crate::inference::worker_ipc::daemon_reads_card_probe(
+        std::env::var_os(crate::inference::worker_ipc::DAEMON_READS_CARD_BESIDE).as_deref(),
+    );
+    // The `WorkerMsg::CardBeside` figures last sent (`None` = never sent).
+    let mut card_beside_sent: Option<(u64, u64)> = None;
     // The `WorkerMsg::ContextFits` figure last sent (`None` = never sent), the
     // loaded ranges it was read for, and when.
     let mut context_fits_sent: Option<Option<u32>> = None;
@@ -655,6 +660,25 @@ pub async fn run_worker(
                                 "model-worker: could not report the context that fits"
                             ),
                         }
+                    }
+                }
+            }
+            // What the held models' guessers keep on the card and the head a
+            // later range ending the model would borrow (#481 (5)), sent when
+            // they change — a load or a drop in this batch.
+            if daemon_reads_card_beside {
+                let beside = card_beside(&models);
+                if card_beside_sent != Some(beside) {
+                    let msg = WorkerMsg::CardBeside {
+                        guessers_bytes: beside.0,
+                        lends_head_bytes: beside.1,
+                    };
+                    match send_worker(&mut writer, &msg, &[]).await {
+                        Ok(()) => card_beside_sent = Some(beside),
+                        Err(e) => tracing::debug!(
+                            error = %e,
+                            "model-worker: could not report what its guessers keep on the card"
+                        ),
                     }
                 }
             }
@@ -858,6 +882,26 @@ fn give_back_what_the_load_freed(device: &candle_core::Device) {
 /// model the daemon wants to load, sees the room (`docs/FUTURE_WORK.md` #146).
 /// The pool is the device's, shared by every model this process holds on the
 /// card, so one trim covers them all.
+/// `WorkerMsg::CardBeside`'s two figures, in bytes: what the held models'
+/// guessers keep on the card that no charge of their ranges counts
+/// (`SplitModel::guessers_card_bytes`, summed), and the card-held output head
+/// a later range ending the model would borrow — the one
+/// `split::OutputHeadLent::of` lends, held by a single-rank range
+/// (`SplitModel::output_head_card_bytes`).
+fn card_beside(models: &HashMap<(usize, usize, usize, usize), SplitModel>) -> (u64, u64) {
+    let guessers = models
+        .values()
+        .map(SplitModel::guessers_card_bytes)
+        .fold(0, u64::saturating_add);
+    let lends = models
+        .iter()
+        .filter(|((_, _, _, ts), _)| *ts == 1 && crate::inference::split::share_output_head_on())
+        .map(|(_, m)| m.output_head_card_bytes())
+        .max()
+        .unwrap_or(0);
+    (guessers, lends)
+}
+
 fn hand_back_idle_card_memory(models: &HashMap<(usize, usize, usize, usize), SplitModel>) {
     let Some(device) = models
         .values()

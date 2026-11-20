@@ -69,6 +69,11 @@ pub struct SplitModel {
     /// the head is the one a range ending the model already holds in this
     /// process (`super::lent_output_head`, #458) — already on the device.
     pub(super) drafter_head_bytes: u64,
+    /// What the file's next-token block (the guess head, #425) took of the
+    /// CARD's conversation budget at load; counted only while `mtp` still
+    /// holds it ([`Self::guessers_card_bytes`]). 0 where it went to the
+    /// processor or was not loaded.
+    pub(super) mtp_card_bytes: u64,
     /// The first rows of the head a block drafter reads (`output`, else
     /// `drafter_head`), where that head is on the processor and no guess head
     /// keeps them already (`MtpHead::hot`): its guesses read them and the
@@ -333,6 +338,53 @@ impl SplitModel {
     /// model's head (the token table) is never lent as one.
     pub(crate) fn output_head_held(&self) -> Option<QMatMul> {
         self.output.clone().or_else(|| self.drafter_head.clone())
+    }
+
+    /// Card memory this model's guessers hold beside the range itself — the
+    /// next-token block placed on the card, the output head a first segment
+    /// borrowed for its guess head or block drafter (`drafter_head_bytes`, 0
+    /// where it is the head a range ending the model lent, #458), a block
+    /// drafter on the card — which no estimate of its range counts: the daemon
+    /// charges a range its layers and tables (`process_pool::segment_weights`,
+    /// layers below the end), and a block drafter is a file of its own. Each
+    /// took it off the model's own conversation budget, so the worker reports
+    /// it after a load (`WorkerMsg::CardBeside`) and its charge follows (#481
+    /// (5)): Qwen3.8-27B's first range kept a 994 MB head on an 8 GB card that
+    /// its 4,732 MB charge never counted (2026-11-19). 0 on the processor and
+    /// for a view.
+    pub(crate) fn guessers_card_bytes(&self) -> u64 {
+        let mtp = self
+            .mtp
+            .as_ref()
+            .filter(|m| m.device.is_cuda())
+            .map_or(0, |_| self.mtp_card_bytes);
+        let head = self
+            .drafter_head
+            .as_ref()
+            .and_then(QMatMul::quantized_weight)
+            .filter(|w| w.device().is_cuda())
+            .map_or(0, |_| self.drafter_head_bytes);
+        let drafter = self
+            .block_drafter
+            .as_ref()
+            .filter(|d| d.device().is_cuda())
+            .map_or(0, |d| d.bytes);
+        mtp.saturating_add(head).saturating_add(drafter)
+    }
+
+    /// The bytes of the quantized output head this model holds ON A CARD
+    /// ([`Self::output_head_held`]) — the head a range ending the model loaded
+    /// later in this process borrows instead of reading (#458), so the daemon
+    /// does not charge that growth for it. 0 where none is held, it is on the
+    /// processor, or it is not a quantized weight.
+    pub(crate) fn output_head_card_bytes(&self) -> u64 {
+        self.output_head_held()
+            .and_then(|head| {
+                head.quantized_weight()
+                    .filter(|w| w.device().is_cuda())
+                    .map(|w| w.storage_size_in_bytes() as u64)
+            })
+            .unwrap_or(0)
     }
 
     /// How many of this segment's layers work on the processor: held there,
