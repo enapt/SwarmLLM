@@ -330,6 +330,9 @@ the frame `FUTURE_WORK.md` #133 saw a healthy peer never finish reading.
 
 ### Phase 4 — a SHADOW of the far layers, and shared randomness
 
+> **Dropped (reconciled 2026-11-20, `small_slices.md` § 3):** the shadow needs ~76% of the far layers here and
+> breaks the rule that no design needs anyone to hold the whole model. Shared randomness (`COUPLED_SAMPLING`) is built.
+
 **The limit every phase above works inside:** time per token ≈ 1/v + m·RTT,
 where v is how fast the near machine drafts and m how often the far machine
 disagrees. A small drafter keeps m high (26-33%), so no amount of structure gets

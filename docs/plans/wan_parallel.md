@@ -42,6 +42,9 @@ holds none of the model (FUTURE_WORK #143, shipped v0.3.219-.221; §5).
 
 ## 2. More tokens per stream: drafting that lives on ONE stage
 
+> **2026-11-20:** the file's own guess head shipped beside the FIRST segment, at the requester (#425 (a)), not at
+> the last stage this section designed; `small_slices.md` step 2 reopens the last-stage placement.
+
 | drafter | where it runs | tokens per ring pass | source |
 |---|---|---|---|
 | none | — | 1 | — |

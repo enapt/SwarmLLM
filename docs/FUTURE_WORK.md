@@ -33,6 +33,10 @@ residual).
 
 ## ▶ PRIORITIES — read this first
 
+**2026-11-20: split speed is the focus (owner: "we need to focus on getting split speeds going"; each node a small
+slice, nobody's card locked by a whole model). The plan: `docs/plans/small_slices.md` — zero-code simulator checks
+first, then #485 (the guesser where a split's last layers are).**
+
 **2026-11-18: #477 (P1, field report) — a restart re-read every held part flat out — SHIPPED in v0.3.298 (§ Closed),
 checked on Windows too.**
 
@@ -4346,9 +4350,30 @@ refuse a file — and measure the 9B both ways on this card before changing whic
 ### Speed across computers (splits)
 
 Designs: `docs/plans/large_model_splits.md` (the target, the bound and the build order, #318),
-`docs/plans/split_speculation.md` (guess-and-check across a split),
+`docs/plans/small_slices.md` (**the plan since 2026-11-20**: small slices, fast replies — ordered steps, each with
+the measurement that can kill it), `docs/plans/split_speculation.md` (guess-and-check across a split),
 `docs/plans/wan_parallel.md` (parallelise the reply, not the token), `docs/plans/regional_pipelines.md`
 (placement by distance, #192), `docs/plans/faster_than_local.md` (the ranked list).
+
+#### #485 — A split that ends on another computer guesses nothing: the guesser should run where the last layers are
+`P1` · perf-split · **OPEN** — 2026-11-20 · plan: `docs/plans/small_slices.md` step 2
+
+Qwen 3.5 / 3.6 / 3.8 (Qwen3.8-27B, Qwen3.6-35B-A3B) take no separate drafter and no flow; their file's guess head
+and the block drafter attach only beside a split's FIRST segment (`pipeline::split_guess_head_here`,
+`block_draft::a_guesser_may_answer`), because the head reads the LAST layer's output. So a chain guesses only when it
+starts and finishes on the asking computer. Measured 2026-11-20 (`~/swarmllm-gate/split27_3card`, main `4f693a127`,
+160 tokens): the 27B here → Australia → here 5.3-7.2 tok/s with the head; here → the US laptop, ending there, 3.05-3.08
+— one token a 272 ms round trip. A spread swarm's chains end on peers. **Design**: the tail samples, drafts the next γ
+with the file's head and returns [token, guesses, kept count] as ids with its reply (a `LayerResult` trailer under a
+new feature bit, gated at the sender; an older tail returns none). Each segment's rewind already travels with the
+next forward (`pending_truncate` → `truncate_kv_to`, `RECURRENT_REWIND`, ≤ 32 rows). Expected ~1.4-1.8× on a chain
+that ends on a peer (INFERRED from the two shapes above), and the asker's card no longer holds the tail layer and a
+second head. **Experiment first**: Qwen3.5-9B on the two-node rig at 130 ms, A [0,17) ↔ B [17,32) + head with B
+guessing, against A-B-A with the head at A; kill if B's kept-a-round is more than 10% under A's. Prior art: vLLM PR
+#44698 (MTP on the last pipeline rank; sampled + draft tokens + accepted counts broadcast to the other ranks; the
+recurrent state rolled back by that count; closed unmerged 2026-10-14), SGLang's "PP tail-draft", llama.cpp #27781
+(an MTP head sharing a cache lost 8 points of prose acceptance — check acceptance against a known answer after
+moving it).
 
 #### #469 — A split's yield is one figure for every kind of reply, so a prose reply can be planned onto a split slower than local
 `P2` · perf-split · **PARTIAL** (per-kind split yield built; this node's whole run per kind, mid-reply switching and per-conversation priors open) — 2026-11-17 · evidence: `faster_than_local.md` § 9 ("A second far card") · history: #3 (j), #428

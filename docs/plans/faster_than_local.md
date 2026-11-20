@@ -136,7 +136,8 @@ GB sits off the card** — which is every 14B.
   outbound substreams can take V1Lazy alone, leaving gossip/kad/identify as they
   are. Measured per token today: 838 ms on request-response vs 351 ms on the
   persistent stream, at a 412 ms application-level round trip.
-- **The persistent stream** (2.4×, measured) waits on #133 (a peer stalling on a
+- **The persistent stream** (2.4×, measured — ⚠ gone once both ends negotiated lazily, V1Lazy above; reconciled
+  2026-11-20) waits on #133 (a peer stalling on a
   large prompt frame; no receipt ACK). Chunking the prompt pass (Phase 3)
   removes the large frame.
 - **~110 ms per token is still unexplained** on the stream path (351 ms against
@@ -960,7 +961,8 @@ forwards on this node, not their rows, and not the link.
        forward of its last layers; with (a) the extra rows cost only the far card, idle about
        half of each cycle. Re-test the live budget once (a) is in, and widen where misses
        come, not everywhere.
-   (c) **Teach the drafter during the reply from the target's verdicts** — first a
+   (c) ⚠ **Measured dead in § 7.5** (bias 0.920 → 0.915, LoRA 0.913; reconciled 2026-11-20, `small_slices.md` § 3).
+       **Teach the drafter during the reply from the target's verdicts** — first a
        per-conversation correction of the drafter's scores toward the tokens the target
        actually prefers (its top choices per row, a few bytes a row), then a ridge map from the
        drafter's final state into the target's final space, scored by the target's own head

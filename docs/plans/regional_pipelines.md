@@ -4,6 +4,10 @@
 swarm.** Numbers and traps: `memory/archive/perf_baseline_0920_post192.md`, gotchas
 #656-#661.
 
+> **Status 2026-11-20:** the plan for splits is now `small_slices.md`. Stage 3 exists as `near_chain` (card chains
+> within 30 ms); stage 2's coordinates price a chain its head leads and may exclude the far half, never order the
+> near half (#3 (a)). The 2026-10-02 status below is kept as history.
+>
 > **Status 2026-10-02:** Stages 0, 0b and 1 are done (Stage 1 in v0.3.193). Stage 2's coordinates are
 > published but nothing prices a peer-to-peer hop with them (`docs/FUTURE_WORK.md` #192, PARTIAL; they
 > may exclude the far half but must not order the near half). Stage 3 (regional chain-completeness)
