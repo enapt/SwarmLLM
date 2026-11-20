@@ -1488,6 +1488,35 @@ What a change here must keep:
   passed through as the swarm's verdict: "trying again won't help", on the card rig's first
   request, with the next one 10 s later running. It now joins `no_route`, so the first
   plan's offers decide. Test `a_re_plans_shortfall_after_a_peer_said_no_is_the_holders_declining`.
+- **…except where every refusal counted the layers that LOAD** (2026-11-20, #483 (b) E).
+  A `LayersCounted::Loading` refusal states the size of the room a load gets on that
+  computer, not a moment of this prompt's, so the re-plan held to it describes the swarm:
+  `SharedState::peer_refusals_counted_loads` (every refusal noted for the request, at
+  least one) makes the re-plan's `SwarmShortOfMemory` the answer, unless a holder was
+  short while another model's worker held its memory (#479). Tier `tier_1120a` (Llama
+  3.3 70B, v0.3.301): the Australian card could load 54 of the 60 layers asked, nobody
+  else held 25-28 while the 16 GB laptop cooled, and the re-plan found "room for all 80
+  of its layers between them, but not in pieces one chain of them can run in turn" — the
+  caller was told instead that the holders "turned it down" and "try again in a few
+  minutes". It is also the verdict the first plan reaches once it prices that computer as
+  its load does (#483 (b) D1), so the same swarm gives the same answer either way.
+  Test `a_re_plan_held_to_what_loads_reports_the_swarms_room_in_our_words`.
+- **A peer's refusal reaches the caller in this node's words** (2026-11-20, #483 (b) E).
+  A peer words a refusal for ITS owner: "this node's budget allows 22120 MB … Raise
+  `resources.max_ram_mb`, or free memory by unloading another model" — quoted under
+  `HoldersDeclined`, the caller read the Australian computer's setting as theirs.
+  The up-front refusal (`PromptAdmissionAsk`) becomes the request's error as
+  `PeerRefusal::in_our_words` — the computer, what fit of the layers it was asked for, from
+  which layer, by what it counted — and the peer's text goes to the DIAG log
+  (`peer_said`). Prior art: Kubernetes' scheduler reports a pod no node takes in its own
+  words, a census of what each node lacked ("0/3 nodes are available: 2 Insufficient
+  memory"), never a kubelet's advice to its operator. Not covered: a refusal that arrives
+  AT a forward (a peer older than `PROMPT_ADMISSION`, or one whose forward refuses after a
+  "go ahead") still carries the peer's words; those paths carry no figures to word.
+- **Both tails failing reports the pass that did not fail for its own restriction**
+  (#483 (b) E): `parallax::route_each_tail` returns the far pass's error where the here
+  pass found only `NO_SINK` — a node not holding the last layers has no tail here by
+  construction. Test `a_tail_restriction_never_hides_the_other_passes_answer`.
 - **Neither variant docks a peer** (`failure_is_penalty_worthy`): a holder's
   admission check refusing is that check doing its job.
 

@@ -1002,14 +1002,17 @@ impl PipelineExecutor {
             layers_that_fit = refusal.layers_that_fit,
             counted_from = refusal.from,
             counted = ?refusal.counted,
+            asked_layers = refusal.asked_layers,
+            peer_said = %refusal.message,
             "DIAG: KV admission up front — a peer refused the prompt before the pass; re-planning"
         );
         // One class whatever the peer wrote: "this holder cannot serve", which
         // the router re-plans (`remote_peer_could_not_serve`) holding the peer
         // to what it said fits. The peer's text never picks the class — a
         // forged "Validation error:" would otherwise end the request with a
-        // 400 and no re-plan.
-        Err(SwarmError::ServiceUnavailable(refusal.message))
+        // 400 and no re-plan — nor reaches the caller: its figures, in our
+        // words, do (#483 (b) E).
+        Err(SwarmError::ServiceUnavailable(refusal.in_our_words()))
     }
 
     /// The forward as it always ran, with the peer-error check — what

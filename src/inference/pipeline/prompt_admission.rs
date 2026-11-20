@@ -78,7 +78,7 @@ pub(super) fn answer_wait(round_trips_ms: impl IntoIterator<Item = Option<u32>>)
 }
 
 /// A peer that said its conversation memory does not hold the prompt.
-pub(super) struct PeerRefusal {
+pub(crate) struct PeerRefusal {
     pub node_id: NodeId,
     /// The refusal in the peer's words — what its forward would have said —
     /// bounded and with its control characters blanked ([`peer_words`]).
@@ -87,8 +87,54 @@ pub(super) struct PeerRefusal {
     /// The first layer it was asked for, which the asked node counts
     /// `layers_that_fit` from (`daemon::state::PeerPromptFit`).
     pub from: u32,
+    /// How many layers it was asked for, every range together.
+    pub asked_layers: u32,
     /// What it counted.
     pub counted: swarmllm_types::LayersCounted,
+}
+
+impl PeerRefusal {
+    /// The refusal as THIS node tells it — to the request's error and the
+    /// caller — from the figures the peer answered with, never its words.
+    ///
+    /// A peer words its refusal for its own owner: "this node's budget allows
+    /// 22120 MB … Raise `resources.max_ram_mb`" names ITS memory and ITS
+    /// setting. Repeated, the caller read the Australian computer's setting as
+    /// theirs to raise (Llama 3.3 70B, 2026-11-20, FUTURE_WORK #483 (b) E).
+    /// Kubernetes' scheduler does the same: a pod no node takes is told what
+    /// each node lacked, in the scheduler's words ("0/3 nodes are available:
+    /// 2 Insufficient memory"), never a kubelet's advice to its operator. The
+    /// peer's own words go to the log ([`Self::message`]).
+    pub fn in_our_words(&self) -> String {
+        let (node, fit, asked, from) = (
+            &self.node_id,
+            self.layers_that_fit,
+            self.asked_layers,
+            self.from,
+        );
+        match self.counted {
+            swarmllm_types::LayersCounted::Loading if fit == 0 => format!(
+                "computer {node} has no room to load the {asked} layers of the model it was \
+                 asked for, from layer {from}"
+            ),
+            swarmllm_types::LayersCounted::Loading => format!(
+                "computer {node} has room to load {fit} of the {asked} layers of the model it \
+                 was asked for, from layer {from}"
+            ),
+            swarmllm_types::LayersCounted::Caches if fit == 0 => format!(
+                "computer {node} has no room for this conversation in the {asked} layers of \
+                 the model it was asked for"
+            ),
+            swarmllm_types::LayersCounted::Caches => format!(
+                "computer {node} has room for this conversation in {fit} of the {asked} layers \
+                 of the model it was asked for"
+            ),
+            swarmllm_types::LayersCounted::Unsaid => format!(
+                "computer {node} has room for {fit} of the {asked} layers of the model it was \
+                 asked for"
+            ),
+        }
+    }
 }
 
 /// The most of a peer's refusal kept: an honest one is the itemised memory
@@ -172,6 +218,10 @@ pub(super) async fn ask_peers(
         let Some(&(from, _)) = layer_ranges.first() else {
             continue;
         };
+        let asked_layers: u32 = layer_ranges
+            .iter()
+            .map(|&(start, end)| end.saturating_sub(start))
+            .sum();
         let message = SwarmMessage::PromptAdmissionAsk(PromptAdmissionAsk {
             request_id,
             ask_id,
@@ -195,7 +245,7 @@ pub(super) async fn ask_peers(
                 .get(&node_id)
                 .and_then(|p| p.round_trip_ms()),
         );
-        pending.push((node_id, from, rx));
+        pending.push((node_id, from, asked_layers, rx));
     }
     if pending.is_empty() {
         return Vec::new();
@@ -204,10 +254,16 @@ pub(super) async fn ask_peers(
     let wait = answer_wait(round_trips);
     let asked_at = tokio::time::Instant::now();
     let deadline = asked_at + wait;
-    let all_answers =
-        futures::future::join_all(pending.into_iter().map(|(node_id, from, rx)| async move {
-            (node_id, from, tokio::time::timeout_at(deadline, rx).await)
-        }));
+    let all_answers = futures::future::join_all(pending.into_iter().map(
+        |(node_id, from, asked_layers, rx)| async move {
+            (
+                node_id,
+                from,
+                asked_layers,
+                tokio::time::timeout_at(deadline, rx).await,
+            )
+        },
+    ));
     let answers =
         match crate::inference::cancel::unless_cancelled(async { Ok(all_answers.await) }, cancel)
             .await
@@ -217,11 +273,11 @@ pub(super) async fn ask_peers(
         };
     let answered = answers
         .iter()
-        .filter(|(_, _, a)| matches!(a, Ok(Ok(_))))
+        .filter(|(_, _, _, a)| matches!(a, Ok(Ok(_))))
         .count();
     let refusals: Vec<PeerRefusal> = answers
         .into_iter()
-        .filter_map(|(node_id, from, answer)| match answer {
+        .filter_map(|(node_id, from, asked_layers, answer)| match answer {
             Ok(Ok(PromptAdmissionVerdict::Refused {
                 message,
                 layers_that_fit,
@@ -231,6 +287,7 @@ pub(super) async fn ask_peers(
                 message: peer_words(&message),
                 layers_that_fit,
                 from,
+                asked_layers,
                 counted,
             }),
             _ => None,

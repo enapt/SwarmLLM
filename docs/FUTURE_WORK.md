@@ -955,7 +955,15 @@ kubelet's admission runs the scheduler's own `GeneralPredicates` against it; Pet
 `SWARMLLM_COLD_LOAD_PRICE=driver`. Not field-measured yet: needs peers on the release carrying the field. **(E) the caller is told another computer's advice** ("Raise `resources.max_ram_mb`" — Australia's setting)
 where the re-plan's own finding ("not enough memory in the swarm … not in pieces one chain can run") is the true one;
 `report_after_a_replan` reads it as "no route" (#931) and hands back the refusing holder's words. Also: `route_each_tail`
-returns the `Here` pass's "no valid sink vertex" when both tails fail — a misleading log line.
+returns the `Here` pass's "no valid sink vertex" when both tails fail — a misleading log line. **E FIXED 2026-11-20**:
+an up-front refusal becomes the request's error in OUR words (`PeerRefusal::in_our_words`: the computer, what fit of
+what was asked; the peer's text to the log), a re-plan held to refusals that counted the layers that LOAD reports its
+own `SwarmShortOfMemory` (`SharedState::peer_refusals_counted_loads`; #479's busy holder and #931's cache moment still
+read as declined), and both tails failing report the pass not failing for its own restriction. Prior art: Kubernetes'
+scheduler words an unplaceable pod's failure itself, a census per node ("0/3 nodes are available: 2 Insufficient
+memory"), never a kubelet's advice. Left: a refusal arriving AT a forward (an older peer, or a forward refused after a
+"go ahead") still carries the peer's own words — it carries no figures to word; and `SwarmShortOfMemory`'s hint
+("trying again won't help") does not know a holder is only COOLING (#440) — the 70B's laptop was.
 
 (c) **The shared 14B: `ModelIncompleteInSwarm`.** No change in 0.3.298..0.3.301 found that makes a correctly announced
 split read as incomplete. Producers: `SharedState::no_route_error` (no reachable holder of ANY part),

@@ -157,6 +157,23 @@ impl SharedState {
         }
     }
 
+    /// Did every peer that refused this request when asked count the layers
+    /// whose weights would LOAD ([`LayersCounted::Loading`]) — and did one?
+    /// Such a refusal states the size of the room a load gets there, so the
+    /// re-plan held to it describes the swarm's room as it stands; a refusal
+    /// counting conversation caches, or a peer that did not say, may be a
+    /// busy moment (gotcha #931), which describes nothing beyond this prompt.
+    /// Asked by the router where a failed re-plan is reported
+    /// (`router::report_after_a_replan`, #483 (b) E).
+    pub fn peer_refusals_counted_loads(&self, request_id: uuid::Uuid) -> bool {
+        self.peer_prompt_refusals
+            .get(&request_id)
+            .is_some_and(|by_peer| {
+                let mut fits = by_peer.values().flatten().peekable();
+                fits.peek().is_some() && fits.all(|fit| fit.counted == LayersCounted::Loading)
+            })
+    }
+
     /// What `peer` said fits of this request, if it refused the prompt when
     /// asked — every verdict kept.
     pub fn peer_prompt_fits_for_request(
@@ -180,6 +197,42 @@ mod tests {
 
     fn node(b: u8) -> NodeId {
         NodeId([b; 32])
+    }
+
+    /// Only refusals that counted the layers that LOAD read as the swarm's
+    /// room (#483 (b) E): none heard, or one that counted caches or did not
+    /// say (#931's busy moment), is not.
+    #[test]
+    fn only_refusals_that_counted_loads_describe_the_room() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db = crate::storage::db::Database::open(temp.path()).expect("db");
+        let executor = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::inference::executor::ModelExecutor::new(),
+        ));
+        let (state, _, _) = SharedState::new(
+            crate::config::Config::default(),
+            crate::identity::Identity::generate(),
+            db,
+            executor,
+            None,
+        );
+        let request = uuid::Uuid::new_v4();
+        assert!(!state.peer_refusals_counted_loads(request), "none heard");
+        let fit = |counted| PeerPromptFit {
+            from: 20,
+            layers: 54,
+            counted,
+        };
+        state.note_peer_prompt_refusal(request, &node(1), fit(LayersCounted::Loading));
+        assert!(state.peer_refusals_counted_loads(request));
+        state.note_peer_prompt_refusal(request, &node(2), fit(LayersCounted::Caches));
+        assert!(
+            !state.peer_refusals_counted_loads(request),
+            "one may be a moment"
+        );
+        let other = uuid::Uuid::new_v4();
+        state.note_peer_prompt_refusal(other, &node(1), fit(LayersCounted::Unsaid));
+        assert!(!state.peer_refusals_counted_loads(other), "did not say");
     }
 
     /// One peer may have a dozen questions weighed a minute, every peer

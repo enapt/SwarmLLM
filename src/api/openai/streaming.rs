@@ -366,8 +366,9 @@ async fn replan_after_local_refusal(
     crate::api::submit_replan_to_router(router_tx, request, trace)
         .await
         .map_err(|ApiError(later)| {
+            // Our own memory refused: no peer's refusal to weigh.
             ApiError(crate::inference::router::report_after_a_replan(
-                refused, later, &model, None,
+                refused, later, &model, None, false,
             ))
         })
 }
@@ -462,7 +463,7 @@ async fn stream_replan_after_local_refusal(
             }
         }
         Ok(Err(later)) => set_failure(&crate::inference::router::report_after_a_replan(
-            refused, later, &model, None,
+            refused, later, &model, None, false,
         )),
         Err(_) => set_failure(&crate::error::SwarmError::Internal(
             "the inference pipeline stopped without reporting a result".into(),

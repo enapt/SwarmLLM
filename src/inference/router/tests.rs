@@ -497,14 +497,14 @@ fn a_failed_re_plan_after_a_context_refusal_reports_the_limit_not_the_search() {
     // "No route" is about a search the caller never asked for.
     let no_route = SwarmError::SegmentFailoverExhausted("no standby".into());
     assert!(matches!(
-        super::report_after_a_replan(first(), no_route, "m", None),
+        super::report_after_a_replan(first(), no_route, "m", None, false),
         SwarmError::LongerThanPeerServes(_)
     ));
     // This node's own worker refusing at ITS limit is the better answer: its
     // advice to raise the setting here is then correct.
     let ours = SwarmError::Validation("too long for m … against a limit of 8192".into());
     assert!(matches!(
-        super::report_after_a_replan(first(), ours, "m", None),
+        super::report_after_a_replan(first(), ours, "m", None, false),
         SwarmError::Validation(_)
     ));
     // Our own memory shortfall is always what is reported: it names the
@@ -516,7 +516,7 @@ fn a_failed_re_plan_after_a_context_refusal_reports_the_limit_not_the_search() {
         SwarmError::LongerThanPeerServes("a peer's limit".into()),
     ] {
         assert!(matches!(
-            super::report_after_a_replan(shortfall(), later, "m", None),
+            super::report_after_a_replan(shortfall(), later, "m", None, false),
             SwarmError::LocalMemoryUnavailable(_)
         ));
     }
@@ -569,7 +569,7 @@ fn a_holder_that_said_no_is_not_reported_as_gone() {
         gone(),
         SwarmError::InsufficientCapacity(crate::types::ModelId("m".into())),
     ] {
-        match super::report_after_a_replan(hand_off(), later, "m", None) {
+        match super::report_after_a_replan(hand_off(), later, "m", None, false) {
             SwarmError::HoldersDeclined { model_id, reason } => {
                 assert_eq!(model_id, "m");
                 assert!(
@@ -582,7 +582,7 @@ fn a_holder_that_said_no_is_not_reported_as_gone() {
     }
     // The wrapped refusal comes back in the holder's own words, its own
     // brackets intact and the wrapper's unmatched one gone.
-    match super::report_after_a_replan(mid_pipeline(), gone(), "m", None) {
+    match super::report_after_a_replan(mid_pipeline(), gone(), "m", None, false) {
         SwarmError::HoldersDeclined { reason, .. } => assert_eq!(
             reason,
             "10 layers 12..22 of m need about 330 MB more than this node has left (its worker \
@@ -591,7 +591,7 @@ fn a_holder_that_said_no_is_not_reported_as_gone() {
         other => panic!("reported as {other}"),
     }
     // A second holder saying no in the re-plan: ITS words are the last ones.
-    match super::report_after_a_replan(mid_pipeline(), hand_off(), "m", None) {
+    match super::report_after_a_replan(mid_pipeline(), hand_off(), "m", None, false) {
         SwarmError::HoldersDeclined { reason, .. } => {
             assert!(reason.starts_with("Not enough free memory"), "{reason}")
         }
@@ -625,7 +625,7 @@ fn a_silent_holder_that_was_the_only_route_is_not_reported_as_gone() {
         },
         SwarmError::InsufficientCapacity(crate::types::ModelId("m".into())),
     ] {
-        let reported = super::report_after_a_replan(silent(), later, "m", None);
+        let reported = super::report_after_a_replan(silent(), later, "m", None, false);
         assert!(
             matches!(reported, SwarmError::PeerUnresponsive(_)),
             "a silent holder was reported as {reported}"
@@ -637,7 +637,7 @@ fn a_silent_holder_that_was_the_only_route_is_not_reported_as_gone() {
     let elsewhere =
         SwarmError::SegmentFailoverExhausted("Segment 1 failed with no standby available".into());
     assert!(matches!(
-        super::report_after_a_replan(silent(), elsewhere, "m", None),
+        super::report_after_a_replan(silent(), elsewhere, "m", None, false),
         SwarmError::SegmentFailoverExhausted(_)
     ));
 }
@@ -661,7 +661,7 @@ fn a_refused_plan_past_the_holders_offers_is_a_swarm_short_of_memory() {
         num_layers: 48,
         holders: Vec::new(),
     };
-    let reported = super::report_after_a_replan(refusal, gone, "m", Some(offered));
+    let reported = super::report_after_a_replan(refusal, gone, "m", Some(offered), false);
     assert!(
         matches!(reported, SwarmError::SwarmShortOfMemory { .. }),
         "got {reported}"
@@ -687,6 +687,7 @@ fn a_refused_plan_past_the_holders_offers_is_a_swarm_short_of_memory() {
         SwarmError::InsufficientCapacity(crate::types::ModelId("m".into())),
         "m",
         Some(enough),
+        false,
     );
     assert!(
         matches!(reported, SwarmError::HoldersDeclined { .. }),
@@ -730,7 +731,8 @@ fn a_shortfall_at_a_holder_running_another_model_is_the_holders_declining() {
         ],
     };
 
-    let reported = super::report_after_a_replan(refused(), exhausted(), "m", Some(offered(true)));
+    let reported =
+        super::report_after_a_replan(refused(), exhausted(), "m", Some(offered(true)), false);
     let SwarmError::HoldersDeclined { reason, .. } = &reported else {
         panic!("got {reported}");
     };
@@ -744,7 +746,8 @@ fn a_shortfall_at_a_holder_running_another_model_is_the_holders_declining() {
 
     // The control: the same shortfall with no other model there IS the
     // swarm's size, and the advice still says retrying cannot help.
-    let reported = super::report_after_a_replan(refused(), exhausted(), "m", Some(offered(false)));
+    let reported =
+        super::report_after_a_replan(refused(), exhausted(), "m", Some(offered(false)), false);
     assert!(
         matches!(reported, SwarmError::SwarmShortOfMemory { .. }),
         "got {reported}"
@@ -756,7 +759,7 @@ fn a_shortfall_at_a_holder_running_another_model_is_the_holders_declining() {
     // short: the swarm's shortfall stands.
     let mut roomy = offered(false);
     roomy.holders.push(holder("225e6fe7", 28, 28, true));
-    let reported = super::report_after_a_replan(refused(), exhausted(), "m", Some(roomy));
+    let reported = super::report_after_a_replan(refused(), exhausted(), "m", Some(roomy), false);
     assert!(
         matches!(reported, SwarmError::SwarmShortOfMemory { .. }),
         "got {reported}"
@@ -783,7 +786,7 @@ fn a_re_plans_shortfall_after_a_peer_said_no_is_the_holders_declining() {
         model_id: "m".into(),
         room: crate::error::describe_offered_room(None, 28),
     };
-    let reported = super::report_after_a_replan(refusal(), re_plan(), "m", None);
+    let reported = super::report_after_a_replan(refusal(), re_plan(), "m", None, false);
     let SwarmError::HoldersDeclined { reason, .. } = &reported else {
         panic!("got {reported}");
     };
@@ -797,10 +800,107 @@ fn a_re_plans_shortfall_after_a_peer_said_no_is_the_holders_declining() {
         num_layers: 28,
         holders: Vec::new(),
     };
-    let reported = super::report_after_a_replan(refusal(), re_plan(), "m", Some(offered));
+    let reported = super::report_after_a_replan(refusal(), re_plan(), "m", Some(offered), false);
     assert!(
         reported.to_string().contains("about 17 of its 28 layers"),
         "{reported}"
+    );
+}
+
+/// **A re-plan held to refusals that counted the layers that LOAD is the
+/// swarm's room, told in this node's words** (#483 (b) E, 2026-11-20). Llama
+/// 3.3 70B: the Australian card could load 54 of the 60 layers asked, nobody
+/// else held 25-28, the re-plan found no chain of the holders that fits — and
+/// the caller was told the holders "turned it down", in that computer's words:
+/// "this node's budget allows 22120 MB … Raise `resources.max_ram_mb`", ITS
+/// setting. Now the re-plan's shortfall is reported, the refusal itself names
+/// the computer and its figures, and no other computer's advice reaches the
+/// caller. The controls: a refusal that counted caches (#931's busy moment)
+/// and a holder short while another model's worker held its memory (#479)
+/// still read as the holders declining.
+#[test]
+fn a_re_plan_held_to_what_loads_reports_the_swarms_room_in_our_words() {
+    use crate::error::SwarmError;
+    let refusal = |counted| crate::inference::pipeline::prompt_admission::PeerRefusal {
+        node_id: crate::types::NodeId([0xAA; 32]),
+        message: "llama needs about 25862 MB of memory but this node's budget allows 22120 \
+                  MB and 0 MB is already in use. Raise `resources.max_ram_mb`, or free memory \
+                  by unloading another model. Of layers 20..80 of the model, 54 would load here."
+            .into(),
+        layers_that_fit: 54,
+        from: 20,
+        asked_layers: 60,
+        counted,
+    };
+    let first = |counted| SwarmError::ServiceUnavailable(refusal(counted).in_our_words());
+    let re_plan = || SwarmError::SwarmShortOfMemory {
+        model_id: "llama".into(),
+        room: "the computers holding it have room for all 80 of its layers between them, but \
+               not in pieces one chain of them can run in turn"
+            .into(),
+    };
+    let covered = |busy| crate::daemon::state::OfferedMemory {
+        layers: Some(80),
+        num_layers: 80,
+        holders: vec![crate::error::HolderRoom {
+            holder: "aaaaaaaaaaaaaaaa".into(),
+            holds: 80,
+            room: Some(60),
+            room_held_by_other_models: busy,
+        }],
+    };
+    let no_advice_but_ours = |reported: &SwarmError| {
+        let text = reported.to_string();
+        assert!(
+            !text.contains("max_ram_mb"),
+            "another computer's setting: {text}"
+        );
+        assert!(
+            !text.contains("this node"),
+            "another computer's 'this node': {text}"
+        );
+    };
+
+    let reported = super::report_after_a_replan(
+        first(swarmllm_types::LayersCounted::Loading),
+        re_plan(),
+        "llama",
+        Some(covered(false)),
+        true,
+    );
+    assert!(
+        matches!(reported, SwarmError::SwarmShortOfMemory { .. }),
+        "got {reported}"
+    );
+    assert!(
+        reported.to_string().contains("not in pieces one chain"),
+        "{reported}"
+    );
+    no_advice_but_ours(&reported);
+
+    // A refusal that may be a moment, or a holder busy with another model:
+    // the holders declined — in this node's words for the refusal.
+    for (counted, loads, busy) in [
+        (swarmllm_types::LayersCounted::Caches, false, false),
+        (swarmllm_types::LayersCounted::Loading, true, true),
+    ] {
+        let reported = super::report_after_a_replan(
+            first(counted),
+            re_plan(),
+            "llama",
+            Some(covered(busy)),
+            loads,
+        );
+        let SwarmError::HoldersDeclined { reason, .. } = &reported else {
+            panic!("got {reported}");
+        };
+        assert!(reason.contains("computer aaaaaaaaaaaaaaaa"), "{reason}");
+        no_advice_but_ours(&reported);
+    }
+    let loading = refusal(swarmllm_types::LayersCounted::Loading).in_our_words();
+    assert!(
+        loading.contains("has room to load 54 of the 60 layers") && loading.contains("layer 20"),
+        "{loading}"
     );
 }
 
@@ -815,7 +915,8 @@ fn a_re_plan_that_failed_another_way_is_reported_as_itself() {
             peer_said_no(),
             SwarmError::PeerUnresponsive("never acknowledged".into()),
             "m",
-            None
+            None,
+            false
         ),
         SwarmError::PeerUnresponsive(_)
     ));
@@ -825,7 +926,8 @@ fn a_re_plan_that_failed_another_way_is_reported_as_itself() {
             peer_said_no(),
             SwarmError::Validation("x".into()),
             "m",
-            None
+            None,
+            false
         ),
         SwarmError::Validation(_)
     ));
@@ -835,7 +937,8 @@ fn a_re_plan_that_failed_another_way_is_reported_as_itself() {
             peer_said_no(),
             SwarmError::LocalMemoryUnavailable("short by 900 MB".into()),
             "m",
-            None
+            None,
+            false
         ),
         SwarmError::LocalMemoryUnavailable(_)
     ));

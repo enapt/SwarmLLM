@@ -309,11 +309,26 @@ fn refusal_in_the_holders_words(err: &SwarmError) -> String {
 /// had GONE — of a computer still connected, which had held the request for
 /// ten minutes reading a 4,110-token prompt (2026-11-08). Its own error says
 /// what happened: it took the request and no reply arrived in time.
+///
+/// **A re-plan held to refusals that counted the layers that LOAD is the
+/// swarm's room** (`refusals_counted_loads`, from
+/// `SharedState::peer_refusals_counted_loads`; #483 (b) E, 2026-11-20). Such a
+/// refusal states the size of the room a load gets on that computer, not a
+/// moment of this prompt's, so the re-plan's own "not enough memory in the
+/// swarm" is the answer — the one the first plan gives once it prices that
+/// computer as its load does (#483 (b) D1) — unless a holder was short while
+/// another model's worker held its memory (#479). Llama 3.3 70B: the
+/// Australian card could load 54 of the 60 layers asked, nobody else held
+/// 25-28, and the caller was handed that computer's advice to raise ITS
+/// `resources.max_ram_mb` under "turned it down … try again in a few
+/// minutes", where the re-plan had found that no chain of the computers
+/// holding the model fits (2026-11-20).
 pub(crate) fn report_after_a_replan(
     first: SwarmError,
     later: SwarmError,
     model_id: &str,
     offered: Option<crate::daemon::state::OfferedMemory>,
+    refusals_counted_loads: bool,
 ) -> SwarmError {
     let later_is_actionable = crate::error::classify_error(&later).0.is_client_error();
     if local_memory_refused_the_load(&first) {
@@ -345,6 +360,17 @@ pub(crate) fn report_after_a_replan(
         return if no_route { first } else { later };
     }
     if !(declined_again || no_route) {
+        return later;
+    }
+    let a_holder_was_busy = offered.as_ref().is_some_and(|o| {
+        o.holders
+            .iter()
+            .any(crate::error::HolderRoom::short_while_busy)
+    });
+    if refusals_counted_loads
+        && !a_holder_was_busy
+        && matches!(later, SwarmError::SwarmShortOfMemory { .. })
+    {
         return later;
     }
     // Offers that add up to the whole model say the room exists and no route
@@ -1719,6 +1745,7 @@ impl InferenceRouter {
                             later,
                             &request.model_id.0,
                             offered_when_refused,
+                            shared_state.peer_refusals_counted_loads(request.id),
                         );
                         tracing::info!(
                             request_id = %request.id,

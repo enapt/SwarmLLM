@@ -1318,8 +1318,21 @@ fn route_each_tail(
             })
         }
         (Ok(plan), Err(_)) | (Err(_), Ok(plan)) => Ok(plan),
-        (Err(e), Err(_)) => Err(e),
+        // A pass that found no tail found only its own restriction: the
+        // "here" pass of a model whose last layers this node does not hold
+        // has no sink by construction, and its "no valid sink vertex" stood in
+        // the log for the far pass's real answer (#483 (b) E).
+        (Err(here), Err(far)) => Err(if found_no_tail(&here) { far } else { here }),
     }
+}
+
+/// The search's answer where no vertex ends the model on a computer
+/// allowed to — the one error a tail restriction alone produces.
+const NO_SINK: &str = "parallax: no valid sink vertex (ends at num_layers, can_be_last)";
+
+/// Is `err` [`NO_SINK`]?
+fn found_no_tail(err: &SwarmError) -> bool {
+    matches!(err, SwarmError::PipelineError(message) if message == NO_SINK)
 }
 
 /// Is a split with its tail on another computer priced from another yield
@@ -1847,9 +1860,7 @@ fn route_over(
         ));
     }
     if !vertices.iter().any(is_sink) {
-        return Err(SwarmError::PipelineError(
-            "parallax: no valid sink vertex (ends at num_layers, can_be_last)".into(),
-        ));
+        return Err(SwarmError::PipelineError(NO_SINK.into()));
     }
 
     // Topological order: sort by (range.0 asc, range.1 asc). DAG edges always go
@@ -2641,6 +2652,37 @@ mod tests {
     /// here whole, and never weighed the route through the peer honestly.
     /// Here the pieces undercut the route through the peer, which undercuts
     /// the run whole; the route through the peer is the plan.
+    /// **Both tails failing reports the pass that was not failing only for
+    /// its own restriction** (#483 (b) E). The "here" pass of a model whose
+    /// last layers this node does not hold has no tail by construction; its
+    /// "no valid sink vertex" stood in the log where the far pass had the
+    /// reason. The control: where the here pass failed some other way, its
+    /// answer stands.
+    #[test]
+    fn a_tail_restriction_never_hides_the_other_passes_answer() {
+        let local = NodeId([1; 32]);
+        let mut peer = cand(2, vec![(0, 32)], 100, 0.0, true, true, 40.0);
+        peer.split_tokens_per_round = Some(2.0);
+        peer.split_tokens_per_round_far_tail = Some(3.0);
+        let cands = [peer];
+        let far_answer = || SwarmError::PipelineError("parallax: no route under the cap".into());
+        let routed = route_each_tail(32, &cands, &local, None, |_, tail| match tail {
+            Some(SplitTail::Here) => Err(SwarmError::PipelineError(NO_SINK.into())),
+            _ => Err(far_answer()),
+        });
+        assert_eq!(
+            routed.unwrap_err().to_string(),
+            far_answer().to_string(),
+            "the far pass's answer"
+        );
+        let here_answer = || SwarmError::PipelineError("parallax: no valid source vertex".into());
+        let routed = route_each_tail(32, &cands, &local, None, |_, tail| match tail {
+            Some(SplitTail::Here) => Err(here_answer()),
+            _ => Err(far_answer()),
+        });
+        assert_eq!(routed.unwrap_err().to_string(), here_answer().to_string());
+    }
+
     #[test]
     fn one_machines_whole_run_is_never_priced_as_pieces_of_a_split() {
         let local = NodeId([1; 32]);
