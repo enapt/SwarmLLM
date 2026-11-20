@@ -3505,6 +3505,22 @@ flows": a cheaper requester ran more forwards, not more reply), and the far's lo
 trip. A slowest-stage price is not supported by this link; revisit only on a link short enough that a stage's forward,
 not the round trip, sets the pace.
 
+**Read again 2026-11-20/21: the half split's prose no longer beats this laptop alone.** Main as v0.3.303 ships it
+(the card clock hold off), AU `aa3d1e66` on .302, 133-137 ms, flowhalf, 160-token greedy replies, eight runs in three
+sittings (`real_link.sh` TAG=readme303 arms 2 and 5, 20:5xZ; `ab302main.sh` rounds b and d, 21:19-21:32Z; TAG=readme303b
+arms 1 and 3, 22:52-22:58Z): code 24.1-39.8 tok/s, prose 8.4-14.5 (a ninth, 5.9, waited 14.4 s of its 26.9 on the far
+computer and is left out) against 41-46 / 17.6-19.9 on 11-15 and this laptop alone at 14.2 / 11.6 (readme303 arm 3).
+The published .302 read the same in the same hour (rounds a and c: code 22.6-38.2, prose 9.7-14.6), so this release did
+not cause it; .291-.292 cannot be run against AU any more (two releases behind is cut off). Where the time went, per
+prose reply (`DSD: a tree that flowed is complete`, `flowcmp.py`-style totals over `forwards`): this side's forward
+26.5 ms on 11-15 (abba292 arm 2) against 30.6-45 ms, the guesser 15 against 16-22 ms, and the wait for the far end
+2 ms a reply against 527-2,773 ms; for code this side's 25.7 → 24.5-28.7 ms and the guesser's 13.9 → 12.4-15.6 ms held,
+while the wait went 0 → 45-1,610 ms. Code lost its speed to the far end; prose to both ends, the far end most; which share is the far computer's other work (it held only 29-30 of the 27B's layers on its
+card at 20Z, #3 (j13)) is unread. "Start and finish on this computer" (`dsdwfit`, readme303b arms 2 and 4): code
+20.4-26.3, prose 10.9-12.0 against 29-30 / 13.0-14.8. **Next**: the far end's own step time per forward (#388's
+`far_ms`) beside its `peers_loaded` at the same minute — a far computer slowed by its owner's work is #412's/#449's,
+a slower step at the same placement is a regression to bisect on a link both builds can join.
+
 #### #412 — A busy far card is busy with our own forwards: run its backlog as one
 `P2` · perf-split · **OPEN** (conceptual, tests first) — 2026-11-06 · evidence: `docs/plans/faster_than_local.md` § 13; history: #388
 
