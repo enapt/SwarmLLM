@@ -994,14 +994,14 @@ failure streak, `counted_as` from day one), validated (finite, inside the clamps
 a rig that restarts the node between two identical runs (`tier_1119p` against `tier_1119n` is the shape).
 
 #### #481 — A peer that holds a popular model whole was passed over for a split through it 8x slower
-`P1` · routing · **PARTIAL: (1) priced on main 2026-11-19 but the hand-off still not chosen after a split; (3a) fixed on main; (5) partly (every request answered, an 8 GB card's tail still on the processor); (4) diagnosable; (2), (3b), (3c) open** — 2026-11-19 · history: #3 (j3), #3 (j4), #469, #10, #458
+`P1` · routing · **PARTIAL: (1) priced in 0.3.301 but the hand-off still not chosen after a split; (3a) fixed in 0.3.301; (5) partly (every request answered, an 8 GB card's tail still on the processor); (4) diagnosable; (2), (3b), (3c) open** — 2026-11-19 · history: #3 (j3), #3 (j4), #469, #10, #458
 
 > Seen on the live node 2026-11-19 14:54-15:00Z (v0.3.300, overnight tier run `~/swarmllm-gate/tier_1119n`):
 > Qwen3.6-35B-A3B, the Australian RTX 3060 `aa3d1e66` (132 ms) holds it whole and ran it whole at 35-36 tok/s
 > that morning. Every request went to a split here [0,14) + Australia [14,40): 4.3-4.5 tok/s. Four contributors
 > (diagnosis rule 6):
 >
-> (1) **FIXED on main** — the whole hand-off had no delegated figure, so it was priced from the split's decode
+> (1) **PRICED in 0.3.301 (still not CHOSEN after a split — tier_1119r below)** — the whole hand-off had no delegated figure, so it was priced from the split's decode
 > figure, 152 ms a step of which 132 was our own round trip, spread as 5.86 ms over 26 layers and charged on all 40:
 > 234 ms a token where it delivers ~28. `NodeCandidate::decode_figure_off_our_link` takes the trip out over the
 > width the steps were timed at (`TimedOn::DecodeSteps { layers }`), floored at the per-device prior; the hand-off
@@ -1064,7 +1064,7 @@ a rig that restarts the node between two identical runs (`tier_1119p` against `t
 > only while nothing holds it) counted as giving its layers to a range containing them, in `capacity_charge`.
 >
 > (3) **The split was priced 4x optimistic** — 9.4-10.3 s predicted, 37.3-38.5 s measured: 2.30 tokens a round
-> (`split_tokens_per_round_far_tail`) where the reply ran **159 rounds for 160 tokens**. (3a) **FIXED on main — the
+> (`split_tokens_per_round_far_tail`) where the reply ran **159 rounds for 160 tokens**. (3a) **FIXED in 0.3.301 — the
 > cause was no guesser at all**: the block drafter (1,172 MB with its cache and borrowed head) found 547 MB beside
 > `[0,14)` on the 8 GB card (`block drafter not attached: it does not fit beside one conversation`), and the
 > drafter-room cut (#275) only ever left room for an ENGINE drafter, which Qwen 3.5's families never take. Now the
@@ -1086,15 +1086,16 @@ a rig that restarts the node between two identical runs (`tier_1119p` against `t
 > llama.cpp counts the next-token block among the model's layers (`n_layer_all`), placed and charged with the
 > weights before any context is sized.
 >
-> (4) **Diagnosable on main: a US RTX 5080 (`5bfbd36e`, 16 GB, holds the Gemma 4s and gpt-oss) is never a
-> candidate.** Read 2026-11-19 15:30Z from `/api/admin/peers`: `can_serve_inference: false`, `healthy: true`, 6.7 of
+> (4) **Diagnosable in 0.3.301: a US RTX 5080 (`5bfbd36e`, 16 GB, holds the Gemma 4s and gpt-oss) is never a
+> candidate.** **Read over the wire on 0.3.301, 2026-11-20 01:58Z: `inference_held_because: cooling`** (#440's heat
+> hold) — the reason the 70B had no route that night (#483 (b)). Read 2026-11-19 15:30Z from `/api/admin/peers`: `can_serve_inference: false`, `healthy: true`, 6.7 of
 > 16 GB of its card free, storage at its limit. One of five reasons and none crossed the wire, so its capability now
 > says which (`NodeCapability::inference_held_because`: `graphics_gone`, `stalled`, `metered`, `cooling`,
 > `updating`; absent while it serves; shown at `/api/admin/peers`, never planned by; test
 > `a_node_that_takes_no_inference_work_says_why`). Prior art: Kubernetes' pod conditions carry a `reason` beside
 > `status`. Read it once that computer runs a release with it.
 >
-> (5) **FIXED on main: a split that starts and finishes here failed outright when the first range's spawn filled
+> (5) **FIXED in 0.3.301: a split that starts and finishes here failed outright when the first range's spawn filled
 > the card** (#458's residual (2), with a new contributor). `~/swarmllm-gate/split27_1119n` (main at 79d5f182e,
 > 2026-11-19 15:32-15:47Z, live node stopped): Qwen3.8-27B planned here `[0,21)` + `[63,64)`, Australia `[21,63)`;
 > the spawn split 17 of 21 onto the card, its load read 6,994 MB free and refitted 20 (#365), filling the budget; the
@@ -1106,7 +1107,7 @@ a rig that restarts the node between two identical runs (`tier_1119p` against `t
 > `a_split_spawn_leaves_room_for_the_plans_other_ranges_here` (the growth is refused with nothing noted). Prior art:
 > llama.cpp places every layer of a model in ONE pass over the devices (`llama_model::load_tensors`' `dev_layer`), so
 > no layer is placed after the card is full; here the ranges arrive one by one, so the first leaves the others'
-> share. **Both residuals fixed on main the same evening:** a first range that fits the card WHOLE left nothing
+> share. **Both residuals fixed the same evening (in 0.3.301):** a first range that fits the card WHOLE left nothing
 > (rerun `~/swarmllm-gate/split27_1119p` 16:08Z: `[0,21)` admitted whole, 6,351 of a 6,511 MB budget, the same
 > refusal) — the whole admission now asks `fits_whole_leaving` and splits to leave the room; and a re-plan was refused
 > by its OWN earlier attempt's hold on a peer's worker (Australia `[21,64)` "do not fit beside the copy this node is
@@ -2356,7 +2357,7 @@ largest gossip term is now `ShardAnnounce` (26/h × 21.3 KB = 157 B/s), then `He
 received. Taken an hour after a restart, inside the window where the doubling repeat (2i) is still short: a later read
 at steady state can only be lower. Nothing left of (2j).
 
-**(2m) Demand gossip republished every 30 s for hours — read 2026-11-18 22:22-22:32Z, BUILT 2026-11-19 (on main).** The live node
+**(2m) Demand gossip republished every 30 s for hours — read 2026-11-18 22:22-22:32Z, BUILT 2026-11-19, shipped in 0.3.301.** The live node
 (v0.3.299, idle, up 82-92 min, 6 peers on .299, no parts moving): **in 10.3, out 7.4 MB/h** (`/metrics`, total less
 parts; inside .279's README range). `swarm/regions` is now the largest gossip topic, 4.6 MB/h in and 2.2 out, and is
 ALL `ModelDemandGossip`: 4,026 delivered in ~95 min (~42 a minute, 3.0 on 10-16), each received ~3 times
@@ -5178,7 +5179,7 @@ the commit is the replay we already have: DSD's tree settle keeps the kept guess
 pure chain) and re-reads the rest next round, so `SsmState::rewind_to`'s replay of a PREFIX of the kept rows is exact — no
 gather. Rows ordered best child first, so the likeliest path is the in-place one. Attention layers: the tree's mask and
 RoPE rows (`tree_rope_rows`). A tree check on a recurrent model is never captured (its parents reach the card per call).
-**Stage A, processor half: BUILT 2026-11-19 (on main)** — Qwen 3.5's layers read a whole tree (≤ 32 rows) in one forward,
+**Stage A, processor half: BUILT 2026-11-19, shipped in 0.3.301** — Qwen 3.5's layers read a whole tree (≤ 32 rows) in one forward,
 each row from its parent's state; the tree's end refused until the verdict's take-back (`SsmState::mark_branched`); tests
 exact (every row against its line read alone) and red under three null controls (`docs/invariants/inference.md` § "A
 recurrent layer reads a tree from each row's parent's state"). No coordinator sends one yet (`ModelArch::reads_draft_trees`).
@@ -5198,7 +5199,7 @@ rows for ANY tree (an old gate, gotcha #1144). **Stage D on the CARD rig (2026-1
 both nodes on the RTX 3070): code 21-68% SLOWER, prose 12-30% faster** (decode s, two arms: palindrome 5.48 / 4.10
 against the chain's 3.26 / 3.39, binary tree 5.05 / 5.65 against 4.01 / 4.05, story 13.94 / 13.86 against 15.77 /
 19.63): a tree round ~260 ms against ~190, its check uncaptured (it reads a mask), and fewer kept a round on code.
-So it shipped OFF. **(2) BUILT on main the same evening: a tree only for a reply read as prose**
+So it shipped OFF. **(2) BUILT the same evening, shipped in 0.3.301: a tree only for a reply read as prose**
 (`block_draft::block_trees_for(pipeline::reply_kind(request))`; `SWARMLLM_BLOCK_TREE=1` / `=0` forces either for every
 reply; INFO `DIAG: the block drafter's guesses go as a tree only for a reply read as prose`). Card rig
 (`~/swarmllm-gate/card437_1119d`, 17:08-17:12Z, arms default / chain / default, decode s): the two code prompts read
@@ -7917,7 +7918,7 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-11-18, on main** (#478)
+**Closed 2026-11-18, shipped in 0.3.300** (#478)
 - #478 — `P1` — **A card/processor split's first request could fail "device mismatch in cat, lhs: Cuda, rhs: Cpu".**
   Seen in the v0.3.298 and v0.3.299 release gates' split warm-ups (Qwen2.5-14B whole, 27 layers on the card, the
   processor holding 5..26, the card guessing), never in an earlier gate or the live log. A processor-held layer reads
