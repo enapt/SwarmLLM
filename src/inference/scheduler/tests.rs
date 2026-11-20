@@ -8046,6 +8046,152 @@ fn a_peer_that_cannot_serve_inference_is_not_a_candidate() {
     );
 }
 
+/// **A holder left out before planning is named, with its reason** — one
+/// census line a plan. On 2026-11-20 a 16 GB card holding Llama 3.3 70B was no
+/// candidate for three asks in a row and no line said why (it was cooling); the
+/// peer list from the same minute had to be read. The cooling holder is named
+/// by its own key; a holder of the same part that IS a candidate, and one left
+/// out of one part but admitted to another, are not; nothing left out, no line.
+#[test]
+fn a_holder_left_out_before_planning_is_named_with_its_reason() {
+    #[derive(Clone, Default)]
+    struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let peer = |id: u8, held_because: Option<&str>| {
+        let node = NodeId([id; 32]);
+        let mut cap = slow_peer_capability(&node);
+        cap.can_serve_inference = held_because.is_none();
+        cap.inference_held_because = held_because.map(str::to_owned);
+        let info = PeerInfo {
+            node_id: node.clone(),
+            addresses: vec![],
+            capability: Some(cap),
+            last_seen: chrono::Utc::now(),
+            latency_ms: Some(10),
+            trust_score: 0.8,
+            peer_id_bytes: None,
+            ack_srtt_ms: None,
+            active_request_count: 0,
+            first_seen: 0,
+            verified_transaction_count: 0,
+            is_lan_peer: false,
+            goodput_bytes_per_sec: None,
+            goodput_samples: 0,
+        };
+        (node, info)
+    };
+    // The census line a plan logs, with `cooling` holding the second half
+    // beside `serving`.
+    let census = |cooling: Option<&str>| -> Option<String> {
+        let state = make_shared_state();
+        let local_id = state.identity.node_id().clone();
+        let shard = |index, layer_range| ShardInfo {
+            index,
+            layer_range,
+            size_bytes: 2_000_000_000,
+            hash: [0u8; 32],
+            tensors: vec![],
+        };
+        state.model_registry.register_manifest(make_manifest(
+            "test-model",
+            32,
+            vec![shard(0, (0, 16)), shard(1, (16, 32))],
+        ));
+        let hold = |node: &NodeId, index| {
+            state.model_registry.record_shard_holder(
+                ShardId {
+                    model_id: ModelId("test-model".into()),
+                    index,
+                },
+                node.clone(),
+            )
+        };
+        hold(&local_id, 0);
+        let (serving, serving_info) = peer(2, None);
+        let (held, held_info) = peer(3, cooling);
+        for (node, info) in [(serving, serving_info), (held, held_info)] {
+            hold(&node, 1);
+            state.peer_registry.insert(node.clone(), info);
+            state.connected_node_ids.insert(node);
+        }
+        // Not connected, but it holds the first half too — left out of both.
+        let gone = NodeId([4; 32]);
+        hold(&gone, 0);
+        let log = Captured::default();
+        let writer = log.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(move || writer.clone())
+            .finish();
+        let scheduler = PipelineScheduler::new(state);
+        tracing::subscriber::with_default(subscriber, || {
+            scheduler
+                .assemble_pipeline_for(
+                    &ModelId("test-model".into()),
+                    &local_id,
+                    uuid::Uuid::new_v4(),
+                    Purpose::Route,
+                    None,
+                    crate::types::KeepAsked::Unasked,
+                )
+                .expect("a plan: the local half and the serving peer's");
+        });
+        let text = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+        text.lines()
+            .find(|l| l.contains("DIAG: holders of this model left out before planning"))
+            .map(str::to_owned)
+    };
+
+    let cooling = NodeId([3; 32]).to_string();
+    let serving = NodeId([2; 32]).to_string();
+    let gone = NodeId([4; 32]).to_string();
+    let line = census(Some("cooling")).expect("a census line");
+    assert!(line.contains(&format!("cooling: {cooling}")), "{line}");
+    assert!(line.contains(&format!("not connected: {gone}")), "{line}");
+    assert!(
+        !line.contains(&serving),
+        "a candidate is not left out: {line}"
+    );
+    // The same holders with the second one serving: only the unconnected one.
+    let line = census(None).expect("the unconnected holder");
+    assert!(!line.contains(&cooling) && line.contains(&gone), "{line}");
+}
+
+/// The census names a node only when it is left out of EVERY part it holds,
+/// and names at most `IDS_PER_REASON` a reason, counting the rest.
+#[test]
+fn the_left_out_census_counts_past_its_named_holders() {
+    let mut left_out = super::LeftOut::default();
+    for id in 1..=6u8 {
+        left_out.note(&NodeId([id; 32]), || "not connected".into());
+    }
+    left_out.note(&NodeId([1; 32]), || "cooling".into());
+    left_out.note(&NodeId([9; 32]), || "updating".into());
+    let admitted = NodeId([2; 32]);
+    let census = left_out.census(|n| *n == admitted).expect("a census");
+    let named = |id: u8| census.contains(&NodeId([id; 32]).to_string());
+    assert!(!named(2), "admitted to a part: {census}");
+    assert!(census.contains(" +1"), "five left, four named: {census}");
+    assert!(
+        census.contains(&format!("updating: {}", NodeId([9; 32]))),
+        "{census}"
+    );
+    assert!(
+        !census.contains("cooling"),
+        "the first reason stands: {census}"
+    );
+    assert!(super::LeftOut::default().census(|_| false).is_none());
+}
+
 /// **Several nodes that cover a range between them can stand in for it.**
 ///
 /// A stand-in used to have to hold the whole of a failed segment by itself. On

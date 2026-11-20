@@ -63,6 +63,53 @@ macro_rules! route_info {
     };
 }
 
+/// The holders of a model a plan left out before it was made, and why — one
+/// line a plan (`gather_candidates`). A 16 GB card holding Llama 3.3 70B was
+/// no candidate on 2026-11-20 (it was cooling) and no line said so; reading it
+/// took the peer list from the same minute. Prior art: Kubernetes' scheduler
+/// reports a pod no node takes as a census of what each node failed ("0/3
+/// nodes are available: 1 node(s) had untolerated taint, 2 Insufficient
+/// memory", `FitError`).
+#[derive(Default)]
+struct LeftOut(std::collections::HashMap<NodeId, String>);
+
+impl LeftOut {
+    /// Ids named per reason; the rest are counted.
+    const IDS_PER_REASON: usize = 4;
+
+    /// `node` was left out of a part for `why` — the first reason a node is
+    /// given stands.
+    fn note(&mut self, node: &NodeId, why: impl FnOnce() -> String) {
+        self.0.entry(node.clone()).or_insert_with(why);
+    }
+
+    /// The census, by reason, of the nodes left out of EVERY part they hold —
+    /// a node `admitted` to one part is a candidate — or `None` where none was.
+    fn census(self, admitted: impl Fn(&NodeId) -> bool) -> Option<String> {
+        let mut by_why: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+        for (node, why) in self.0 {
+            if !admitted(&node) {
+                by_why.entry(why).or_default().push(node.to_string());
+            }
+        }
+        let parts: Vec<String> = by_why
+            .into_iter()
+            .map(|(why, mut nodes)| {
+                nodes.sort();
+                let more = nodes.len().saturating_sub(Self::IDS_PER_REASON);
+                nodes.truncate(Self::IDS_PER_REASON);
+                let more = if more > 0 {
+                    format!(" +{more}")
+                } else {
+                    String::new()
+                };
+                format!("{why}: {}{more}", nodes.join(" "))
+            })
+            .collect();
+        (!parts.is_empty()).then(|| parts.join("; "))
+    }
+}
+
 /// PipelineScheduler assembles a distributed inference pipeline
 /// by selecting the best nodes for each layer range.
 #[derive(Clone)]
@@ -5267,6 +5314,25 @@ impl PipelineScheduler {
             .unwrap_or(true)
     }
 
+    /// The peer's own key for why it cannot serve
+    /// (`NodeCapability::inference_held_because`: `cooling`, `updating`, …),
+    /// bounded and with control characters blanked — it is the peer's text.
+    fn why_a_peer_cannot_serve(&self, node_id: &NodeId) -> String {
+        let said = self
+            .shared_state
+            .peer_registry
+            .get(node_id)
+            .and_then(|p| p.capability.as_ref()?.inference_held_because.clone());
+        match said {
+            Some(key) => key
+                .chars()
+                .take(32)
+                .map(|c| if c.is_control() { ' ' } else { c })
+                .collect(),
+            None => "cannot serve".into(),
+        }
+    }
+
     /// A planner's error weighed beside the holders paused for a moment
     /// ([`short_of_memory_beside_paused`]); asks for them only when the error
     /// is a shortfall.
@@ -5515,6 +5581,7 @@ impl PipelineScheduler {
         // First, collect which shard indices each node holds
         let mut node_shards: std::collections::HashMap<NodeId, Vec<u32>> =
             std::collections::HashMap::new();
+        let mut left_out = LeftOut::default();
 
         for shard in &manifest.shards {
             let shard_id = ShardId {
@@ -5527,6 +5594,7 @@ impl PipelineScheduler {
                 // Private mode: skip nodes outside the allowed set
                 if let Some(ref allowed) = allowed_set {
                     if !allowed.contains(&node_id) {
+                        left_out.note(&node_id, || "outside the pool (private mode)".into());
                         continue;
                     }
                 }
@@ -5558,11 +5626,13 @@ impl PipelineScheduler {
                 if let Some(ref o) = route_override {
                     if is_local {
                         if !o.local_holds(shard.index) {
+                            left_out.note(&node_id, || "swarm_route override".into());
                             continue;
                         }
                     } else if o.excludes_peer(&node_id)
                         || !o.peer_holds_shard(&node_id, shard.index)
                     {
+                        left_out.note(&node_id, || "swarm_route override".into());
                         continue;
                     }
                 }
@@ -5573,12 +5643,14 @@ impl PipelineScheduler {
                         .shared_state
                         .holder_blacklisted_for_request(request_id, &node_id)
                 {
+                    left_out.note(&node_id, || "failed this request".into());
                     continue;
                 }
                 if !is_local
                     && !self.shared_state.connected_node_ids.contains(&node_id)
                     && !self.shared_state.peer_reachable_via_relay(&node_id)
                 {
+                    left_out.note(&node_id, || "not connected".into());
                     continue;
                 }
                 // The peer says it cannot run a request at the moment — its
@@ -5598,6 +5670,7 @@ impl PipelineScheduler {
                 // silence as incapacity routes around every peer that has not
                 // upgraded yet.
                 if !is_local && !self.peer_can_serve_inference(&node_id) {
+                    left_out.note(&node_id, || self.why_a_peer_cannot_serve(&node_id));
                     continue;
                 }
                 admitted.push(node_id);
@@ -5631,6 +5704,15 @@ impl PipelineScheduler {
             {
                 node_shards.entry(node_id).or_default().push(shard.index);
             }
+        }
+
+        if let Some(census) = left_out.census(|n| node_shards.contains_key(n)) {
+            route_info!(purpose,
+                model = %manifest.id,
+                %request_id,
+                left_out = %census,
+                "DIAG: holders of this model left out before planning"
+            );
         }
 
         let mut candidates = Vec::new();

@@ -1017,7 +1017,13 @@ else `split_in_room`; `machine_charge`) bisected over the rooms the peer states 
 stated budget); a peer stating neither, as before. Prior art: Kubernetes — a node publishes Allocatable and the
 kubelet's admission runs the scheduler's own `GeneralPredicates` against it; Petals' `cache_tokens_left`. Evidence:
 `docs/invariants/scheduling.md` § "A peer that must load the model is weighed as its spawn weighs it". A/B
-`SWARMLLM_COLD_LOAD_PRICE=driver`. Not field-measured yet: needs peers on the release carrying the field. **(E) the caller is told another computer's advice** ("Raise `resources.max_ram_mb`" — Australia's setting)
+`SWARMLLM_COLD_LOAD_PRICE=driver`. **Field-read 2026-11-20 19:08-19:20Z** (`~/swarmllm-gate/tier_1120c`, this node on the
+release candidate at `-v`, Australia `aa3d1e66` on 0.3.302, no route override): **3 of 3 answered** (`tier_1120a` on 0.3.301:
+0 of 2), here `[0,25)` (10 layers on the card) + Australia `[25,80)`, 2.5 / 2.5 / 3.6 tok/s, first token 91.9 s (cold
+load), then 18.1 and 5.4 s; the up-front question refused **0 of 3**. Australia's slice (~29 GB on a 12 GB card) answers
+637 ms after receipt (median, ack 138 ms) — its processor-held layers bind the round. The 16 GB laptop `5bfbd36e`
+(card room for 30 layers, holds the 70B whole) was no candidate in any of the three: COOLING (#440's hold), read only
+off the peer list — named since by `DIAG: holders of this model left out before planning` (`scheduler::LeftOut`). **(E) the caller is told another computer's advice** ("Raise `resources.max_ram_mb`" — Australia's setting)
 where the re-plan's own finding ("not enough memory in the swarm … not in pieces one chain can run") is the true one;
 `report_after_a_replan` reads it as "no route" (#931) and hands back the refusing holder's words. Also: `route_each_tail`
 returns the `Here` pass's "no valid sink vertex" when both tails fail — a misleading log line. **E FIXED 2026-11-20**:
@@ -2608,7 +2614,8 @@ and pulls) repairs what spreading missed and is not spread again. Now a version 
 (`ManifestSync::note_taken`) and the round's changed arm leaves it to its sender (`manifest_needs_broadcast`'s REQUIRED
 `taken_from_a_peer_at`, `taken_since_we_left`); a full round's repeat and our own changes (#224's return to the agreed
 version) are judged as before. Test `a_version_taken_from_a_peer_is_not_broadcast_as_our_change` (red with the argument
-ignored); rig `outvoted_rig.sh ORDER=late` (#224's heal) PASS on the fix (B took the checked holders' part after 372 s); DIAG `taken_from_peers` on the round's line.
+ignored); rig `outvoted_rig.sh ORDER=late` (#224's heal) PASS on the fix (B took the checked holders' part after 372 s); DIAG `taken_from_peers` on the round's line — **verified live** at the soak's restart on the fix (18:58:17Z, `-v`):
+rounds 2 and 3 sent 0, `taken_from_peers` 2 and 19 (before: round 2 sent 32).
 Left: the copies on DISK stay stale (a model given back keeps its blank-hash `manifest.json`), so a restart after
 the day's window still gossips the disk copy once; a take before the first round (nothing announced yet) is still sent.
 

@@ -282,6 +282,15 @@ delegated split: the delegate declined to lead it — coordinating the same plan
          passed_over_secs (5 min, doubling to 60 while it keeps declining).
          A refused route, a too-long prompt or a late first token passes
          nobody over; `SWARMLLM_DECLINED_LEADS=0` turns it off)
+plan{request_id=…}: … DIAG: holders of this model left out before planning  model= request_id= left_out=
+        (A HOLDER WITH NO `pipeline candidate` LINE: this says why, one line
+         a plan (2026-11-20) — `cooling: <node>; not connected: <a> <b> +3`.
+         Reasons: the peer's own key when it says it cannot serve
+         (`inference_held_because`: cooling, updating, metered, stalled,
+         graphics_gone), `not connected`, `failed this request`, `outside the
+         pool (private mode)`, `swarm_route override`. A node left out of one
+         part and a candidate for another is not listed; four ids a reason,
+         the rest counted. Ejected holders have their own line.)
 plan{request_id=…}: … DIAG: pipeline candidate  node= est_tokens_per_sec= has_gpu= cost_prefill_ms= cost_compute_ms= ...
         (WAS A PEER PASSED OVER? Every routing line of a real request's
          plan carries `plan{request_id=…}` (2026-11-12; a route preview's
