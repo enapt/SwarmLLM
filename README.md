@@ -156,16 +156,16 @@ with an 8 GB NVIDIA RTX 3070 graphics card and an 8-core AMD Ryzen 7 5800H
 processor, on its own or teamed up with volunteers' computers.
 
 <!-- release-check:begin -->
-<!-- from the v0.3.301 release check, timed on the downloaded release -->
+<!-- from the v0.3.301 release check's speed step, timed again on the published release with the machine idle, the check's own figures set aside -->
 **On one computer.** Each model reads a 1,800-token document and writes 128
 tokens about it.
 
 | Model | Runs on | Writing (tokens a second) | Reading (tokens a second) |
 |---|---|---|---|
-| Qwen2.5 Coder 7B | the graphics card | 65–66 | 1,740 |
-| Qwen2.5 14B | card and processor (too big for the card) | 12.6–13.2 | 560–590 |
-| Qwen3 30B-A3B (2-bit) | card and processor (a mixture of experts, too big for the card) | 24.8–25.5 | 220–230 |
-| Llama 3.2 3B | the processor only | 14.9–19.2 | 70–80 |
+| Qwen2.5 Coder 7B | the graphics card | 69–71 | 1,840–1,880 |
+| Qwen2.5 14B | card and processor (too big for the card) | 14.0–14.3 | 450–570 |
+| Qwen3 30B-A3B (2-bit) | card and processor (a mixture of experts, too big for the card) | 27.8–28.2 | 240 |
+| Llama 3.2 3B | the processor only | 18.3–18.5 | 80–90 |
 <!-- release-check:end -->
 
 **Across computers.** The same laptop, in Thailand, asking a volunteer's
