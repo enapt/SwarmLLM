@@ -21,14 +21,17 @@
 //! clock slid to 555 MHz. A piece costs a forward that arrives during it at
 //! most [`PIECE`].
 //!
-//! The hold starts at every forward a worker is handed (a split's reply steps,
-//! this computer's segments and those it serves for others) and ends
-//! [`HOLD_FOR`] after the last, at the next message's arrival (it waits only
-//! between pieces), while the computer is paced for heat
+//! The hold starts at every step of a reply shared with other computers a
+//! worker is handed ([`starts_a_hold`]: this computer's segments, those it
+//! serves for others, and the guesses beside them) and ends [`HOLD_FOR`] after
+//! the last, pauses at a message's arrival (it waits only between pieces), and
+//! ends while the computer is paced for heat
 //! (`pace::work_ahead_may_run`), or for good on a launch that fails. A/B
 //! `SWARMLLM_CARD_CLOCK_HOLD=0`.
 
 use std::time::{Duration, Instant};
+
+use crate::inference::worker_ipc::DaemonMsg;
 
 /// How long one piece keeps the card busy.
 pub(crate) const PIECE: Duration = Duration::from_millis(2);
@@ -58,9 +61,18 @@ pub(crate) struct ClockHold {
 }
 
 impl ClockHold {
-    /// A forward was handed to this worker: hold the card's clocks until
-    /// [`HOLD_FOR`] after it.
-    pub(crate) fn note_forward(&mut self, now: Instant) {
+    /// A message was handed to this worker: one that is a step of a reply
+    /// shared with other computers ([`starts_a_hold`]) holds the card's
+    /// clocks until [`HOLD_FOR`] after it.
+    pub(crate) fn note_message(&mut self, msg: &DaemonMsg, now: Instant) {
+        if starts_a_hold(msg) {
+            self.note_forward(now);
+        }
+    }
+
+    /// A step of such a reply was handed to this worker: hold the card's
+    /// clocks until [`HOLD_FOR`] after it.
+    fn note_forward(&mut self, now: Instant) {
         if !enabled() || self.failed {
             return;
         }
@@ -119,6 +131,35 @@ impl ClockHold {
         }
         self.until = None;
         self.pieces = 0;
+    }
+}
+
+/// Whether `msg` is a step of a reply whose next step comes after a round
+/// trip to another computer — the work a card idles between: a segment's
+/// forward (alone or batched), and the guesses made beside one (a drafter
+/// model's, the file's guess head or block drafter, a far run's stand-in). A
+/// local reply (`Generate`) keeps its card busy itself (a card/processor run
+/// held 1440-1755 MHz, 2026-11-20), and housekeeping is no reply's step. A new
+/// variant is weighed here: the match names every one.
+pub(crate) fn starts_a_hold(msg: &DaemonMsg) -> bool {
+    match msg {
+        DaemonMsg::Forward(_)
+        | DaemonMsg::BatchForward { .. }
+        | DaemonMsg::Draft(_)
+        | DaemonMsg::HeadGuess(_)
+        | DaemonMsg::BlockDraft(_) => true,
+        DaemonMsg::Generate(_)
+        | DaemonMsg::Unload { .. }
+        | DaemonMsg::PlaceRange { .. }
+        | DaemonMsg::ReadCardFree
+        | DaemonMsg::LoadRange { .. }
+        | DaemonMsg::PrefixFetchResult { .. }
+        | DaemonMsg::ExportPrefixSnapshot { .. }
+        | DaemonMsg::AdmitPrompt(_)
+        | DaemonMsg::CancelRequest { .. }
+        | DaemonMsg::ReleaseRequestKv { .. }
+        | DaemonMsg::Pace { .. }
+        | DaemonMsg::Shutdown => false,
     }
 }
 
@@ -183,5 +224,30 @@ mod tests {
             None
         );
         assert!(hold.until.is_none() && hold.since.is_none());
+    }
+
+    /// A split's step starts a hold; housekeeping between replies does not.
+    #[test]
+    fn a_split_step_starts_a_hold_and_housekeeping_does_not() {
+        let batch = DaemonMsg::BatchForward {
+            requests: Vec::new(),
+            activation_lens: Vec::new(),
+        };
+        assert!(starts_a_hold(&batch));
+        for quiet in [
+            DaemonMsg::ReadCardFree,
+            DaemonMsg::Shutdown,
+            DaemonMsg::Pace { pause_permille: 0 },
+            DaemonMsg::CancelRequest {
+                request_id: uuid::Uuid::nil(),
+            },
+        ] {
+            assert!(!starts_a_hold(&quiet));
+        }
+        let mut hold = ClockHold::default();
+        hold.note_message(&DaemonMsg::ReadCardFree, Instant::now());
+        assert!(hold.until.is_none());
+        hold.note_message(&batch, Instant::now());
+        assert_eq!(hold.until.is_some(), enabled());
     }
 }

@@ -9520,7 +9520,14 @@ times (49 ms in one run toward the US, 116-151 in another) are expected to fall 
 - One piece queued at a time, on the device's ONE stream: a forward arriving behind it waits at most `PIECE`.
   Queueing several (or a long one) puts their whole length in front of the next forward.
 - Pieces start only in the worker loop's idle branch, between waits for a message; the hold starts at every
-  `DaemonMsg::Forward` (the admit-coalescing drain too) and lasts `HOLD_FOR` past the last.
+  message `clock_hold::starts_a_hold` names (the admit-coalescing drain too) and lasts `HOLD_FOR` past the last:
+  `Forward`, `BatchForward`, and the guesses made beside a split — `Draft` (a drafter model's worker, which may be
+  the only work on its card while the check runs abroad), `HeadGuess`, `BlockDraft`. The match names every variant,
+  so a new message is weighed there. The `Draft`-only worker's dip is inferred from the same idle pattern, not
+  measured yet.
+- **Not `Generate`**: a reply this computer runs alone keeps its card busy itself. Checked the same evening
+  (`~/swarmllm-gate/clock_local`, the release-check harness on published 0.3.302): the 14B card/processor split
+  (13.4-13.9 tok/s) and the 30B MoE with experts in system memory (19.5-27.3) decoded at 1440-1755 MHz, 50-70 W.
 - A piece ends by the card's `%globaltimer` OR three cycles a nanosecond of `clock64()`, so a timer that stood
   still cannot hold the stream near Windows' two-second watchdog (TDR) — a TDR on this machine has wedged it.
 - No piece while the computer is paced for heat (`pace::work_ahead_may_run`): it is heat.

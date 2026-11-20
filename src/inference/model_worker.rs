@@ -560,9 +560,7 @@ pub async fn run_worker(
         let mut shutdown = false;
         if let Some((msg, payload)) = next_msg {
             pool_may_hold_freed = true;
-            if matches!(msg, DaemonMsg::Forward(_)) {
-                clock_hold.note_forward(std::time::Instant::now());
-            }
+            clock_hold.note_message(&msg, std::time::Instant::now());
             shutdown |= handle_daemon_msg(
                 msg,
                 payload,
@@ -596,9 +594,7 @@ pub async fn run_worker(
             for _ in 0..16 {
                 match ipc_rx.try_recv() {
                     Ok((m2, p2)) => {
-                        if matches!(m2, DaemonMsg::Forward(_)) {
-                            clock_hold.note_forward(std::time::Instant::now());
-                        }
+                        clock_hold.note_message(&m2, std::time::Instant::now());
                         shutdown |= handle_daemon_msg(
                             m2,
                             p2,
