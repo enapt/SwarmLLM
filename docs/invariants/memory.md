@@ -3075,12 +3075,45 @@ about as much as reply timing already does.
 
 The dashboard's "fits on the card" reads the owner's view.
 
-**Still open (FUTURE_WORK #483 (a)).** F2: a split worker the owner asks again
-within 5 s of its own last reply is never weighed for promotion
-(`promotion_is_worth_weighing` reads the worker's own idle). Also open: a tenant
-that is busy mid-reply when the owner asks. The owner's request is then placed
-as before (partly on the processor), and only promotion (F2) brings it back.
-Draining the tenant (Ollama) and preempting it (vLLM) were not taken.
+**Its promotion half (F2, the same day).** A worker placed short of the card
+on one ask stayed there for the owner's next asks if they came less than 5 s
+apart — an agent's loop, a nightly's four. `promotion_is_worth_weighing`
+required the worker's own idle ≥ `vram_make_room_min_idle_secs()`. The floor
+stood in for a race: a request handed the worker just before the retirement,
+registering its reply just after the drain looked, dies with the worker. That
+race is closed at the funnel, so the floor now applies to the swarm's requests
+only (`PromotionInputs::idle_floor_secs`; a peer's request is not charged a cold
+load under continuous load). How the race is closed:
+- every hand-out is stamped under the `workers` map's read guard
+  (`WorkerHandle::handed_out_ms`: `live_worker`, `get_existing`,
+  `get_or_spawn_once`'s two reads);
+- the retirement removes the handle under the write guard, so it sees every
+  stamp before it;
+- `unload_model` sleeps `HAND_OUT_GRACE` (250 ms) past the last stamp before its
+  drain. Every caller registers its reply with no await after the hand-out
+  (`forward_direct`, `generate_attempt`, `draft`, `forward_batch`), so by then
+  the reply is in `responses` and the drain waits for it.
+
+HikariCP's `ConcurrentBag` is the prior art: a borrow and an idle eviction
+contend on one compare-and-set, so the evictor never closes what a borrower
+just took. Here the map's lock is that point, and the grace covers the
+registration that follows.
+
+The owner's card reading (one `nvidia-smi`) is held off for 5 s after a refusal
+(`WorkerHandle::promotion_refused_ms`), so a back-to-back loop on a card that
+stays full reads it at most that often.
+
+Tests:
+- `the_owners_back_to_back_asks_move_a_split_model_to_the_card` (fails with the
+  owner's floor restored);
+- `a_retirement_waits_for_the_request_it_last_handed_the_worker_to` (fails with
+  the grace at 0: the drain shut the worker under a reply registered 50 ms after
+  the hand-out).
+
+**Still open:** a tenant that is busy mid-reply when the owner asks. The
+owner's request is placed as before and promoted at a later ask once the tenant
+is between replies. Draining the tenant (Ollama) and preempting it (vLLM) were
+not taken.
 
 Test: `the_owners_request_takes_the_card_from_a_model_only_the_swarm_used`
 (fails with `idle_secs_for` reading `idle_secs` for the owner: 0 MB reclaimable

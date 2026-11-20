@@ -926,13 +926,22 @@ goes first — no owner, so whoever asks waits behind whoever is busy); BOINC (G
 user is active); vLLM's priority preemption (recompute later — it has nowhere else to run; a swarm does). Taken:
 in-flight protection and the owner's precedence; not taken: preemption. Test
 `the_owners_request_takes_the_card_from_a_model_only_the_swarm_used` (fails with the owner's view switched off).
-Evidence: `docs/invariants/memory.md` § "The card too". **Left in (a):** **F2** — after one ask placed partly on the
-processor, the owner's NEXT asks within 5 s of each other never weigh promotion (`promotion_is_worth_weighing` reads the
-worker's own idle; the benchmark-loop trap), so a nightly's four back-to-back asks keep the first placement. Race to keep
-closed: a request registering between the check and the retirement (`grow_worker` retires on `in_use` alone). The
-`promotion_weighed` read costs an nvidia-smi call (~0.1 s), so a floor-less check needs a rate limit. **Residual** — a
-tenant mid-reply when the owner asks: the owner's request is placed as before, drained (Ollama) or preempted (vLLM)
-never; revisit only if a field report shows it.
+Evidence: `docs/invariants/memory.md` § "The card too". **(a) F2 FIXED 2026-11-20 — the owner's back-to-back asks move a model placed short of the card back onto it.** The
+promotion's 5 s idle floor (`promotion_is_worth_weighing`) now applies to the swarm's requests only
+(`PromotionInputs::idle_floor_secs`): after one ask was placed partly on the processor, the owner's next asks (an agent's
+loop, a nightly's four) never left a 5 s gap, so the model stayed split for all of them. The floor stood in for a race —
+a request handed the worker just before the retirement and registering just after the drain looked — and that race is
+now closed for EVERY retirement, at the funnel: a hand-out is stamped under the `workers` map's read guard
+(`WorkerHandle::handed_out_ms`: `live_worker`, `get_existing`, `get_or_spawn_once`), and `unload_model` waits
+`HAND_OUT_GRACE` (250 ms) past the last before its drain. After a refusal, the owner's card reading is held off for 5 s
+(`promotion_refused_ms`). Prior art: HikariCP's `ConcurrentBag` makes a borrow and an idle eviction contend on one
+compare-and-set (`NOT_IN_USE→IN_USE` vs `NOT_IN_USE→RESERVED`), so the evictor never closes a connection a borrower just
+took; here the map's lock is that one point. Ollama never re-places a loaded runner (`needsReload`). Tests
+`the_owners_back_to_back_asks_move_a_split_model_to_the_card`,
+`a_retirement_waits_for_the_request_it_last_handed_the_worker_to` (each fails with its half switched off). **Residual
+(a)** — a tenant mid-reply when the owner asks: the owner's request is placed as before and promoted at a later ask
+once the tenant is between replies; drained (Ollama) or preempted (vLLM) never; revisit only if a field report shows
+it. **(a) is answered; the entry stays open for (c) and (d).**
 
 (b) **70B: 0 of 2, `LocalMemoryUnavailable`, with a laptop peer online.** By design the caller is told this node's own
 memory refused (`router::report_after_a_replan`: "our own memory shortfall is always reported" — its owner can act on

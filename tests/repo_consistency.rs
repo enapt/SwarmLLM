@@ -9365,7 +9365,12 @@ fn the_growth_accountant_guard_catches_a_re_derived_placement() {
 /// Production statements of `process_pool.rs` that decide "is this worker in
 /// use?" from `responses` directly, i.e. anywhere but `WorkerHandle::in_use`.
 fn bare_worker_in_use_reads(src: &str) -> Vec<(usize, String)> {
-    let production = &src[..src.find("#[cfg(test)]").unwrap_or(src.len())];
+    // Everything behind a `#[cfg(test)]` blanked, lines kept. It cut the file at
+    // the FIRST `#[cfg(test)]` until 2026-11-20 — an indented field attribute at
+    // line ~1010 of 25,000, so the guard scanned the struct definitions and
+    // none of the pool (found writing the hand-out guard below, #483 (a) F2).
+    let production = production_code(src);
+    let production = production.as_str();
     let the_one_place = method_body(production, "    fn in_use(").unwrap_or("");
     let scanned = production.replacen(the_one_place, "", 1);
     statements(&scanned)
@@ -9431,6 +9436,130 @@ fn the_worker_in_use_guard_catches_a_bare_read() {
         1,
         "exactly the wrapped read in `reclaim` — not `in_use` itself, and not \
          the test module: {found:#?}"
+    );
+}
+
+/// Functions of `process_pool.rs` that read a worker out of the `workers` map
+/// and send it NO work: a reading (a bool, one field), a bookkeeping note, the
+/// reclaim's candidate list, and the two retirement checks that ask whether the
+/// handle is still the map's. Their retirements go through `unload_model`,
+/// which waits for hand-outs, not for its own reads. Every other reader hands
+/// the worker to a caller, and stamps it.
+const WORKER_MAP_READERS_THAT_SEND_NO_WORK: &[&str] = &[
+    "whole_model_on_card",
+    "planning_on_card",
+    "vram_reclaim_candidates",
+    "make_room_for_a_longer_prompt",
+    "retirement_decision",
+    "holds_range",
+    "note_decode_step",
+    "classify_worker_error",
+    "context_fits",
+    "card_split_of",
+    "others_on_card_when_placed_mb",
+];
+
+/// How far below the read a hand-out's stamp may sit: `live_worker` reaches it
+/// through a wrapped `filter`/`map` chain and a comment, `get_or_spawn_once`'s
+/// locked re-check through the dead-worker arm.
+const HAND_OUT_STAMP_WITHIN_LINES: usize = 16;
+
+/// Production reads of the `workers` map in `src` that hand a worker out with
+/// no `note_handed_out()` close below them, as (line, enclosing fn).
+fn unstamped_worker_hand_outs(src: &str) -> Vec<(usize, String)> {
+    let production = production_code(src);
+    let production = production.as_str();
+    let sts = statements(production);
+    let stamps: Vec<usize> = sts
+        .iter()
+        .filter(|(_, st)| st.contains(".note_handed_out()"))
+        .map(|(line, _)| *line)
+        .collect();
+    sts.iter()
+        .filter(|(_, st)| st.contains("workers.get("))
+        .filter_map(|(line, _)| {
+            let name = enclosing_fn_name(production, *line).unwrap_or_default();
+            if WORKER_MAP_READERS_THAT_SEND_NO_WORK.contains(&name.as_str()) {
+                return None;
+            }
+            let stamped = stamps.iter().any(|stamp| {
+                *stamp >= *line
+                    && *stamp <= *line + HAND_OUT_STAMP_WITHIN_LINES
+                    && enclosing_fn_name(production, *stamp).as_deref() == Some(name.as_str())
+            });
+            (!stamped).then_some((*line, name))
+        })
+        .collect()
+}
+
+/// **A worker handed out of the pool's map is stamped while the map's read
+/// guard is held** (#483 (a) F2) — `WorkerHandle::note_handed_out`, which
+/// `unload_model` waits `HAND_OUT_GRACE` past before its drain. A request
+/// takes the handle, then registers its reply on its own thread; a retirement
+/// on another thread that drained between the two found nothing in flight and
+/// shut the worker under the reply. HikariCP closes the same race by making a
+/// borrow and an idle eviction contend on one compare-and-set. A new way to
+/// take a worker out of the map that skips the stamp reopens it, and nothing
+/// else would notice: the window is microseconds.
+#[test]
+fn every_worker_handed_out_of_the_pool_is_stamped() {
+    let src =
+        std::fs::read_to_string("src/inference/process_pool.rs").expect("read process_pool.rs");
+    let found = unstamped_worker_hand_outs(&src);
+    assert!(
+        found.is_empty(),
+        "stamp the hand-out with `note_handed_out()` under the map's read guard, \
+         or — if the function sends the worker no work — name it in \
+         `WORKER_MAP_READERS_THAT_SEND_NO_WORK`:\n{found:#?}"
+    );
+    let production = production_code(&src);
+    let production = production.as_str();
+    let reads: std::collections::HashSet<String> = statements(production)
+        .iter()
+        .filter(|(_, st)| st.contains("workers.get("))
+        .filter_map(|(line, _)| enclosing_fn_name(production, *line))
+        .collect();
+    for reader in WORKER_MAP_READERS_THAT_SEND_NO_WORK {
+        assert!(
+            reads.contains(*reader),
+            "`{reader}` no longer reads the workers map — drop it from the list, \
+             so the list names only what it exempts"
+        );
+    }
+}
+
+/// The guard above must fire on a wrapped read with no stamp, and must not fire
+/// on a stamped one, a listed reader, or the test module.
+#[test]
+fn the_hand_out_guard_catches_an_unstamped_read() {
+    let planted = "impl ModelProcessPool {\n\
+        \x20   fn live_worker(&self, m: &ModelId) -> Option<Arc<WorkerHandle>> {\n\
+        \x20       self.workers\n\
+        \x20           .get(m)\n\
+        \x20           .map(|r| {\n\
+        \x20               r.note_handed_out();\n\
+        \x20               r.clone()\n\
+        \x20           })\n\
+        \x20   }\n\
+        \x20   fn holds_range(&self, m: &ModelId) -> bool {\n\
+        \x20       self.workers.get(m).is_some()\n\
+        \x20   }\n\
+        \x20   fn send_it_something(&self, m: &ModelId) {\n\
+        \x20       let h = self\n\
+        \x20           .workers\n\
+        \x20           .get(m)\n\
+        \x20           .map(|r| r.clone());\n\
+        \x20   }\n\
+        }\n\
+        #[cfg(test)]\n\
+        mod tests {\n\
+        \x20   fn t() { let h = p.workers.get(&m).map(|r| r.clone()); }\n\
+        }\n";
+    let found = unstamped_worker_hand_outs(planted);
+    assert_eq!(
+        found.iter().map(|(_, f)| f.as_str()).collect::<Vec<_>>(),
+        vec!["send_it_something"],
+        "exactly the wrapped, unstamped read: {found:#?}"
     );
 }
 

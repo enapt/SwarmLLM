@@ -612,8 +612,17 @@ enum Growth {
 /// `docs/FUTURE_WORK.md` carries it with the measurements that justify it.
 const VRAM_MAKE_ROOM_MIN_IDLE_SECS_DEFAULT: u64 = 5;
 
-/// [`WorkerHandle::owner_last_used`] before the owner's first request.
+/// [`WorkerHandle::owner_last_used`] before the owner's first request, and
+/// [`WorkerHandle::promotion_refused_ms`] before the card first refused it.
 const NEVER_USED: u64 = u64::MAX;
+
+/// How long a retirement waits after the last hand-out of the worker it
+/// retires ([`WorkerHandle::handed_out_ms`]) before it judges whether a
+/// request is still in flight. A request holding the handle registers its
+/// reply without an await in between (`forward_direct`, `generate_attempt`,
+/// `draft`, `forward_batch`), so this is microseconds of work given a quarter
+/// of a second for a thread the scheduler set aside (#483 (a) F2).
+const HAND_OUT_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// How long a worker is idle before peers are told it would give way to
 /// another model's work (`ModelProcessPool::gives_way`, #447). One capability
@@ -702,6 +711,18 @@ struct PromotionInputs {
     /// between two forwards ([`WorkerHandle::in_use`]).
     busy: bool,
     idle_secs: u64,
+    /// The idle time the asker waits for before the worker is weighed: the
+    /// swarm's request waits [`vram_make_room_min_idle_secs`] — a gap in the
+    /// traffic, as before — and the owner's none (#483 (a) F2): the owner's
+    /// back-to-back asks (an agent's loop, a nightly's four) never left one,
+    /// so a model placed short of the card once stayed there for all of
+    /// them. A retirement waits for the request it was last handed to
+    /// ([`HAND_OUT_GRACE`]), which is what the floor stood in for.
+    idle_floor_secs: u64,
+    /// A card reading refused it within the last
+    /// [`vram_make_room_min_idle_secs`] — set only where there is no floor,
+    /// so the card is read at most that often for one worker.
+    refused_lately: bool,
     /// What the card would have to give it, as admission priced it.
     gpu_estimate_mb: u64,
     /// The most this node's card budget could ever be — no other program
@@ -765,14 +786,19 @@ struct PromotionInputs {
 ///   This bullet was written long before it was checked: the function used to
 ///   ask only whether the estimate fit, so a model still pinned was retired,
 ///   respawned on the processor by that same pin, and retired again.
-/// - **Never a worker in use, and not one used inside
+/// - **Never a worker in use, and for the swarm's request not one used inside
 ///   [`vram_make_room_min_idle_secs`].** Unloading kills the subprocess, and a
-///   request that arrives between the check and the kill dies with it. The idle
-///   floor makes that window empty rather than merely unlikely. A model under
-///   continuous load therefore waits for a gap in the traffic — the pin stays
-///   lifted, so the promotion happens at the first one. "In use" includes a
-///   reply holding its cache between two forwards ([`WorkerHandle::in_use`]):
-///   the gap between tokens is not a gap in the traffic.
+///   request that arrives between the check and the kill would die with it.
+///   The retirement itself closes that window: it waits [`HAND_OUT_GRACE`] past
+///   the worker's last hand-out and then for every reply in flight
+///   ([`ModelProcessPool::unload_model`]). The idle floor stays for the swarm's
+///   request — a model under a peer's continuous load waits for a gap in the
+///   traffic rather than charge a peer's request a cold load — and is waived
+///   for the owner's (#483 (a) F2): back-to-back asks never leave a gap, so a
+///   model placed short of the card once stayed there for all of them. "In
+///   use" includes a reply holding its cache between two forwards
+///   ([`WorkerHandle::in_use`]): the gap between tokens is not a gap in the
+///   traffic.
 /// - **Cost the move before making it.** Retiring a worker and then failing
 ///   admission costs a cold start and buys nothing, so the model must fit the
 ///   budget as it stands *now*. An unreadable estimate (0) or an unset budget
@@ -831,7 +857,8 @@ fn promotion_is_worth_weighing(i: &PromotionInputs) -> bool {
         && !i.permanently_cpu_bound
         && !i.reason_still_holds
         && !i.busy
-        && i.idle_secs >= vram_make_room_min_idle_secs()
+        && i.idle_secs >= i.idle_floor_secs
+        && !i.refused_lately
         && i.gpu_estimate_mb != 0
         && (i.ceiling_mb == 0 || i.gpu_estimate_mb <= i.ceiling_mb)
 }
@@ -1234,6 +1261,22 @@ struct WorkerHandle {
     /// until the owner's first. What an owner's request reads as another
     /// model's idle time ([`Self::idle_secs_for`], #483 (a)).
     owner_last_used: AtomicU64,
+    /// When this handle was last taken out of the pool's map — milliseconds
+    /// since [`Self::spawned_at`], 0 at the spawn that hands it out first.
+    /// Stamped while the map's read guard is held
+    /// ([`ModelProcessPool::live_worker`], `get_existing`, `get_or_spawn_once`),
+    /// so a retirement, which removes the handle under the write guard, sees
+    /// every hand-out that came before it and waits [`HAND_OUT_GRACE`] past
+    /// the last for its request to register ([`ModelProcessPool::unload_model`]).
+    /// HikariCP's `ConcurrentBag` closes the same race by making a borrow and an
+    /// idle eviction contend on one compare-and-set (#483 (a) F2).
+    handed_out_ms: AtomicU64,
+    /// When a card reading last refused to move this worker to the card
+    /// ([`ModelProcessPool::promotion_weighed`]) — milliseconds since
+    /// [`Self::spawned_at`]; [`NEVER_USED`] until then. The owner's promotion
+    /// has no idle floor, so this keeps its card reading (one `nvidia-smi`,
+    /// ~0.1 s) to one per [`vram_make_room_min_idle_secs`].
+    promotion_refused_ms: AtomicU64,
     /// Has this worker been given anything that loads weights — a request
     /// ([`Self::register_response`]), a load ahead (`DaemonMsg::LoadRange`) —
     /// or reported a load (`WorkerMsg::ModelLoadTimed`, by the reader)? Until
@@ -2774,6 +2817,39 @@ impl WorkerHandle {
         self.last_used.store(now, Ordering::Relaxed);
         if user == Requester::Owner {
             self.owner_last_used.store(now, Ordering::Relaxed);
+        }
+    }
+
+    fn millis_since_spawn(&self) -> u64 {
+        u64::try_from(self.spawned_at.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    /// The pool handed this worker to a caller just now. Called ONLY under the
+    /// map's read guard ([`Self::handed_out_ms`]).
+    fn note_handed_out(&self) {
+        self.handed_out_ms
+            .store(self.millis_since_spawn(), Ordering::Relaxed);
+    }
+
+    /// How long since the pool last handed this worker out.
+    fn since_handed_out(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(
+            self.millis_since_spawn()
+                .saturating_sub(self.handed_out_ms.load(Ordering::Relaxed)),
+        )
+    }
+
+    /// A card reading just refused to move this worker to the card.
+    fn note_promotion_refused(&self) {
+        self.promotion_refused_ms
+            .store(self.millis_since_spawn(), Ordering::Relaxed);
+    }
+
+    /// Did a card reading refuse to move it within the last `secs`?
+    fn promotion_refused_within(&self, secs: u64) -> bool {
+        match self.promotion_refused_ms.load(Ordering::Relaxed) {
+            NEVER_USED => false,
+            at => self.millis_since_spawn().saturating_sub(at) < secs.saturating_mul(1000),
         }
     }
 
@@ -5414,7 +5490,10 @@ impl ModelProcessPool {
     }
 
     fn get_existing(&self, model_id: &ModelId) -> Option<Arc<WorkerHandle>> {
-        self.workers.get(model_id).map(|r| r.clone())
+        self.workers.get(model_id).map(|r| {
+            r.note_handed_out();
+            r.clone()
+        })
     }
 
     /// The worker for this model, if one is resident AND its process is alive.
@@ -5430,7 +5509,12 @@ impl ModelProcessPool {
         self.workers
             .get(model_id)
             .filter(|h| !h.dead.load(Ordering::Acquire))
-            .map(|r| r.clone())
+            .map(|r| {
+                // Under the read guard: a retirement after this waits for
+                // whatever the caller sends it (`HAND_OUT_GRACE`).
+                r.note_handed_out();
+                r.clone()
+            })
     }
 
     /// Start the global auto-coalescing batch scheduler task. Must be called
@@ -7357,8 +7441,10 @@ impl ModelProcessPool {
     /// tok/s after an unload). Ollama, by comparison, never moves a loaded
     /// runner; it waits for the keep-alive to expire. The read costs one
     /// `nvidia-smi` (~0.1 s), so it is taken only once every guard that needs
-    /// no reading has passed: a demoted worker idle past the floor, of a model
-    /// no larger than the card could ever give.
+    /// no reading has passed: a demoted worker idle past the asker's floor, of
+    /// a model no larger than the card could ever give — and, for the owner's
+    /// request, which has no floor, not refused by a reading within the last
+    /// [`vram_make_room_min_idle_secs`] (`WorkerHandle::promotion_refused_ms`).
     fn promotion_weighed(
         &self,
         model_id: &ModelId,
@@ -7366,12 +7452,19 @@ impl ModelProcessPool {
         permanently_cpu_bound: bool,
         requester: Requester,
     ) -> bool {
+        let floor = vram_make_room_min_idle_secs();
+        let (idle_floor_secs, refused_lately) = match requester {
+            Requester::Swarm => (floor, false),
+            Requester::Owner => (0, handle.promotion_refused_within(floor)),
+        };
         let mut inputs = PromotionInputs {
             short_of_the_card: handle.short_of_the_card(),
             permanently_cpu_bound,
             reason_still_holds: self.cpu_reason(model_id).is_some(),
             busy: handle.in_use(self.conversation_window()),
             idle_secs: handle.idle_secs(),
+            idle_floor_secs,
+            refused_lately,
             gpu_estimate_mb: handle.gpu_estimate_mb,
             ceiling_mb: self
                 .vram_ceiling_source
@@ -7394,7 +7487,11 @@ impl ModelProcessPool {
         let still_needed = handle.gpu_estimate_mb.saturating_sub(inputs.own_card_mb);
         inputs.reclaimable_mb =
             self.reclaimable_vram_mb(model_id, still_needed, inputs.budget_mb, requester);
-        should_return_to_gpu(&inputs)
+        let moves = should_return_to_gpu(&inputs);
+        if !moves {
+            handle.note_promotion_refused();
+        }
+        moves
     }
 
     /// Can this NODE put models on a graphics card at all, memory aside?
@@ -11368,7 +11465,13 @@ impl ModelProcessPool {
         let guest = tenancy.is_guest();
         // Fast path: worker already exists — and, unless this node demoted it
         // to the processor and the card has since made room, that is the answer.
-        let existing = self.workers.get(model_id).map(|h| h.clone());
+        // Stamped under the read guard, as every hand-out is: a retirement
+        // that removes it after this waits for the request it was handed to
+        // (`HAND_OUT_GRACE`).
+        let existing = self.workers.get(model_id).map(|h| {
+            h.note_handed_out();
+            h.clone()
+        });
         if let Some(handle) = existing {
             // A corpse is not the answer to "give me a worker".
             //
@@ -11452,6 +11555,7 @@ impl ModelProcessPool {
                 false
             }
             Some(handle) => {
+                handle.note_handed_out();
                 if guest || !self.worker_should_return_to_gpu(model_id, &handle, segment, requester)
                 {
                     // Another task spawned it while this one waited. Hand it
@@ -12614,6 +12718,8 @@ impl ModelProcessPool {
             last_used: AtomicU64::new(0),
             ran_a_request: AtomicBool::new(false),
             owner_last_used: AtomicU64::new(NEVER_USED),
+            handed_out_ms: AtomicU64::new(0),
+            promotion_refused_ms: AtomicU64::new(NEVER_USED),
             asked_to_load,
             kv_holders: std::sync::Mutex::new(std::collections::HashMap::new()),
             awaiting_first_step: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -14350,7 +14456,19 @@ impl ModelProcessPool {
             // Both displacement paths mitigated this with an idle floor plus a
             // not-busy check, which makes the window small without closing it
             // (`docs/FUTURE_WORK.md`). This closes it, in the one place every
-            // retirement funnels through.
+            // retirement funnels through — once the request that took the
+            // handle just before the remove has REGISTERED. It does so without
+            // an await, but on another thread, so the drain first waits
+            // `HAND_OUT_GRACE` past the last hand-out (stamped under the map's
+            // read guard, so every hand-out before the remove is seen here).
+            // Without it a drain that looked between the hand-out and the
+            // registration found nothing and shut the worker under the reply
+            // (#483 (a) F2, which lets the owner's promotion retire a worker
+            // used a moment ago).
+            let grace_left = HAND_OUT_GRACE.saturating_sub(handle.since_handed_out());
+            if !grace_left.is_zero() {
+                tokio::time::sleep(grace_left).await;
+            }
             let stranded =
                 Self::await_responses_drained(&handle.responses, WORKER_DRAIN_WAIT).await;
             if stranded > 0 {
@@ -16544,6 +16662,103 @@ mod tests {
         pool2.set_vram_budget_mb(6314);
         pool2.set_vram_budget_source(Box::new(|| None));
         assert_eq!(pool2.vram_budget_now(), 6314);
+    }
+
+    /// **The owner's back-to-back asks move a model placed short of the card
+    /// back onto it; the swarm's wait for a gap in the traffic** (#483 (a)
+    /// F2). A tester's nightly asked its 14B four times in a row; the first
+    /// was split across the card and the processor, and the promotion's 5 s
+    /// idle floor kept all four there. A refusal holds the owner's next
+    /// reading off for the floor's length, so the card is not read per ask.
+    #[tokio::test]
+    async fn the_owners_back_to_back_asks_move_a_split_model_to_the_card() {
+        use std::sync::atomic::{AtomicU64, AtomicUsize};
+        let pool = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-483a-f2"));
+        pool.set_gpu_layers(-1);
+        let card = Arc::new(AtomicU64::new(9_000));
+        let reads = Arc::new(AtomicUsize::new(0));
+        {
+            let (card, reads) = (card.clone(), reads.clone());
+            pool.set_vram_budget_source(Box::new(move || {
+                reads.fetch_add(1, Ordering::Relaxed);
+                Some(card.load(Ordering::Relaxed))
+            }));
+        }
+        let fourteen_b = ModelId("owners-14b".into());
+        let a_minute_ago = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(60))
+            .expect("a clock old enough to express the idle time");
+        let mut h =
+            fake_worker_handle_spawned(false, Some(CpuReason::NotEnoughVram), true, a_minute_ago)
+                .await;
+        Arc::get_mut(&mut h).expect("one owner").gpu_estimate_mb = 8_200;
+        // The owner's last reply ended just now.
+        drop(h.register_response(Uuid::new_v4(), dummy_tx(), false, Requester::Owner));
+        assert!(h.idle_secs() < vram_make_room_min_idle_secs());
+
+        assert!(
+            !pool.promotion_weighed(&fourteen_b, &h, false, Requester::Swarm),
+            "a peer's request waits for a gap in the traffic"
+        );
+        assert!(
+            pool.promotion_weighed(&fourteen_b, &h, false, Requester::Owner),
+            "the owner's next ask moves it: the card has room"
+        );
+
+        // The card is held again: refused, and the refusal holds the next
+        // reading off.
+        card.store(1_700, Ordering::Relaxed);
+        assert!(!pool.promotion_weighed(&fourteen_b, &h, false, Requester::Owner));
+        card.store(9_000, Ordering::Relaxed);
+        let before = reads.load(Ordering::Relaxed);
+        assert!(!pool.promotion_weighed(&fourteen_b, &h, false, Requester::Owner));
+        assert_eq!(
+            reads.load(Ordering::Relaxed),
+            before,
+            "no second reading inside the floor after a refusal"
+        );
+        // Past it, the reading is taken again.
+        h.promotion_refused_ms.store(0, Ordering::Relaxed);
+        assert!(pool.promotion_weighed(&fourteen_b, &h, false, Requester::Owner));
+
+        // Mid-reply, nobody moves it.
+        let busy = Uuid::new_v4();
+        h.note_conversation(busy);
+        assert!(!pool.promotion_weighed(&fourteen_b, &h, false, Requester::Owner));
+    }
+
+    /// **A retirement waits for the request it last handed the worker to**
+    /// (#483 (a) F2). The hand-out and the reply's registration are on the
+    /// request's thread, the removal and the drain on another: a drain that
+    /// looked between the two found nothing in flight and shut the worker
+    /// under the reply. Here the request registers 50 ms after taking the
+    /// handle, well inside `HAND_OUT_GRACE`, and holds its reply 300 ms.
+    #[tokio::test]
+    async fn a_retirement_waits_for_the_request_it_last_handed_the_worker_to() {
+        use std::sync::atomic::AtomicBool;
+        let p = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-483a-hand-out"));
+        let m = ModelId("handed-out".into());
+        let h = fake_worker_handle_spawned(false, None, true, std::time::Instant::now()).await;
+        p.workers.insert(m.clone(), h);
+        let taken = p.live_worker(&m).expect("the worker is resident");
+        let replied = Arc::new(AtomicBool::new(false));
+        let request = {
+            let replied = replied.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                let (guard, _) =
+                    taken.register_response(Uuid::new_v4(), dummy_tx(), false, Requester::Owner);
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                replied.store(true, Ordering::Release);
+                drop(guard);
+            })
+        };
+        p.unload_model(&m).await;
+        assert!(
+            replied.load(Ordering::Acquire),
+            "the worker was shut under a reply it had just been handed"
+        );
+        request.await.expect("the request task ran");
     }
 
     /// **A model sent to the processor while another program held the card
@@ -20079,6 +20294,8 @@ mod tests {
             last_used: AtomicU64::new(0),
             ran_a_request: AtomicBool::new(false),
             owner_last_used: AtomicU64::new(NEVER_USED),
+            handed_out_ms: AtomicU64::new(0),
+            promotion_refused_ms: AtomicU64::new(NEVER_USED),
             asked_to_load: Arc::new(AtomicBool::new(false)),
             kv_holders: std::sync::Mutex::new(std::collections::HashMap::new()),
             awaiting_first_step: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -24843,6 +25060,8 @@ mod admission_tests {
             reason_still_holds: false,
             busy: false,
             idle_secs: 300,
+            idle_floor_secs: VRAM_MAKE_ROOM_MIN_IDLE_SECS_DEFAULT,
+            refused_lately: false,
             gpu_estimate_mb: 2200,
             ceiling_mb: 0,
             own_card_mb: 0,

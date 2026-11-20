@@ -58,6 +58,7 @@ A resource taken before an `.await` is returned by a guard that releases on DROP
   - `asking` is REQUIRED from `vram_reclaim_candidates` through both reclaims and every planner reader (`fits_in_budget`, `split_budget_for_planning`, `serves_on_cpu`, …).
   - `register_response` REQUIRES the requester.
   - Never mid-reply (`in_use`).
+  - Promotion's idle floor binds the swarm's request only (`PromotionInputs::idle_floor_secs`, F2). The owner's back-to-back asks move a split model to the card; after a refusal the card is read again only once the floor's time has passed (`promotion_refused_ms`).
 
 → `docs/invariants/memory.md` § "The contribution level caps the swarm's work, not the owner's prompt (2026-09-26)"
 
@@ -77,6 +78,10 @@ Code waiting for a subprocess handles it dying instead (`spawn_worker` races `ch
 
 - Idle time starts at a reply's END (`ResponseGuard::used_until_now`, set only by `register_response`, never a peer's question).
 - **`WorkerHandle::in_use` is the single answer to "is this worker in use?"** — a response in flight OR a conversation held between forwards (`kv_holders`, `CONVERSATION_GAP_SECS`); promotion, both reclaims and `models_with_inflight_requests` ask it. Guard: `whether_a_worker_is_in_use_is_decided_in_one_place`. A forward past the prompt pass with no conversation is refused (`model_worker::forward_lacks_its_conversation`).
+- **A retirement waits for the request it last handed the worker to** (#483 (a) F2, HikariCP's borrow/evict CAS):
+  - Every hand-out is stamped under the `workers` read guard (`WorkerHandle::handed_out_ms`: `live_worker`, `get_existing`, `get_or_spawn_once`).
+  - `unload_model` waits `HAND_OUT_GRACE` past the last stamp before its drain.
+  - A new way to take a handle out of the map stamps it.
 - **A prompt pass awaiting its first step keeps its model from the IDLE unload only** (#448 (b): `ModelProcessPool::models_awaiting_a_first_step`, read by `try_idle_vram_unload`, up to `kv_cache::PROMPT_PASS_HOLD`) — never `in_use`.
 - **A pass whose sender or coordinator left the swarm is released** (#448 (d)): `PassParties` SEEN since the pass began and absent from `SharedState::still_in_the_swarm` for `PASS_PARTY_GONE_AFTER` (300 s) → `release_abandoned_prompt_passes`, from the idle tick before the unload.
 
