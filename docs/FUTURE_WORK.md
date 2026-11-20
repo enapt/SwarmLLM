@@ -4445,6 +4445,14 @@ after the contention has cost a piece. Unmeasured, same mechanism: the owner's o
 holds for a slice served to a peer — a change must measure that too. **Kill/keep line**: on, the 14B flow within 2%
 of off AND the 27B's forward ≤ 30 ms. Prior art: NVIDIA's time-slicing between contexts (MPS exists to share a card
 without it); filler work costs only up to its own length on its own stream ("Reducing GPU idle time").
+Searched again 2026-11-20 for holding clocks only while no other process uses the card: **none found**. Locked clocks
+(`nvidia-smi --lock-gpu-clocks`, NVML `nvmlDeviceSetGpuLockedClocks`) need an administrator and are refused on some
+GeForce cards (NVML `NO_PERMISSION`/"not supported" in NVIDIA's forums) — never a user's default. NVML's process view
+cannot say "busy now": under WDDM per-process figures read "not available", `GetComputeRunningProcesses` lists who
+holds a context, not who has work in flight, and NVIDIA calls `GetProcessUtilization` unreliable with processes
+side by side. Stream priority acts inside one process only (GCAPS, arXiv 2406.05221); green contexts partition one
+process's SMs. vLLM, SGLang, TensorRT-LLM, llama.cpp and Ollama document no keep-alive piece. So the signal is ours to
+send between our own processes — (b).
 Evidence: `docs/invariants/inference.md` § "A card between a split's forwards keeps its clocks".
 
 #### #488 — A split's head that runs part of its layers on the processor puts its drafter in system memory, where a guess takes 54 ms
