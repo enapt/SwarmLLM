@@ -933,10 +933,24 @@ peer "at its word" (`max_hostable_layers` 50 with our margin; face value ~60 + t
 weigh (`peer_load_refusal`) refused: its machine share of a fresh [20,80) is 25,862 MB against the swarm's RAM budget of
 22,120 MB — 54 layers from 20 would load. The re-plan then found NO chain ("room for all 80 of its layers between
 them, but not in pieces one chain can run": Australia 51, here all 28 it holds, Proxmox 7 of the 36 it holds), though
-here [0,28) + Proxmox [28,32) + Australia [32,80) (48) reads as feasible from those counts. Two defects, each
-stopping the 70B: (D1) the peer's face-value room exceeds what its own admission honours (#219/#447's invariant);
-(D2) the re-plan after an honest "54 from 20" finds no route. Both being traced (2026-11-20); the US laptop holding
-the 70B was not a candidate at all — a third question. Australia had restarted 8.5 min before (its update to 0.3.301).
+here [0,28) + Proxmox [28,32) + Australia [32,80) (48) reads as feasible from those counts. **Corrected the same
+hour — the first reading here ("two defects, each stopping the 70B") was wrong.** Traced (two read-only agents, the
+claims acted on re-read): **the re-plan was RIGHT** — this node's own fresh run is bounded at 25 layers (its "room for
+all 28" in the error is `short_of_memory`'s display fallback, not the planner's figure), Australia held to its own
+"54 from 20" (`RangeWeights::ceiling_of_a_fit` → a total of ~51, the head charged at the end) can only start at ~29,
+and nobody else holds 25-28, so no chain fits the holders' real memory. The 16 GB laptop holding the 70B was left out
+correctly: it reported `can_serve_inference: false`, `inference_held_because: cooling` (#440's heat hold). With it
+cooling, the swarm had no room for the 70B — the tester's 0 of 2 the night before fits the same capacity (INFERRED).
+What IS wrong, neither of which stops the 70B: **(D1) a peer's room is oversold at face value** — the planner turns
+its free MB into layers at weights + THIS prompt's cache (`max_hostable_layers`, `layers_beside_card`, scheduler ~5836),
+while its admission charges a COLD load's machine share (`machine_charge`: KV at `ADMISSION_KV_CONTEXT`, process
+overhead, host-resident tensors) and a card share under the reserve (`split_room_bytes`): ~6 layers apart here, which
+the 1.2 margin hides until the face-value rung spends it — one wasted attempt (~0.5 s) before the re-plan. Fix: price a
+peer's COLD range with the admission's own estimator (`segment_cost_curve` → `layers_that_fit`), one formula both
+sides. **(E) the caller is told another computer's advice** ("Raise `resources.max_ram_mb`" — Australia's setting)
+where the re-plan's own finding ("not enough memory in the swarm … not in pieces one chain can run") is the true one;
+`report_after_a_replan` reads it as "no route" (#931) and hands back the refusing holder's words. Also: `route_each_tail`
+returns the `Here` pass's "no valid sink vertex" when both tails fail — a misleading log line.
 
 (c) **The shared 14B: `ModelIncompleteInSwarm`.** No change in 0.3.298..0.3.301 found that makes a correctly announced
 split read as incomplete. Producers: `SharedState::no_route_error` (no reachable holder of ANY part),
