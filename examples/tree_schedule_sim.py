@@ -291,6 +291,109 @@ def flow(truth, tokens, link, drafter, per_step=32, tree_most=1024, head=(13.0, 
         pending.append((t + one_way + link["wire_row"] * add, add, R + min(truth.covered(R, m), depth) + 1))
 
 
+def flow_ring(truth, tokens, drafter, head, stages, hops, wire_row=0.3, per_step=24, tree_most=1024, out_most=None):
+    """`flow` through K card slices in a ring (`docs/plans/small_slices.md` step 1a, 2026-11-20): the head
+    drafts and runs its slice, each forward then goes slice to slice — `stages` is each later slice's
+    forward price (fixed ms, ms a row), the LAST one walks — and the walk's verdict comes back to the head.
+    `hops` are the one-way times: head → stages[0], stages[i-1] → stages[i], …, the tail → the head (ids
+    only, so no wire time on that one). Every slice serves its forwards one at a time in order (no merge,
+    as today). With one stage and `hops = [rtt/2, rtt/2]` it IS `flow(.., merge=False)` (`ring` checks it).
+    A chain carries at most 8 forwards out today (`forward_streams::MAX_STREAM_WINDOW`; 12 to one peer,
+    `docs/invariants/scheduling.md` § the flow's window), so `ring` prints W = 8 beside the best W.
+    Prior art: SpecPipe (arXiv 2504.04104) prices a pipelined tree the same way — `E(T) = t + (1 − P(w))·m·t`,
+    the miss penalty linear in the pipeline's depth."""
+    assert len(hops) == len(stages) + 1
+    t, R, m, depth = 0.0, 0, 0, 0
+    free = [0.0] * len(stages)
+    tail_f = 0
+    verdicts = []  # (heard at the head, confirmed position)
+    answers = []  # when the head hears each forward answered
+    while True:
+        while verdicts and verdicts[0][0] <= t:
+            heard, f = heapq.heappop(verdicts)
+            if f >= tokens:
+                return tokens / heard * 1000.0
+            if f > R:
+                m = min(reroot(truth, R, m, f), tree_most)
+                depth = max(depth - (f - R), 1) if m else 0
+                R = f
+        if m >= tree_most:
+            t = verdicts[0][0] if verdicts else t + 1.0
+            continue
+        if out_most is not None:
+            answers[:] = [a for a in answers if a > t]
+            if len(answers) >= out_most:
+                t = min(answers)
+                continue
+        add = min(per_step, tree_most - m)
+        t += drafter["call"] + drafter["step32_ms"] * add / 32 + head[0] + head[1] * add
+        m += add
+        depth += 1
+        reach = R + min(truth.covered(R, m), depth) + 1
+        at = t
+        for i, (fixed, per_row) in enumerate(stages):
+            start = max(free[i], at + hops[i] + wire_row * add)
+            free[i] = start + fixed + per_row * add
+            at = free[i]
+        heard = at + hops[-1]
+        answers.append(heard)
+        if reach > tail_f:
+            tail_f = reach
+            heapq.heappush(verdicts, (heard, reach))
+
+
+def set_profile(ranks):
+    """Swap the acceptance profile (`P`, the rank probabilities; the rest is a miss)."""
+    global P, PROBS
+    P = ranks
+    PROBS = enumerate_tree()
+
+
+# A miss rate a token like the 14B pair's measured ones (#411 / small_slices.md § 2: m 0.09 prose, 0.0125 code).
+PROSE = [0.745, 0.10, 0.04, 0.02]
+CODE = [0.93, 0.035, 0.015, 0.0075]
+
+
+def ring_main(seeds):
+    """Step 1a of `docs/plans/small_slices.md`: three card slices in a ~290 ms ring against two at 130 ms."""
+    tokens = 400
+    near = dict(DRAFTERS["card"], call=3.0, step32_ms=13.3)
+    head, far = (8.0, 0.2), (26.5, 0.15)  # the "measured" prices of `main`'s #412 table (the 14B's halves)
+    caps = (6, 8, 12, 16, 24, None)
+
+    def best(profile, stages, hops):
+        set_profile(profile)
+        got = {}
+        for w in caps:
+            got[w] = statistics.mean(
+                flow_ring(Truth(s), tokens, near, head, stages, hops, out_most=w) for s in seeds)
+        w = max(got, key=got.get)
+        return got[w], w, got
+
+    # The check: one stage reproduces `flow(.., merge=False)`.
+    set_profile(PROSE)
+    link = dict(LINKS["far 425 ms"], rtt=130)
+    a = statistics.mean(flow(Truth(s), tokens, link, near, per_step=24, head=head, tail=far, merge=False,
+                             out_most=6) for s in seeds)
+    b = statistics.mean(flow_ring(Truth(s), tokens, near, head, [far], [65, 65], wire_row=link["wire_row"],
+                                  out_most=6) for s in seeds)
+    print(f"check: flow {a:.2f} vs flow_ring {b:.2f} (two computers, 130 ms, W=6)")
+    shapes = [
+        ("2 slices, 130 ms (TH-AU, the measured case)", [far], [65, 65]),
+        ("2 slices, 290 ms (one far computer)", [far], [145, 145]),
+        ("3 slices, 290 ms ring (TH-AU-US)", [far, far], [65, 80, 145]),
+        ("3 slices, 290 ms, thirds priced 2/3", [(19.0, 0.12), (19.0, 0.12)], [65, 80, 145]),
+        ("3 slices, 60 ms ring (one region)", [far, far], [20, 20, 20]),
+        ("4 slices, 60 ms ring (one region)", [far, far, far], [15, 15, 15, 15]),
+    ]
+    for name, stages, hops in shapes:
+        line = []
+        for pn, profile in (("prose", PROSE), ("code", CODE)):
+            v, w, got = best(profile, stages, hops)
+            line.append(f"{pn} {v:5.2f} (W={w}; W=8 {got[8]:5.2f})")
+        print(f"{name:42s} " + "  ".join(line))
+
+
 def stream(truth, tokens, link, drafter, window=6, send_most=64, tree_most=224, seed_most=224, pace=True):
     """Self-contained tree checks, several in flight, each rooted at the
     confirmed reply with the tree as grown so far; the drafter grows two steps
@@ -371,6 +474,9 @@ DRAFTERS = {
 
 def main():
     tokens = 400
+    if len(sys.argv) > 1 and sys.argv[1] == "ring":
+        ring_main(range(int(sys.argv[2]) if len(sys.argv) > 2 else 20))
+        return
     seeds = range(int(sys.argv[1]) if len(sys.argv) > 1 else 20)
     print(f"tok/s over {tokens} tokens, mean of {len(seeds)} replies")
     for ln, link in LINKS.items():

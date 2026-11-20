@@ -78,6 +78,34 @@ Each decides whether a later step is built.
 - **1d** The long-loop misfit, in the same sim: vary `live_most` and the uplink separately at 308 ms and see which
   closes the gap to 11.7 / 27.
 
+**Results, 2026-11-20** (`python3 -I examples/tree_schedule_sim.py ring 12` and the same `flow_ring` at the live-row
+budget; prose profile, the 14B pair's measured prices; `flow_ring` with one far stage reproduces `flow` exactly,
+20.73 = 20.73):
+
+| shape (prose, tok/s) | 128 live rows, window 8 (today) | 256 live rows, window 12 |
+|---|---|---|
+| 2 slices, 130 ms (measured 17.8-20.5) | 19.3 | 14.1 |
+| 2 slices, 290 ms | 12.4 | 13.5 |
+| **3 slices, 290 ms ring (TH → AU → US)** | **11.2** | 12.5 |
+| 3 slices, 60 ms ring (one region) | 20.0 | 14.2 |
+| 4 slices, 60 ms ring | 19.1 | 14.1 |
+| 6 slices, 90 ms ring | 14.3 | 14.0 |
+
+- **1a: step 4 survives** — three slices at 290 ms read 11.2 (kill line 8), about the 14B whole on one card
+  (11.0-11.3). The loop's length costs, the slice count barely: one far computer at 290 ms reads 12.4, three
+  slices 11.2; in one region three or four slices read 19-20 — each node a third or a quarter, ~1.75x one card.
+- **1d: the long-loop misfit is the live-row budget.** At 128 rows (`SWARMLLM_FLOW_LIVE`, today's) the sim reads
+  11.8-11.9 at 308 ms against 11.7-11.8 measured; four times the wire cost a row moves it only 11.9 → 11.4. The
+  budget does not scale with the loop: 128 is right at 130 ms (more rows HURT there — the field's "bigger sends
+  lost", three sittings), 256 with a window of 12 reads ~10% more at 290-308 ms. → a small lever: size the live
+  rows and the chain window (`forward_streams::MAX_STREAM_WINDOW`, 8) by the measured loop; the window is a
+  per-hop limit both ends must agree on, so a feature bit, gated at the sender. Field check on the US laptop
+  (272 ms) once it holds a dense model with a drafter.
+- **1c: not built** — the drafter off the head reads 1.01-1.10x (prose and code, 130 and 290 ms): with the
+  measured prices the far slice already sets the pace (~30 ms a forward against the head's ~26).
+- Caveat: the sim's walk advances at most one level a forward (the real flow three), so its CODE figures are
+  capped (27.8 at 130 ms against 40-43 measured); prose is the calibrated one.
+
 ### Step 2 — BUILD: the guesser runs where the model's last layers are (Qwen 3.5 / 3.6 / 3.8 first)
 
 - **Why first**: the most popular family (Qwen3.8-27B, Qwen3.6-35B-A3B) takes no separate drafter and no flow;
