@@ -1510,9 +1510,20 @@ What a change here must keep:
   which layer, by what it counted — and the peer's text goes to the DIAG log
   (`peer_said`). Prior art: Kubernetes' scheduler reports a pod no node takes in its own
   words, a census of what each node lacked ("0/3 nodes are available: 2 Insufficient
-  memory"), never a kubelet's advice to its operator. Not covered: a refusal that arrives
-  AT a forward (a peer older than `PROMPT_ADMISSION`, or one whose forward refuses after a
-  "go ahead") still carries the peer's words; those paths carry no figures to word.
+  memory"), never a kubelet's advice to its operator. **A refusal that arrives AT a forward**
+  (a peer older than `PROMPT_ADMISSION`, or a forward refused after a "go ahead") is told the
+  same way (2026-11-20): `router::holders_refusal_for_the_caller`, at the one writer of
+  `HoldersDeclined`'s reason. A peer's words that speak of "this node" or "this computer"
+  describe the PEER to its owner — every refusal a peer addresses to whoever asked speaks
+  of "this machine" (busy, cooling, metered, updating, the swarm-use rule) and passes as it
+  is. The figures our own writers put in fixed phrasing are told in ours: what would load
+  of the layers it was sent (`peer_load_refusal`), the range a growth could not add
+  (`grow_worker`), the prompt its conversation memory had no room for and the most it
+  takes (`prompt_refusal_message`), a load refused at the forward (`ram_refusal_words`);
+  anything else naming "this node" is "it could not take the part of the model it was
+  sent; its reason is in this computer's log", where `DIAG: a holder's refusal, worded for
+  its own owner` keeps the peer's text. A writer reworded falls to that sentence, never to
+  the peer's advice. Test `a_holders_refusal_at_a_forward_reaches_the_caller_in_our_words`.
 - **Both tails failing reports the pass that did not fail for its own restriction**
   (#483 (b) E): `parallax::route_each_tail` returns the far pass's error where the here
   pass found only `NO_SINK` — a node not holding the last layers has no tail here by

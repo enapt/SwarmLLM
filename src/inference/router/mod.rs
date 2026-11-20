@@ -281,6 +281,95 @@ fn refusal_in_the_holders_words(err: &SwarmError) -> String {
         .to_string()
 }
 
+/// A holder's refusal as the CALLER hears it — the forward's half of #483 (b)
+/// E. A refusal arriving at a forward carries the peer's own words, and where
+/// it speaks of "this node" or "this computer" it describes the PEER to its
+/// own owner: "this node's budget allows 22120 MB … Raise
+/// `resources.max_ram_mb`", "need about 330 MB more than this node has left —
+/// another holder will have to take that part", "free memory on this node".
+/// A caller read the Australian computer's setting as theirs to raise
+/// (2026-11-20). Those are told in OUR words with the figures they carry (the
+/// layers it was sent, how many would load, the prompt it had no room for);
+/// the peer's own go to the log. What a peer addresses to whoever asked — "this
+/// machine is cooling down", "… and yours shares 0" — passes as it is: every
+/// such refusal speaks of "this machine" (`dispatch::peer_work_refusal` and its
+/// siblings, `SwarmUse::peer_refusal`). Prior art: Kubernetes' scheduler words
+/// an unplaceable pod's failure itself, never a kubelet's advice to its
+/// operator — E's rule for the up-front refusal (`PeerRefusal::in_our_words`).
+/// The figures are read from our own writers' fixed phrasing, as
+/// `error::reclassify_flattened_error` reads `SwarmError`'s prefixes.
+fn holders_refusal_for_the_caller(words: &str) -> String {
+    if !(words.contains("this node") || words.contains("this computer")) {
+        return words.to_string();
+    }
+    // `process_pool::peer_load_refusal` / a load's refusal at the forward.
+    if let Some((from, end, fit)) = layers_that_would_load(words) {
+        let asked = end.saturating_sub(from);
+        return if fit == 0 {
+            format!(
+                "it has no room to load the {asked} layers of the model it was sent, from layer \
+                 {from}"
+            )
+        } else {
+            format!(
+                "it has room to load {fit} of the {asked} layers of the model it was sent, from \
+                 layer {from}"
+            )
+        };
+    }
+    // `model_worker::prompt_refusal_message`: its conversation memory.
+    if let Some(tokens) = number_after(words, "Not enough free memory on this node for a ")
+        .filter(|_| words.contains("-token prompt"))
+    {
+        let mut told = format!("it has no room for this {tokens}-token conversation");
+        if words.contains(" right now") {
+            told.push_str(" while its memory is in use; try again in a moment");
+        } else if let Some(fits) = number_after(words, "up to about ") {
+            told.push_str(&format!(
+                " — it takes conversations of up to about {fits} tokens"
+            ));
+        }
+        return told;
+    }
+    // `ModelProcessPool::grow_worker`: a range it could not add.
+    if let Some((from, end)) = layer_range_after(words, " layers ") {
+        return format!(
+            "it has no room left to load layers {from}..{end} of the model it was sent"
+        );
+    }
+    // `process_pool::ram_refusal_words` alone: a load refused at the forward.
+    if words.contains("this node's budget") {
+        return "it has no room in its memory to load the part of the model it was sent".into();
+    }
+    "it could not take the part of the model it was sent; its reason is in this computer's log"
+        .into()
+}
+
+/// The number at the start of `text` past `marker`.
+fn number_after(text: &str, marker: &str) -> Option<u32> {
+    let rest = &text[text.find(marker)? + marker.len()..];
+    let digits = rest.chars().take_while(char::is_ascii_digit).count();
+    rest[..digits].parse().ok()
+}
+
+/// `a..b` at the start of `text` past `marker`.
+fn layer_range_after(text: &str, marker: &str) -> Option<(u32, u32)> {
+    let rest = &text[text.find(marker)? + marker.len()..];
+    let (from, rest) = rest.split_once("..")?;
+    let from = from.parse().ok()?;
+    let digits = rest.chars().take_while(char::is_ascii_digit).count();
+    Some((from, rest[..digits].parse().ok()?))
+}
+
+/// "Of layers a..b of the model, n would load here." — the closing sentence of
+/// a load's refusal (`process_pool::peer_load_refusal`).
+fn layers_that_would_load(text: &str) -> Option<(u32, u32, u32)> {
+    let (from, end) = layer_range_after(text, "Of layers ")?;
+    let fit = number_after(text, " of the model, ")?;
+    text.contains(" would load here")
+        .then_some((from, end, fit))
+}
+
 /// What the caller hears when a re-plan after a refusal failed too — `first`
 /// is our own memory shortfall, a peer's context limit, or a peer that said no.
 ///
@@ -398,7 +487,19 @@ pub(crate) fn report_after_a_replan(
         None => SwarmError::HoldersDeclined {
             model_id: model_id.to_string(),
             reason: paused.unwrap_or_else(|| {
-                refusal_in_the_holders_words(if declined_again { &later } else { &first })
+                let theirs =
+                    refusal_in_the_holders_words(if declined_again { &later } else { &first });
+                let ours = holders_refusal_for_the_caller(&theirs);
+                if ours != theirs {
+                    tracing::info!(
+                        model = model_id,
+                        peer_said = %theirs,
+                        told = %ours,
+                        "DIAG: a holder's refusal, worded for its own owner — the caller is told \
+                         it in ours"
+                    );
+                }
+                ours
             }),
         },
     }

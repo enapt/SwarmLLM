@@ -1026,8 +1026,12 @@ what was asked; the peer's text to the log), a re-plan held to refusals that cou
 own `SwarmShortOfMemory` (`SharedState::peer_refusals_counted_loads`; #479's busy holder and #931's cache moment still
 read as declined), and both tails failing report the pass not failing for its own restriction. Prior art: Kubernetes'
 scheduler words an unplaceable pod's failure itself, a census per node ("0/3 nodes are available: 2 Insufficient
-memory"), never a kubelet's advice. Left: a refusal arriving AT a forward (an older peer, or a forward refused after a
-"go ahead") still carries the peer's own words — it carries no figures to word. **The COOLING holder FIXED
+memory"), never a kubelet's advice. **The forward's half FIXED 2026-11-20 evening**: a refusal arriving AT a forward (an older
+peer, or a forward refused after a "go ahead") is told in our words too — `router::holders_refusal_for_the_caller`
+reads the figures our own writers put in fixed phrasing (what would load of the layers sent, the range a growth could
+not add, the prompt a conversation memory had no room for) from a peer's words that speak of "this node" or "this
+computer" (its owner's), the peer's text to the log; a refusal addressed to whoever asked ("this machine …") passes.
+Test `a_holders_refusal_at_a_forward_reaches_the_caller_in_our_words`. **The COOLING holder FIXED
 2026-11-20**: `SwarmShortOfMemory`'s "trying again won't help" did not know a holder was only paused (#440's heat hold;
 #444's update drain) — the 70B's laptop was. Both writers now weigh the connected holders paused for a moment
 (`Scheduler::holders_paused_for_a_moment`, `error::HolderPause`) and, where the layers they hold would close the gap

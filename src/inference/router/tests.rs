@@ -572,28 +572,24 @@ fn a_holder_that_said_no_is_not_reported_as_gone() {
         match super::report_after_a_replan(hand_off(), later, "m", None, false) {
             SwarmError::HoldersDeclined { model_id, reason } => {
                 assert_eq!(model_id, "m");
-                assert!(
-                    reason.starts_with("Not enough free memory on this node"),
-                    "{reason}"
-                );
+                assert_eq!(reason, "it has no room for this 43-token conversation");
             }
             other => panic!("a holder that said no was reported as {other}"),
         }
     }
-    // The wrapped refusal comes back in the holder's own words, its own
-    // brackets intact and the wrapper's unmatched one gone.
+    // The wrapped refusal is read past its wrappers, and told in our words —
+    // its figures, never "this node has left" of another computer (#483 (b)).
     match super::report_after_a_replan(mid_pipeline(), gone(), "m", None, false) {
         SwarmError::HoldersDeclined { reason, .. } => assert_eq!(
             reason,
-            "10 layers 12..22 of m need about 330 MB more than this node has left (its worker \
-             is already holding 742 MB) — another holder will have to take that part"
+            "it has no room left to load layers 12..22 of the model it was sent"
         ),
         other => panic!("reported as {other}"),
     }
-    // A second holder saying no in the re-plan: ITS words are the last ones.
+    // A second holder saying no in the re-plan: ITS refusal is the last one.
     match super::report_after_a_replan(mid_pipeline(), hand_off(), "m", None, false) {
         SwarmError::HoldersDeclined { reason, .. } => {
-            assert!(reason.starts_with("Not enough free memory"), "{reason}")
+            assert!(reason.contains("43-token conversation"), "{reason}")
         }
         other => panic!("reported as {other}"),
     }
@@ -737,9 +733,9 @@ fn a_shortfall_at_a_holder_running_another_model_is_the_holders_declining() {
     let SwarmError::HoldersDeclined { reason, .. } = &reported else {
         panic!("got {reported}");
     };
-    assert!(
-        reason.contains("11858 MB"),
-        "in the holder's words: {reason}"
+    assert_eq!(
+        reason, "it has no room left to load layers 0..22 of the model it was sent",
+        "the holder's refusal, in our words (#483 (b))"
     );
     let (key, hint) = crate::error::error_hint_with_key(&reported).expect("a hint");
     assert_eq!(key, "holders_declined");
@@ -904,6 +900,101 @@ fn a_re_plan_held_to_what_loads_reports_the_swarms_room_in_our_words() {
         loading.contains("has room to load 54 of the 60 layers") && loading.contains("layer 20"),
         "{loading}"
     );
+}
+
+/// **A refusal at a FORWARD reaches the caller in our words too** (#483 (b),
+/// the residual of E). A forward refused after its "go ahead", or by a peer
+/// predating the up-front question, carries the peer's own text, worded for
+/// ITS owner — another computer's "Raise `resources.max_ram_mb`" and "this
+/// node has left" reached the caller under "turned it down". Each writer's
+/// phrasing is told with its figures; what a peer addresses to whoever asked
+/// ("this machine …") passes as it is; anything else naming "this node" gets
+/// our generic words, never the peer's.
+#[test]
+fn a_holders_refusal_at_a_forward_reaches_the_caller_in_our_words() {
+    use crate::error::SwarmError;
+    let gone = || SwarmError::ModelIncompleteInSwarm {
+        model_id: "m".into(),
+        layer: 20,
+        span: crate::error::describe_missing_layers(20, 80),
+    };
+    let told = |words: &str| match super::report_after_a_replan(
+        SwarmError::SegmentFailoverExhausted(format!(
+            "Segment 1 failed with no standby available (last failure: Worker: Service \
+             unavailable: {words})"
+        )),
+        gone(),
+        "m",
+        None,
+        false,
+    ) {
+        SwarmError::HoldersDeclined { reason, .. } => reason,
+        other => panic!("reported as {other}"),
+    };
+    for (theirs, ours) in [
+        (
+            "llama needs about 25862 MB of memory but this node's budget allows 22120 MB and 0 \
+             MB is already in use. Raise `resources.max_ram_mb`, or free memory by unloading \
+             another model. Of layers 20..80 of the model, 54 would load here.",
+            "it has room to load 54 of the 60 layers of the model it was sent, from layer 20",
+        ),
+        (
+            "llama needs about 25862 MB of memory but this node's budget allows 22120 MB and 0 \
+             MB is already in use. Raise `resources.max_ram_mb`, or free memory by unloading \
+             another model. Of layers 20..80 of the model, 0 would load here.",
+            "it has no room to load the 60 layers of the model it was sent, from layer 20",
+        ),
+        (
+            "llama needs about 25862 MB of memory but this node's budget allows 22120 MB and 0 \
+             MB is already in use. Raise `resources.max_ram_mb`, or free memory by unloading \
+             another model.",
+            "it has no room in its memory to load the part of the model it was sent",
+        ),
+        (
+            "34 layers 0..34 of gemma need about 12012 MB more of this computer's memory than it \
+             has left, beside what the graphics card can take (this model already holds 7979 MB \
+             of it) — another holder will have to take that part",
+            "it has no room left to load layers 0..34 of the model it was sent",
+        ),
+        (
+            "Not enough free memory on this node for a 4035-token prompt (900 MB of conversation \
+             memory in use, 1000 MB available for conversations once this model's weights are \
+             accounted for, short by 120 MB). Shorter conversations still work — up to about \
+             3100 tokens with this model here; free memory on this node (close other programs, \
+             or raise its memory budget) to raise this.",
+            "it has no room for this 4035-token conversation — it takes conversations of up to \
+             about 3100 tokens",
+        ),
+        (
+            "Not enough free memory on this node for a 45-token prompt right now: other \
+             conversations on this node are using 700 MB of the 800 MB available for \
+             conversations once this model's weights are accounted for, short by 12 MB. It fits \
+             once they finish, so try again in a moment; a shorter prompt will not help.",
+            "it has no room for this 45-token conversation while its memory is in use; try \
+             again in a moment",
+        ),
+        (
+            "this node lost its graphics card",
+            "it could not take the part of the model it was sent; its reason is in this \
+             computer's log",
+        ),
+    ] {
+        let reason = told(theirs);
+        assert_eq!(reason, ours, "from: {theirs}");
+        assert!(
+            !reason.contains("this node") && !reason.contains("max_ram_mb"),
+            "{reason}"
+        );
+    }
+    // Addressed to whoever asked: as it is.
+    for theirs in [
+        "this machine is cooling down, so it is not taking new work for other machines — try \
+         another",
+        "this machine runs requests for computers that share at least 2 model parts with the \
+         swarm, and yours shares 0 — turn on Auto-Download Models in Settings so it fetches some",
+    ] {
+        assert_eq!(told(theirs), theirs);
+    }
 }
 
 /// The controls: what is not a holder saying no keeps its own report.
