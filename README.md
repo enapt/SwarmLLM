@@ -149,23 +149,23 @@ idea, applied to running AI instead of sharing files.)
 
 ## How fast is it?
 
-<!-- speeds:begin, reviewed for 0.3.301-alpha. Refreshed at every release: .claude/rules/completeness.md § "README speeds" -->
+<!-- speeds:begin, reviewed for 0.3.302-alpha. Refreshed at every release: .claude/rules/completeness.md § "README speeds" -->
 Speed is in **tokens a second**: a token is a word or part of one, and most
 people read about 5 a second. The figures are from the project's test laptop,
 with an 8 GB NVIDIA RTX 3070 graphics card and an 8-core AMD Ryzen 7 5800H
 processor, on its own or teamed up with volunteers' computers.
 
 <!-- release-check:begin -->
-<!-- from the v0.3.300 release check, timed on the downloaded release -->
+<!-- from the v0.3.301 release check, timed on the downloaded release -->
 **On one computer.** Each model reads a 1,800-token document and writes 128
 tokens about it.
 
 | Model | Runs on | Writing (tokens a second) | Reading (tokens a second) |
 |---|---|---|---|
-| Qwen2.5 Coder 7B | the graphics card | 75–77 | 1,850–1,950 |
-| Qwen2.5 14B | card and processor (too big for the card) | 14.7–16.2 | 660–710 |
-| Qwen3 30B-A3B (2-bit) | card and processor (a mixture of experts, too big for the card) | 23.5–28.9 | 250–260 |
-| Llama 3.2 3B | the processor only | 18.9–19.2 | 90 |
+| Qwen2.5 Coder 7B | the graphics card | 65–66 | 1,740 |
+| Qwen2.5 14B | card and processor (too big for the card) | 12.6–13.2 | 560–590 |
+| Qwen3 30B-A3B (2-bit) | card and processor (a mixture of experts, too big for the card) | 24.8–25.5 | 220–230 |
+| Llama 3.2 3B | the processor only | 14.9–19.2 | 70–80 |
 <!-- release-check:end -->
 
 **Across computers.** The same laptop, in Thailand, asking a volunteer's
@@ -182,8 +182,9 @@ several words.
 | The same, set to "Start and finish on this computer" | 29–30 | 13.0–14.8 |
 | Qwen2.5 14B, half on this laptop and half in the US | 26.9–27.2 | 11.7–11.8 |
 | Qwen3.8 27B, run whole by the computer in Australia, 29 of its 64 layers on that computer's card | 8.6–8.9 | 5.6–5.8 |
+| Qwen3.6 35B-A3B (a mixture of experts), run whole by the computer in Australia, its experts in that computer's memory | 33.9–36.3 | 37.4 |
 | Llama 3.3 70B across three computers: its first 17–25 layers on this laptop, the rest to layer 59 in Australia, the last 21 in the US | 3.5–4.1 | 2.5–2.6 |
-<!-- measured on: the 14B half-and-half row v0.3.291 (real_link.sh readme291 arms 1 and 3, 11-15, 119-121 ms) and main as v0.3.292 ships it (abba292 arms 2-3 on main with #460/#461, 11-15 21:56-22:01Z: code 44.6 / 46.4, prose 19.6 / 19.1; 11-15, 123-145 ms: line292's flowing arms 1, 4, 5 at 17:20-17:36Z, their prose replies carrying the helper's load, arm 8 left out — the far computer stalled at 1,279 ms; rows292's default arms 2, 3, 6, 7; wide292's arms 1, 6, 7, 12; lev292's arms 1, 4, 5, 8 (19:01-19:14Z); bal292's arm 1 — its later arms measured a far copy that run had moved to the processor, FUTURE_WORK #461); the laptop-alone 14B figures below v0.3.291 (readme291 locald arms 2, 4, 6); the "start and finish" row and its processor-helper figures main as v0.3.292 ships it (readme292s, 11-15 19:45-19:55Z, 122-133 ms: dsdwfit × 3 with the 0.5B helper on the card, then dsdw × 3 with it on the processor; the far computer's [12, 38) all on its card throughout); every figure the node's own decode_ms (the client's wall clock stepped, gotcha #1112); the US row v0.3.293 (real_link.sh us293, flowhalf arms 1 and 3 against locald arms 2 and 4 — 16.0 / 17.2 code, 13.5 / 13.6 prose — 11-16 17:34-17:41Z, 308 ms least round trip, the far computer a661155f); the 27B row v0.3.299 (tier27_1119, the live node's own route to aa3d1e66, ask_tier.py, 160 tokens, code and prose twice each after a warm-up, thinking off — the earlier code figure timed the model's thinking, 11-18 19:31-19:35Z, 29 card layers: code 8.59 / 8.86, prose 5.64 / 5.84); the 70B row v0.3.300 (tier70_1119, ask_tier.py, the live node's own route here → aa3d1e66 AU → 5bfbd36e US, 11-19 05:38-05:49Z, one ask at a time, code and prose after a warm-up); the 35B-A3B row dropped: the Australian computer no longer holds it whole (tier35_1118, 11-18, its route refused for memory) -->
+<!-- measured on: the 14B half-and-half row v0.3.291 (real_link.sh readme291 arms 1 and 3, 11-15, 119-121 ms) and main as v0.3.292 ships it (abba292 arms 2-3 on main with #460/#461, 11-15 21:56-22:01Z: code 44.6 / 46.4, prose 19.6 / 19.1; 11-15, 123-145 ms: line292's flowing arms 1, 4, 5 at 17:20-17:36Z, their prose replies carrying the helper's load, arm 8 left out — the far computer stalled at 1,279 ms; rows292's default arms 2, 3, 6, 7; wide292's arms 1, 6, 7, 12; lev292's arms 1, 4, 5, 8 (19:01-19:14Z); bal292's arm 1 — its later arms measured a far copy that run had moved to the processor, FUTURE_WORK #461); the laptop-alone 14B figures below v0.3.291 (readme291 locald arms 2, 4, 6); the "start and finish" row and its processor-helper figures main as v0.3.292 ships it (readme292s, 11-15 19:45-19:55Z, 122-133 ms: dsdwfit × 3 with the 0.5B helper on the card, then dsdw × 3 with it on the processor; the far computer's [12, 38) all on its card throughout); every figure the node's own decode_ms (the client's wall clock stepped, gotcha #1112); the US row v0.3.293 (real_link.sh us293, flowhalf arms 1 and 3 against locald arms 2 and 4 — 16.0 / 17.2 code, 13.5 / 13.6 prose — 11-16 17:34-17:41Z, 308 ms least round trip, the far computer a661155f); the 27B row v0.3.299 (tier27_1119, the live node's own route to aa3d1e66, ask_tier.py, 160 tokens, code and prose twice each after a warm-up, thinking off — the earlier code figure timed the model's thinking, 11-18 19:31-19:35Z, 29 card layers: code 8.59 / 8.86, prose 5.64 / 5.84); the 70B row v0.3.300 (tier70_1119, ask_tier.py, the live node's own route here → aa3d1e66 AU → 5bfbd36e US, 11-19 05:38-05:49Z, one ask at a time, code and prose after a warm-up); the 35B-A3B row main as v0.3.302 ships it (tier_1120b, ask_tier.py, the live node's own route handed whole to aa3d1e66, 11-20 05:46-05:48Z, 160 tokens: code 33.9 after its 70.8 s cold load and 36.3, prose 37.4; dropped at v0.3.300 while that computer did not hold it whole) -->
 
 On its own this laptop writes the 14B's code at 13.2–14.8 tokens a second and
 its prose at 11.6–12.5, so the two continents together are three times as fast
@@ -411,7 +412,7 @@ SwarmLLM is built by a human developer working with Claude Code, an AI
 programming assistant: the human sets the direction, tests and reviews, and
 Claude writes the code. We say so openly so you can judge the project on its
 merits. Every change is checked by thousands of automated tests
-(4782 lib tests + 80 integration tests) before it ships, and regular
+(4809 lib tests + 80 integration tests) before it ships, and regular
 automated audits are logged in the repository. Scrutiny and contributions are
 welcome.
 

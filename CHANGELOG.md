@@ -1,5 +1,52 @@
 # Changelog
 
+## [0.3.302-alpha] — 2026-11-20
+
+**Your own request takes the graphics card back from a model only other computers are using.** A model serving
+other computers' replies one after another was never idle long enough (5 seconds) to give its card memory back, so
+the owner asking for a different model got it partly on the processor every time: a tester's 14B ran at 5.1 tokens a
+second instead of about 20 beside another computer's model. Idle time is now read as the asker sees it: the owner's
+request counts only the owner's own use, so it takes the card from a model only the swarm used lately. A model is
+never taken mid-reply, and two of your own models used in turn do not push each other off. And when one of your
+requests did run partly on the processor, asking again right away (an agent's loop, a nightly check) now moves the
+model back onto the card as soon as there is room, where it used to wait for a 5-second pause that never came. Other
+computers' requests still wait for a pause, so a peer is not charged a cold load (#483).
+
+**A mixture-of-experts model goes to the computer that runs it whole, not to a split 8 times slower.** A computer
+holding Qwen3.6-35B-A3B whole on an RTX 3060 keeps every layer on its card and only the experts in system memory,
+but the planner priced those layers as if the processor ran them all, so a split through that computer kept winning.
+A layer beside the card is now priced as card work plus the processor reading only the experts a word is sent to:
+the whole run there was priced at 26 ms a word and delivered 27-28 ms (33.9-37.4 tokens a second), against 4.2-4.5
+on the split. A split whose first computer turned its guessers away is no longer priced as if it guessed (#481).
+
+**A split of a Qwen 3.5, 3.6 or 3.8 model that ends on another computer now guesses ahead — about 1.9 times
+faster.** The small guesser beside a split's first part found no room when the planner had filled this computer's
+graphics card with layers, so every such reply ran one word per round trip. It now goes to system memory when the
+card has no room, after checking the computer has that memory free. Qwen3.8-27B split between an 8 GB card here and
+a laptop in the US (272 ms away): 3.05-3.15 tokens a second before, now 5.0-5.9 for prose and 5.95-6.2 for code
+(#485). `SWARMLLM_SPLIT_GUESS_HEAD_IN_RAM=0` turns it off. Still far from what a reply should reach; several rounds
+of guesses in flight at once come next (#486).
+
+**A split that starts and finishes on this computer keeps its last part on the graphics card.** In 0.3.301 such a
+split of Qwen3.8-27B on an 8 GB card answered every request but finished each reply on the processor: the last part
+was refused for room the model's own process had already freed, and the model's 994 MB output head was counted
+twice. Both are fixed; with the other part in Australia, 4 of 4 requests ran with the last part on the card (code
+5.7-7.2, prose 5.3 tokens a second). The model process now also reports what its guessers keep on the card, so the
+dashboard's "other programs" figure and a configured card limit include it (#481).
+
+**A large model split across computers no longer wastes its first attempt.** The planner could offer a computer
+that had not yet loaded the model more layers than that computer would agree to load, so the attempt was refused
+before the prompt was read and the request planned again: Llama 3.3 70B was planned 60 layers on a 12 GB card whose
+own load takes 54. A computer now states the card memory a new load is admitted against, and the planner weighs the
+load the way that computer's loader will. Computers on earlier releases are planned as before (#483).
+
+**When the swarm has no room for a model, the error says so in this computer's words.** A computer that turned a
+request down was quoted to the person asking, including its own setting ("Raise `resources.max_ram_mb`"), under "try
+again in a few minutes". The error now names which computer refused and how many of the layers it has room for, and
+says when the computers holding the model have the room between them but not in pieces one chain can run. And a
+holder that has only paused for heat or to install an update, whose layers would close the gap, now reads as "try
+again in a few minutes", naming the computer and why, where it used to read as "retrying will not help" (#483).
+
 ## [0.3.301-alpha] — 2026-11-20
 
 **"Stop keeping it for me": let use decide whether a model stays.** A model you downloaded, or set to "Keep on this
