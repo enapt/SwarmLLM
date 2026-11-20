@@ -48,6 +48,12 @@ use): it skips strings, raw strings, char literals and comments. Counting brace
 bytes, one `Some("{".into())` hid `api/openai/mod.rs`'s whole test module from
 `cfg_test_spans` (gotcha #889; `a_brace_inside_a_literal_does_not_end_a_span`).
 
+**Blank test code with `production_code`; never cut at the first `#[cfg(test)]`** (2026-11-20, gotcha #1147). In 60
+files the first one is an attribute on a field or a helper, far ahead of the test module. Cut there, seven guards
+scanned only the first ~1,000 of `process_pool.rs`'s 25,000 lines. A test-only FIELD masks only itself
+(`test_field_end`). Read as an item, it ran on to the next brace and masked the production `impl` after it (27
+fields, up to 307 lines). Self-test: `a_test_only_field_masks_the_field_and_nothing_after_it`.
+
 **A file-level `contains` is not a site-level claim.** The prompt-privacy guard
 asserted each FILE mentions the send somewhere, the setting somewhere and
 `cfg()` somewhere. Both files make unrelated `cfg()` calls, so the third

@@ -2505,21 +2505,18 @@ fn user_settable_config_is_read_live_not_from_the_boot_snapshot() {
             let Ok(text) = std::fs::read_to_string(&p) else {
                 continue;
             };
-            // Everything from the first `#[cfg(test)]` on is test code.
-            let cutoff = text
-                .find("#[cfg(test)]")
-                .map(|i| text[..i].lines().count() + 1)
-                .unwrap_or(usize::MAX);
+            // Everything behind a `#[cfg(test)]` is test code — blanked, lines
+            // kept. It cut the file at the FIRST `#[cfg(test)]`, which in 60
+            // files is an attribute on a field or a helper long before the
+            // test module (2026-11-20).
+            let production = production_code(&text);
             // Statements, not lines. Every pattern here is a contiguous dotted
             // path, and rustfmt breaks a long chain across lines — so
             // `shared\n    .config\n    .resources\n    .max_gpu_vram_mb`
             // matched nothing at all, which is this guard's own defect wearing
             // the shape of the bug it exists to catch (gotcha #281, three
             // recurrences).
-            for (line_no, l) in statements(&text) {
-                if line_no >= cutoff {
-                    continue;
-                }
+            for (line_no, l) in statements(&production) {
                 if mutable.iter().any(|m| l.contains(m)) {
                     offenders.push(format!("{rel}:{line_no}: {l}"));
                 }
@@ -2578,7 +2575,8 @@ fn every_long_pipeline_wait_watches_the_cancel_flag() {
                 continue;
             };
             // Test code sets its own deadlines and has no client to abandon it.
-            let src = &text[..text.find("#[cfg(test)]").unwrap_or(text.len())];
+            let production = production_code(&text);
+            let src = production.as_str();
             for line_no in unwatched_pipeline_waits(src)
                 .into_iter()
                 .chain(unwatched_pool_generations(src))
@@ -2709,7 +2707,10 @@ fn a_worker_only_leaves_the_pool_where_its_memory_is_released() {
     let root = repo_root();
     let path = root.join("src/inference/process_pool.rs");
     let text = std::fs::read_to_string(&path).expect("read process_pool.rs");
-    let src = &text[..text.find("#[cfg(test)]").unwrap_or(text.len())];
+    // Blanked, not cut: the first `#[cfg(test)]` is a field's, ~1,000 lines into
+    // 25,000, so cutting there scanned none of the pool (2026-11-20).
+    let production = production_code(&text);
+    let src = production.as_str();
 
     let offenders: Vec<usize> = worker_removal_lines(src);
     assert!(
@@ -2822,16 +2823,13 @@ fn per_request_state_is_released_in_one_place() {
             let Ok(text) = std::fs::read_to_string(&p) else {
                 continue;
             };
-            // Everything from the first `#[cfg(test)]` on is test code.
-            let cutoff = text
-                .find("#[cfg(test)]")
-                .map(|i| text[..i].lines().count() + 1)
-                .unwrap_or(usize::MAX);
+            // Everything behind a `#[cfg(test)]` is test code — blanked, lines
+            // kept. It cut the file at the FIRST `#[cfg(test)]`, which in 60
+            // files is an attribute on a field or a helper long before the
+            // test module (2026-11-20).
+            let production = production_code(&text);
             // Statements, not lines — see `statements`.
-            for (line_no, l) in statements(&text) {
-                if line_no >= cutoff {
-                    continue;
-                }
+            for (line_no, l) in statements(&production) {
                 for name in guarded {
                     for op in operations {
                         if l.contains(&format!("{name}{op}")) {
@@ -7185,8 +7183,8 @@ fn the_eos_lookback_sees_a_real_guard_and_not_a_distant_one() {
 /// carry": a `decode_tokens(&[…])` call — decoding a single token, or a literal
 /// handful, on its own — in the production part of a pipeline source file.
 fn single_token_decodes(src: &str) -> Vec<String> {
-    let production = &src[..src.find("#[cfg(test)]").unwrap_or(src.len())];
-    statements(production)
+    let production = production_code(src);
+    statements(&production)
         .into_iter()
         .filter(|(_, stmt)| stmt.contains("decode_tokens(&["))
         .map(|(line, stmt)| format!("line {line}: {}", stmt.trim()))
@@ -11589,16 +11587,27 @@ mod tests {
 /// guard about PRODUCTION code scans, where a test may legitimately do the
 /// thing the guard forbids (set a field to check the accessor that reads it).
 fn production_code(src: &str) -> String {
-    let mut masked: Vec<char> = src.chars().collect();
-    let char_at: Vec<usize> = src.char_indices().map(|(i, _)| i).collect();
-    for (s, e) in cfg_test_spans(src) {
-        for (k, c) in masked.iter_mut().enumerate() {
-            if (s..e).contains(&char_at[k]) && *c != '\n' {
-                *c = ' ';
+    // One pass over the text: the guards that walk every source file call this
+    // per file, and a file with a `#[cfg(test)]` on each of fifty functions made
+    // the old span-by-span pass 50 sweeps of it.
+    let mut spans = cfg_test_spans(src);
+    spans.sort_unstable();
+    let mut spans = spans.into_iter().peekable();
+    src.char_indices()
+        .map(|(at, c)| {
+            while spans.peek().is_some_and(|&(_, end)| end <= at) {
+                spans.next();
             }
-        }
-    }
-    masked.into_iter().collect()
+            let masked = spans
+                .peek()
+                .is_some_and(|&(start, end)| (start..end).contains(&at));
+            if masked && c != '\n' {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect()
 }
 
 /// The byte span of everything behind a `#[cfg(test)]`, whether it guards a
@@ -11613,6 +11622,14 @@ fn cfg_test_spans(src: &str) -> Vec<(usize, usize)> {
     while let Some(rel) = src[i..].find("#[cfg(test)]") {
         let at = i + rel;
         i = at + 12;
+        // A FIELD — of a struct, or of a struct literal — ends at its own comma
+        // or at the brace closing the struct. Read as an item, it ran on to the
+        // next brace and masked the production item after it whole: 27 field
+        // attributes did, up to 307 lines of the scheduler (2026-11-20).
+        if let Some(end) = test_field_end(bytes, i) {
+            out.push((at, end));
+            continue;
+        }
         // First brace after the attribute opens the guarded item's body — unless
         // a `;` ends the item first: `#[cfg(test)] mod tests;` declares a test
         // FILE and has no body here, so it is its own span. Taking the next
@@ -11649,6 +11666,156 @@ fn cfg_test_spans(src: &str) -> Vec<(usize, usize)> {
         }
     }
     out
+}
+
+/// Where the field a `#[cfg(test)]` stands on ends — its comma, or the brace
+/// closing the struct — when what follows the attribute (at `from`, past any
+/// further attributes and comments) is a field: `name:` (one colon) or
+/// `name,` / `name }`, behind an optional `pub` or `pub(…)`. `None` for
+/// anything else, which is an item.
+fn test_field_end(bytes: &[u8], from: usize) -> Option<usize> {
+    let mut k = from;
+    loop {
+        while k < bytes.len() && bytes[k].is_ascii_whitespace() {
+            k += 1;
+        }
+        if bytes[k..].starts_with(b"//") {
+            while k < bytes.len() && bytes[k] != b'\n' {
+                k += 1;
+            }
+        } else if bytes[k..].starts_with(b"#[") {
+            let mut depth = 0i32;
+            while k < bytes.len() {
+                match bytes[k] {
+                    b'[' => depth += 1,
+                    b']' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            k += 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                k += 1;
+            }
+        } else {
+            break;
+        }
+    }
+    if bytes[k..].starts_with(b"pub") {
+        k += 3;
+        if bytes.get(k) == Some(&b'(') {
+            while k < bytes.len() && bytes[k] != b')' {
+                k += 1;
+            }
+            k += 1;
+        }
+        while k < bytes.len() && bytes[k].is_ascii_whitespace() {
+            k += 1;
+        }
+    }
+    let name = k;
+    while k < bytes.len() && (bytes[k].is_ascii_alphanumeric() || bytes[k] == b'_') {
+        k += 1;
+    }
+    if k == name || bytes[name].is_ascii_digit() {
+        return None;
+    }
+    let word = &bytes[name..k];
+    while k < bytes.len() && bytes[k].is_ascii_whitespace() {
+        k += 1;
+    }
+    let field = match bytes.get(k) {
+        Some(b':') => bytes.get(k + 1) != Some(&b':'),
+        Some(b',') | Some(b'}') => true,
+        _ => false,
+    };
+    // A keyword followed by a colon is not a field (`r#type:` aside, there is
+    // none in the tree); an item never has a colon or comma straight after
+    // its first word.
+    if !field || word == b"fn" || word == b"mod" || word == b"impl" {
+        return None;
+    }
+    let (mut round, mut angle) = (0i32, 0i32);
+    while k < bytes.len() {
+        match bytes[k] {
+            b'(' | b'[' | b'{' => round += 1,
+            b')' | b']' | b'}' => {
+                round -= 1;
+                if round < 0 {
+                    return Some(k);
+                }
+            }
+            b'<' => angle += 1,
+            // `->` and `=>` are not closing brackets.
+            b'>' if k > 0 && !matches!(bytes[k - 1], b'-' | b'=') => angle -= 1,
+            b',' if round == 0 && angle <= 0 => return Some(k),
+            b'"' => {
+                k += 1;
+                while k < bytes.len() && bytes[k] != b'"' {
+                    if bytes[k] == b'\\' {
+                        k += 1;
+                    }
+                    k += 1;
+                }
+            }
+            _ => {}
+        }
+        k += 1;
+    }
+    None
+}
+
+/// **A `#[cfg(test)]` on a field masks the field, not the item after it.**
+/// `cfg_test_spans` read the attribute as an item's and took the next brace:
+/// past a struct's last field that is the next `impl`, so every guard built on
+/// `production_code` was blind to it.
+#[test]
+fn a_test_only_field_masks_the_field_and_nothing_after_it() {
+    let src = "struct Pool {\n\
+        \x20   live: u32,\n\
+        \x20   #[cfg(test)]\n\
+        \x20   pub(crate) test_curve: DashMap<ModelId, (u64, u64)>,\n\
+        \x20   #[cfg(test)]\n\
+        \x20   test_flag: AtomicBool,\n\
+        }\n\
+        impl Pool {\n\
+        \x20   fn new() -> Self {\n\
+        \x20       Self {\n\
+        \x20           live: 0,\n\
+        \x20           #[cfg(test)]\n\
+        \x20           test_curve: DashMap::new(),\n\
+        \x20           #[cfg(test)]\n\
+        \x20           test_flag: AtomicBool::new(false)\n\
+        \x20       }\n\
+        \x20   }\n\
+        \x20   fn production_after_the_fields(&self) { self.live.fetch_add(1); }\n\
+        }\n\
+        #[cfg(test)]\n\
+        mod tests {\n\
+        \x20   fn t() { in_the_test_module(); }\n\
+        }\n";
+    let production = production_code(src);
+    for kept in [
+        "live: u32",
+        "impl Pool",
+        "fn new()",
+        "production_after_the_fields",
+        "live: 0",
+    ] {
+        assert!(
+            production.contains(kept),
+            "{kept} was masked:\n{production}"
+        );
+    }
+    for masked in ["test_curve", "test_flag", "in_the_test_module"] {
+        assert!(
+            !production.contains(masked),
+            "{masked} was kept:\n{production}"
+        );
+    }
+    assert_eq!(production.lines().count(), src.lines().count());
 }
 
 /// Whether `parent` (a module file's text) declares `module` only under
@@ -14448,7 +14615,8 @@ fn a_models_source_is_written_only_through_the_canonical_choice() {
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
-        let src = &text[..text.find("#[cfg(test)]").unwrap_or(text.len())];
+        let production = production_code(&text);
+        let src = production.as_str();
         if !src.contains("hf_sources") {
             continue;
         }
@@ -14529,7 +14697,8 @@ fn a_models_header_is_fetched_only_from_the_upload_its_parts_are() {
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
-        let src = &text[..text.find("#[cfg(test)]").unwrap_or(text.len())];
+        let production = production_code(&text);
+        let src = production.as_str();
         for (line, stmt) in statements(src) {
             if !stmt.contains("download_gguf_header(") {
                 continue;
