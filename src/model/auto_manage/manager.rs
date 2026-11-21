@@ -2190,7 +2190,13 @@ mod room_wanted {
 
     /// Far computers chosen by [`Far`] — machine ids drawn from a fixed
     /// sequence until the ranking holds, since this node's own id is random.
-    fn far_computers(local: &NodeId, copies: &ModelId, want: &Far) -> Vec<NodeId> {
+    ///
+    /// `None` when this node's random id ranks so high (or low) on both parts
+    /// that none of a million ids beats it — about one draw in 30,000, which CI
+    /// met on 2026-11-21 (`assert_eq!(0, 2)`, "the far computers exist"). The
+    /// scenario needs a node that does not, so the callers draw a fresh node, as
+    /// proptest's `prop_assume!` discards an input rather than failing on it.
+    fn far_computers(local: &NodeId, copies: &ModelId, want: &Far) -> Option<Vec<NodeId>> {
         use super::super::coverage::part_rank_weight;
         let part = |index| ShardId {
             model_id: copies.clone(),
@@ -2216,8 +2222,7 @@ mod room_wanted {
             Far::One => 1,
             Far::AboveHereOnPartsZeroAndOne | Far::BelowHereOnEveryPart => 2,
         };
-        assert_eq!(picked.len(), wanted, "fixture: the far computers exist");
-        picked
+        (picked.len() == wanted).then_some(picked)
     }
 
     /// The live shape (2026-10-25): this node full — 1,500 MB of a 1,500 MB
@@ -2243,7 +2248,9 @@ mod room_wanted {
         write_sparse_shards(&state, &copies, [0, 1], PART);
         holds(&state, &large, &local, &[0]);
         write_sparse_shards(&state, &large, [0], PART);
-        let far = far_computers(&local, &copies, &far);
+        let Some(far) = far_computers(&local, &copies, &far) else {
+            return full_node_beside_a_hole(far);
+        };
         for id in &far {
             let id = peer(&state, id.clone(), 300);
             holds(&state, &copies, &id, &[0, 1, 2, 3]);
@@ -2522,7 +2529,9 @@ mod room_wanted {
         write_sparse_shards(&state, &copies, [0, 1, 2, 3], PART);
         holds(&state, &large, &local, &[0]);
         write_sparse_shards(&state, &large, [0], PART);
-        let far = far_computers(&local, &copies, &Far::AboveHereOnPartsZeroAndOne);
+        let Some(far) = far_computers(&local, &copies, &Far::AboveHereOnPartsZeroAndOne) else {
+            return full_node_holding_a_model_whole(limit_mb);
+        };
         for id in &far {
             let id = peer(&state, id.clone(), 300);
             holds(&state, &copies, &id, &[0, 1, 2, 3]);
@@ -2686,7 +2695,17 @@ mod room_wanted {
     /// so does carrying, read the same way.
     #[tokio::test]
     async fn the_room_advertised_keeps_a_model_being_assembled_whoever_asked() {
-        let shape = full_node_holding_a_model_whole(2_500);
+        // The far computers are drawn before anything is registered, so a node
+        // ranked too high for them is simply drawn again (`far_computers`).
+        let (shape, far) = loop {
+            let shape = full_node_holding_a_model_whole(2_500);
+            let local = shape.state.identity.node_id().clone();
+            let assembling = ModelId("assembling".into());
+            if let Some(far) = far_computers(&local, &assembling, &Far::AboveHereOnPartsZeroAndOne)
+            {
+                break (shape, far);
+            }
+        };
         let state = &shape.state;
         let local = state.identity.node_id().clone();
         let spare = || shape.manager.spare_for_any_room(1.0, &[]);
@@ -2699,7 +2718,7 @@ mod room_wanted {
             register_manifest_with_sized_shards(state, "assembling", 32, &ranges, PART);
         holds(state, &assembling, &local, &[0, 1]);
         write_sparse_shards(state, &assembling, [0, 1], PART);
-        for id in far_computers(&local, &assembling, &Far::AboveHereOnPartsZeroAndOne) {
+        for id in far {
             let id = peer(state, id, 300);
             holds(state, &assembling, &id, &[0, 1]);
         }
