@@ -317,8 +317,7 @@ pub fn compute_wishlist(state: &SharedState) -> Wishlist {
         };
 
         // VRAM estimate — MoE-aware via existing helper.
-        let vram_required_mb =
-            crate::model::auto_manage::vram::estimate_model_vram_mb(manifest.total_size_bytes);
+        let vram_required_mb = crate::model::auto_manage::vram::estimate_model_vram_mb(&manifest);
         let size_mb = manifest.total_size_bytes / (1024 * 1024);
 
         // Score 0..100 — heuristic blend documented inline. Frontend

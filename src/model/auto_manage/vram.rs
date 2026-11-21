@@ -13,9 +13,37 @@ use crate::daemon::SharedState;
 /// does. A discount for "only the active experts" (`estimate_model_vram_mb_arch`,
 /// removed 2026-09-25) priced Qwen3-30B-A3B at ~44% of what it takes, so
 /// auto-manage chose models the loader's own admission then refused.
-pub fn estimate_model_vram_mb(total_size_bytes: u64) -> u64 {
-    // Quantized model weights are already compressed; VRAM ~= file size + ~15% overhead
-    (total_size_bytes as f64 * 1.15 / (1024.0 * 1024.0)) as u64
+///
+/// **Priced on what a CARD holds** (#297): the file less what the loader keeps in
+/// the machine's memory whatever device runs it ([`card_weight_bytes`]). Gemma 4
+/// E2B/E4B's per-layer token table is 1.8 GB of the E2B's 3.3 at Q4_K_M; charged
+/// to the card, the wishlist told a 4 GB card the E2B would not fit (~3,780 MB
+/// against the loader's 1,859) and the quant pick pointed it at a lower quant.
+pub fn estimate_model_vram_mb(manifest: &crate::types::ModelManifest) -> u64 {
+    estimate_card_vram_mb(card_weight_bytes(manifest))
+}
+
+/// The file-size rule for `card_bytes` a card holds: quantized weights are
+/// already compressed, so ~the bytes plus ~15% for the caches. Callers with a
+/// manifest go through [`estimate_model_vram_mb`].
+pub(crate) fn estimate_card_vram_mb(card_bytes: u64) -> u64 {
+    (card_bytes as f64 * 1.15 / (1024.0 * 1024.0)) as u64
+}
+
+/// The bytes of `manifest`'s model a card holds: the file less the tensors the
+/// loader keeps in the machine's memory on every device (`split::host_resident`,
+/// the one list the loader and `GgufTensorMeta::host_resident_bytes` read), read
+/// from the manifest's own tensor table — so a model nobody here holds is priced
+/// the same way. A manifest without a table (a derived one not yet rebuilt)
+/// prices the whole file, as before.
+pub fn card_weight_bytes(manifest: &crate::types::ModelManifest) -> u64 {
+    let host_resident = manifest
+        .shards
+        .iter()
+        .flat_map(|shard| shard.tensors.iter())
+        .filter(|tensor| crate::inference::split::host_resident(&tensor.name))
+        .fold(0u64, |sum, tensor| sum.saturating_add(tensor.size));
+    manifest.total_size_bytes.saturating_sub(host_resident)
 }
 
 /// The pieces a worker's GPU footprint is actually made of.
@@ -1472,10 +1500,10 @@ pub(super) fn estimate_segment_vram_mb(
 ) -> u64 {
     let total_layers = manifest.num_layers as usize;
     if total_layers == 0 {
-        return estimate_model_vram_mb(manifest.total_size_bytes);
+        return estimate_model_vram_mb(manifest);
     }
     let fraction = (layer_end - layer_start) as f64 / total_layers as f64;
-    let full_vram = estimate_model_vram_mb(manifest.total_size_bytes);
+    let full_vram = estimate_model_vram_mb(manifest);
     (full_vram as f64 * fraction).ceil() as u64
 }
 
@@ -1964,10 +1992,81 @@ mod tests {
     /// A mixture-of-experts model needs memory for every expert, not the few a
     /// token uses: they are all resident. Pinned against the discount this
     /// replaced, which put Mixtral 8x7B at ~55% of its size.
+    /// #297: a card is charged what it HOLDS. Gemma 4 E2B at Q4_K_M — 3,287 MiB,
+    /// of which the per-layer token table the loader keeps in the machine's
+    /// memory is 1,837 — reads ~1,667 MB, beside the loader's own 1,859; charged
+    /// the whole file it read ~3,780 and a 4 GB card was told it would not fit.
+    /// A manifest without a tensor table prices the whole file, as before.
+    #[test]
+    fn a_card_is_not_charged_the_tensors_the_machine_keeps() {
+        const MIB: u64 = 1024 * 1024;
+        let entry = |name: &str, size: u64| crate::types::ShardTensorEntry {
+            name: name.into(),
+            gguf_offset: 0,
+            shard_offset: 0,
+            size,
+        };
+        let shard = |index: u32, size_bytes: u64, tensors| crate::types::ShardInfo {
+            index,
+            layer_range: (0, 35),
+            size_bytes,
+            hash: [0u8; 32],
+            tensors,
+        };
+        let manifest = |shards: Vec<crate::types::ShardInfo>| crate::types::ModelManifest {
+            id: crate::types::ModelId("gemma-4-e2b-it-q4-k-m".into()),
+            name: "Gemma 4 E2B".into(),
+            architecture: crate::types::ModelArchitecture::Llama,
+            num_layers: 35,
+            num_params_billions: 2.0,
+            quantization: crate::types::Quantization::Q4KM,
+            total_size_bytes: 3_287 * MIB,
+            shard_count: shards.len() as u32,
+            shards,
+            tokenizer_hash: [0u8; 32],
+            manifest_hash: [0u8; 32],
+            publisher: crate::types::NodeId([0u8; 32]),
+            publish_date: chrono::Utc::now(),
+            license: "gemma".into(),
+            mmproj: None,
+            context_length: None,
+        };
+
+        let e2b = manifest(vec![
+            shard(
+                0,
+                2_000 * MIB,
+                vec![
+                    entry("token_embd.weight", 163 * MIB),
+                    entry(crate::inference::split::PER_LAYER_TOKEN_TABLE, 1_837 * MIB),
+                ],
+            ),
+            shard(
+                1,
+                1_287 * MIB,
+                vec![entry("blk.0.attn_q.weight", 1_287 * MIB)],
+            ),
+        ]);
+        assert_eq!(card_weight_bytes(&e2b), 1_450 * MIB);
+        let priced = estimate_model_vram_mb(&e2b);
+        assert!(
+            (1_600..=1_900).contains(&priced),
+            "the E2B is priced near the loader's 1,859 MB, not the file's ~3,780: {priced}"
+        );
+        assert!(priced < 4_096, "a 4 GB card is told the E2B fits");
+
+        let no_table = manifest(vec![shard(0, 3_287 * MIB, vec![])]);
+        assert_eq!(card_weight_bytes(&no_table), 3_287 * MIB);
+        assert_eq!(
+            estimate_model_vram_mb(&no_table),
+            estimate_card_vram_mb(3_287 * MIB)
+        );
+    }
+
     #[test]
     fn a_moe_model_is_charged_for_every_expert() {
         let total_bytes = 47u64 * 1024 * 1024 * 1024; // Mixtral 8x7B on disk
-        assert!(estimate_model_vram_mb(total_bytes) >= 47 * 1024);
+        assert!(estimate_card_vram_mb(total_bytes) >= 47 * 1024);
     }
 
     #[test]
@@ -2309,7 +2408,7 @@ mod footprint_tests {
             "estimate {new} vs adjusted measurement {measured} is {err_pct:+.1}% — outside 5%"
         );
         const MEASURED: u64 = 6037;
-        let old = estimate_model_vram_mb(phi35().quantized_weight_bytes);
+        let old = estimate_card_vram_mb(phi35().quantized_weight_bytes);
         assert!(
             old < MEASURED * 2 / 3,
             "the file-size estimator should be far low: {old} vs {MEASURED}"
@@ -2322,7 +2421,7 @@ mod footprint_tests {
     #[test]
     fn beats_the_file_size_multiple_on_a_large_vocabulary_model() {
         let i = llama32_1b();
-        let old = estimate_model_vram_mb(i.quantized_weight_bytes);
+        let old = estimate_card_vram_mb(i.quantized_weight_bytes);
         let new = estimate_worker_vram_mb(&i);
         assert!(new > old, "new {new} must exceed old {old}");
 

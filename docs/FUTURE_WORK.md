@@ -7182,29 +7182,6 @@ fact"), so such a request is served by the other computers. The fix for a comput
 a whole placement split before its load from the card reading #365 added — closed the same day
 (§ Closed).
 
-#### #297 — Auto-manage prices a card by the file's size, so Gemma 4's E2B/E4B read heavier than they run
-`P3` · memory · **OPEN** — 2026-10-17 · history: #296's review
-
-`auto_manage::vram::estimate_model_vram_mb` (the file × 1.15) charges a card the whole file,
-including the per-layer table the loader keeps in the machine's memory (#296). It reads the
-E2B Q4_K_M at ~3,780 MB, where the loader's card estimate is 1,859, and the E4B at ~5,910 against
-3,483. Five places decide with it, none of them on the request path:
-
-- `quant.rs` picks which quant of a family to recommend for this node's card (or a third of the
-  pool's), so a 4 GB card can be pointed at a lower quant of the E2B than it runs.
-- `scoring.rs` sets the pool-fitness factor in the download score.
-- `wishlist.rs` shows the "Memory" figure and the "fits your memory" tag.
-- `capacity_plan.rs` decides "too large for the swarm today" and what a new node would unlock.
-- `scan.rs` (`estimate_segment_vram_mb`) decides whether a segment is registered in
-  `split_models`. Nothing that serves a request has asked for that registration since #259.
-
-The model listing asks the loader (`gpu_estimate_and_fit`); it uses the file's size only for a
-model that peers alone hold. The file-size figure is rough for every model: its own doc puts it
-56% low on phi-3.5-mini, and it knows nothing of card/processor splits or experts kept in RAM.
-So the fix is to price from the header where one is present (the pool's estimator, or at least
-`GgufTensorMeta::host_resident_bytes`), not a special case for Gemma. Not yet measured: what each
-of the five reads for the E2B on a 4 GB card.
-
 #### #291 — A running split worker's further room is not offered to the planner, nor weighed for promotion
 `P3` · memory · **OPEN** — 2026-10-16 · history: what #265's fix left
 
@@ -8281,13 +8258,19 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-11-21, on main** (#439)
+**Closed 2026-11-21, on main** (#439, #297)
 - #439 — `P3` — **The relay hint said "turn on UPnP" where a router found late refused the ports.** Fixed as the entry
   proposed: vendor/libp2p-upnp emits `Event::GatewayFound` where a search succeeds (upstream 0.5/0.6 emit nothing
   there), and `UpnpWatch::note_gateway_found` makes the earlier misses history and measures the refusal's quiet period
   from the find; a found router also rules out WSL's mirrored-networking firewall. Tests
   `a_router_found_late_that_maps_nothing_reads_as_a_refusal`,
   `a_router_found_first_time_keeps_the_verdicts_but_rules_out_the_wsl_firewall`.
+- #297 — `P3` — **Auto-manage priced a card by the file's size, so Gemma 4's E2B/E4B read heavier than they run.**
+  `vram::estimate_model_vram_mb` now takes the manifest and prices what a CARD holds (`vram::card_weight_bytes`: the
+  file less the `split::host_resident` tensors, read from the manifest's own tensor table, so an unheld model is priced
+  too); all five deciders (quant pick, download score, wishlist, capacity plan, segment registration) and #452's
+  `the_cards_could_run` read it. The E2B at Q4_K_M: ~1,667 MB against the file's ~3,780 (the loader: 1,859). A manifest
+  without a table prices the whole file, as before. Test `a_card_is_not_charged_the_tensors_the_machine_keeps`.
 
 **Closed 2026-11-21, released in v0.3.304** (#489)
 - #489 — `P1` — **The card clock hold slowed a split whose drafter model shares the card, so it was off by default.**

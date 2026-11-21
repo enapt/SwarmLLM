@@ -297,7 +297,7 @@ fn build_family(
             let q = parse_quant_from_manifest(manifest);
             let size_mb = manifest.total_size_bytes / (1024 * 1024);
             let vram_required_mb =
-                crate::model::auto_manage::vram::estimate_model_vram_mb(manifest.total_size_bytes);
+                crate::model::auto_manage::vram::estimate_model_vram_mb(manifest);
             QuantVariantInfo {
                 model_id: manifest.id.0.clone(),
                 display_name: manifest.name.clone(),

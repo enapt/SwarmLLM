@@ -703,9 +703,8 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
         // find the card (#483 (a)).
         let (estimated_gpu_mb, fits_on_gpu) =
             pool.gpu_estimate_and_fit(&model_id, crate::inference::process_pool::Requester::Owner);
-        let estimated_vram = estimated_gpu_mb.unwrap_or_else(|| {
-            crate::model::auto_manage::estimate_model_vram_mb(m.total_size_bytes)
-        });
+        let estimated_vram = estimated_gpu_mb
+            .unwrap_or_else(|| crate::model::auto_manage::estimate_model_vram_mb(m));
 
         let mut entry = build_model_json(
             &m.id.0,
@@ -986,8 +985,7 @@ pub async fn shard_storage(State(state): State<AppState>) -> Json<serde_json::Va
 
         total_local_bytes += local_bytes;
 
-        let estimated_vram =
-            crate::model::auto_manage::estimate_model_vram_mb(manifest.total_size_bytes);
+        let estimated_vram = crate::model::auto_manage::estimate_model_vram_mb(&manifest);
 
         // Determine model readiness
         let all_shards_available = shard_details.iter().all(|s| {

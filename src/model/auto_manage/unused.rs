@@ -404,15 +404,16 @@ pub(crate) fn swarm_use_of(
     }
 }
 
-/// Could the swarm's online cards run a model of `total_size_bytes` between
-/// them (#452)? Its estimated graphics memory against every card's
+/// Could the swarm's online cards run a model whose card holds `card_bytes`
+/// (`vram::card_weight_bytes`, #297) between them (#452)? Its estimated
+/// graphics memory against every card's
 /// (`AutoShardManager::swarm_card_mb`); `0` — not yet read, or no card heard
 /// of — says nothing, and any model may be tried. A model past it runs only
 /// with processors in its chain, at a few tokens a second: the 122B and 397B
 /// parts that took the 70B's room on the Proxmox box (2026-11-08) were tried
 /// on what people run outside the swarm, on cards that could not hold them.
-pub(crate) fn the_cards_could_run(total_size_bytes: u64, swarm_card_mb: u64) -> bool {
-    swarm_card_mb == 0 || super::vram::estimate_model_vram_mb(total_size_bytes) <= swarm_card_mb
+pub(crate) fn the_cards_could_run(card_bytes: u64, swarm_card_mb: u64) -> bool {
+    swarm_card_mb == 0 || super::vram::estimate_card_vram_mb(card_bytes) <= swarm_card_mb
 }
 
 /// Why a model is — or is not — one nobody runs (#452), as [`judge`] and
@@ -646,20 +647,20 @@ impl AutoShardManager {
     /// Is `model_id` worth TRYING for what people run outside the swarm (#452)?
     /// The day's reading names it ([`crate::daemon::SharedState::popular_outside_the_swarm`],
     /// `None` without a fresh one) AND the swarm's cards could run it
-    /// ([`the_cards_could_run`]; `total_size_bytes`, asked only for a model the
+    /// ([`the_cards_could_run`]; `card_bytes`, asked only for a model the
     /// reading names, `None` where its manifest is unknown). The one answer the
     /// download pass's room (`scoring::is_scarce`'s `run_outside`) and
     /// [`Self::unused_verdict`] read — never the reading alone.
     pub(super) fn worth_trying(
         &self,
         model_id: &ModelId,
-        total_size_bytes: impl FnOnce() -> Option<u64>,
+        card_bytes: impl FnOnce() -> Option<u64>,
     ) -> Option<bool> {
         self.shared_state
             .popular_outside_the_swarm(model_id)
             .map(|named| {
                 named
-                    && total_size_bytes().is_none_or(|bytes| {
+                    && card_bytes().is_none_or(|bytes| {
                         the_cards_could_run(
                             bytes,
                             self.swarm_card_mb
@@ -858,7 +859,7 @@ impl AutoShardManager {
                     state
                         .model_registry
                         .get_manifest(model_id)
-                        .map(|m| m.total_size_bytes)
+                        .map(|m| super::vram::card_weight_bytes(&m))
                 })
             },
             || self.swarm_use(model_id, now, window),
