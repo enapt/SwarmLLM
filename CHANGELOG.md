@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.3.303-alpha] — 2026-11-21
+
+**A computer that restarts no longer floods the swarm with model descriptions it was just sent.** After a restart,
+peers send their newer descriptions of the models within seconds, and the next gossip round broadcast about 30 of
+them (around 56 KB each) to every computer as if they were this computer's own changes — on every restart of every
+computer. A description taken whole from a peer is now left to the computer that sent it: restarted on this build,
+the second and third rounds sent none where 32 went before. Changes this computer makes itself are announced as
+before (#91).
+
+**When a computer partway through a split turns its share down, the error is written for you.** A computer holding
+part of a model that refused its part as the work arrived was quoted to the person asking in words meant for its own
+owner ("this node's budget allows …, raise `resources.max_ram_mb`"). It now says what that computer had room for —
+how many of the layers it was sent would load, or how long a conversation its memory takes — in this computer's
+words (#483).
+
+**The log names every computer holding a model that a plan left out, and why** — cooling down, installing an update,
+not connected, already failed this request, outside your pool, or turned away by a route you set — one line a plan
+(`DIAG: holders of this model left out before planning`), so a split that went somewhere slow can be explained.
+
+For testers: `SWARMLLM_CARD_CLOCK_HOLD=1` keeps this computer's graphics card awake between the steps of a split it
+takes part in, with a 2 ms piece of work every 4 ms for a second after each step. A split whose guesser runs inside
+the model's own process gains (Qwen3.8-27B split between here and Australia: this side's step 25 ms instead of 74-76,
+replies about 13% faster). A split whose helper model runs as a second process on the same card loses about 10%
+(Qwen2.5-14B half here, half in Australia: code 32.1-33.6 tokens a second held against 36.8-37.2), because a card
+takes turns between processes — so it is off until it can hold only a card nothing else on the computer is using
+(#489).
+
 ## [0.3.302-alpha] — 2026-11-20
 
 **Your own request takes the graphics card back from a model only other computers are using.** A model serving
