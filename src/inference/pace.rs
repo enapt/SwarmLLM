@@ -216,8 +216,9 @@ impl CardStep {
 /// own time to learn how long the thread was BLOCKED (#146 (4)). An all-card
 /// forward runs on its caller's thread (`cpu_pools::in_phase_pool` hands
 /// `cpu_layers == 0` straight back), so this is the step's own work. `None`
-/// off Linux — the one place the stall is known (WSL2) — and then the whole
-/// time counts.
+/// off Linux — the stall is known only under WSL2 — and then no step is judged:
+/// its wall time would count a first launch's kernel compile as a stall
+/// (candle ships PTX, compiled by the driver at first launch, gotcha #159).
 fn thread_processor_time() -> Option<Duration> {
     #[cfg(target_os = "linux")]
     {
@@ -318,11 +319,15 @@ impl Step {
         }
         if self.card == CardStep::Judged {
             let took = self.started.elapsed();
-            let blocked = self
+            // Judged only where the thread's own work can be taken out: off
+            // Linux a first launch compiling kernels would read as a stall.
+            if let Some(blocked) = self
                 .processor_at_start
                 .zip(thread_processor_time())
-                .map(|(start, now)| took.saturating_sub(now.saturating_sub(start)));
-            crate::inference::cuda_pool::note_card_step(took, blocked);
+                .map(|(start, now)| took.saturating_sub(now.saturating_sub(start)))
+            {
+                crate::inference::cuda_pool::note_card_step(took, blocked);
+            }
         }
         let permille = pause_permille();
         if permille == 0 {
@@ -647,16 +652,20 @@ mod tests {
         inner.end(|| {}, || false);
         outer.end(|| {}, || false);
         assert_eq!(take_stall_report(), None);
-        // Judged and blocked: a stall, handed out once.
+        // Judged and blocked: a stall, handed out once — where the platform can
+        // say how long the thread worked; elsewhere nothing is judged.
         let step = Step::begin(CardStep::Judged);
         std::thread::sleep(long);
         step.end(|| {}, || false);
+        if thread_processor_time().is_none() {
+            assert_eq!(take_stall_report(), None, "nothing judged off Linux");
+            return;
+        }
         let told = take_stall_report().expect("a blocked judged step is a stall");
         assert!(told >= CARD_STEP_STALL, "{told:?}");
         assert_eq!(take_stall_report(), None, "handed out once");
-        // Judged and BUSY as long: never blocked, so no stall — where the
-        // platform can say how long the thread worked.
-        if thread_processor_time().is_some() {
+        // Judged and BUSY as long: never blocked, so no stall.
+        {
             let step = Step::begin(CardStep::Judged);
             busy_for(long);
             step.end(|| {}, || false);

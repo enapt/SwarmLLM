@@ -5229,7 +5229,9 @@ tells the owner `activity.card_stalled_restart_windows` under WSL2 (the log line
 **What a change must keep.**
 - **No warm-up exclusion.** The stall comes EARLY in a process's first reply; a rule skipping the
   first steps would skip it. The floor holds because healthy first replies stay ≤ 178 ms.
-- **Blocked time, not wall time**, wherever the platform can say; off Linux all of it counts.
+- **Blocked time, not wall time** — and no step is judged where the platform cannot say (off Linux):
+  wall time there would log a first launch's kernel compile as a stall (candle ships PTX, which the driver
+  compiles at a kernel's first launch after every update, gotcha #159; the pre-release review, 2026-11-21).
 - **Two processes, not one sample** — a single slow step is a hiccup; the shape is every process.
 - **Changes nothing the node does**, like the probe. `CardPace` (2 s, wall time) still paces.
 - Test end to end on a healthy card with `SWARMLLM_CARD_STALL_MS=0` (every judged step a stall).

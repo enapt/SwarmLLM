@@ -402,15 +402,14 @@ fn stall_threshold() -> Duration {
 /// This worker's longest stall not yet handed to the daemon, in ms; 0 = none.
 static STALL_MS: AtomicU32 = AtomicU32::new(0);
 
-/// A judged card step ended (`pace::Step::end`, the one caller): `took` is its
-/// time, `blocked` the part of it its thread spent OFF the processor — `None`
-/// where the platform cannot say, and then all of it. Only blocked time counts:
+/// A judged card step ended (`pace::Step::end`, the one caller, only where the
+/// platform can say how long its thread worked): `took` is its time, `blocked`
+/// the part of it its thread spent OFF the processor. Only blocked time counts:
 /// the stall holds the thread asleep in the driver, while a first launch that
 /// compiles a kernel the release has no machine code for keeps it working, and
 /// an update would otherwise tell the owner to restart Windows. Every stall is
 /// logged; the longest waits for [`take_stall_report`].
-pub(crate) fn note_card_step(took: Duration, blocked: Option<Duration>) {
-    let blocked = blocked.unwrap_or(took);
+pub(crate) fn note_card_step(took: Duration, blocked: Duration) {
     if blocked < stall_threshold() {
         return;
     }
