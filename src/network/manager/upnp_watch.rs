@@ -111,6 +111,13 @@ pub(super) struct UpnpWatch {
     gateway_misses: u32,
     /// The gateway's own external address is not public.
     behind_another_nat: bool,
+    /// A search found the router (#439): its answer reached this computer, so
+    /// neither "no router" nor WSL's firewall is what stands in the way.
+    router_found: bool,
+    /// Where the silence that explains a refusal is measured from: the start,
+    /// or the search that found the router after one that did not (#439) —
+    /// that search's mappings are asked for only then.
+    quiet_since: Instant,
 }
 
 impl UpnpWatch {
@@ -124,6 +131,8 @@ impl UpnpWatch {
             explained: false,
             gateway_misses: 0,
             behind_another_nat: false,
+            router_found: false,
+            quiet_since: started,
         }
     }
 
@@ -143,12 +152,19 @@ impl UpnpWatch {
             UpnpVerdict::Off
         } else if self.behind_another_nat {
             UpnpVerdict::BehindAnotherNat
-        } else if self.wsl == Wsl::Mirrored && (self.gateway_misses > 0 || !self.heard) {
+        } else if self.wsl == Wsl::Mirrored
+            && !self.router_found
+            && (self.gateway_misses > 0 || !self.heard)
+        {
             UpnpVerdict::WslMirrored
         } else if self.gateway_misses > 0 {
             UpnpVerdict::NoRouter
         } else if !self.heard {
-            UpnpVerdict::Refused
+            if now.saturating_duration_since(self.quiet_since) >= UPNP_QUIET_AFTER {
+                UpnpVerdict::Refused
+            } else {
+                UpnpVerdict::Searching
+            }
         } else {
             UpnpVerdict::Searching
         }
@@ -168,6 +184,19 @@ impl UpnpWatch {
     pub(super) fn note_behind_another_nat(&mut self) {
         self.heard = true;
         self.behind_another_nat = true;
+    }
+
+    /// A search found the router (#439). After an earlier miss, the misses are
+    /// history: nothing has been heard SINCE the router answered, and the
+    /// silence that would mean a refusal starts now. Found at the first search,
+    /// nothing changes but [`Self::verdict`]'s WSL reading.
+    pub(super) fn note_gateway_found(&mut self, now: Instant) {
+        self.router_found = true;
+        if self.gateway_misses > 0 {
+            self.gateway_misses = 0;
+            self.heard = false;
+            self.quiet_since = now;
+        }
     }
 
     /// A search found no gateway. True the FIRST time only: the search repeats
@@ -190,7 +219,7 @@ impl UpnpWatch {
         if !self.enabled || self.heard || self.explained || publicly_reachable {
             return false;
         }
-        if now.saturating_duration_since(self.started) < UPNP_QUIET_AFTER {
+        if now.saturating_duration_since(self.quiet_since) < UPNP_QUIET_AFTER {
             return false;
         }
         self.explained = true;
@@ -305,6 +334,53 @@ mod tests {
         assert_eq!(mirrored.verdict(now), UpnpVerdict::WslMirrored, "silent");
         mirrored.note_mapped();
         assert_eq!(mirrored.verdict(now), UpnpVerdict::Mapped);
+    }
+
+    /// #439: a router missed at the first search and found by a later one,
+    /// which then maps nothing, is a REFUSAL — not "turn UPnP on" — once the
+    /// quiet period has run from the find, not from the start.
+    #[test]
+    fn a_router_found_late_that_maps_nothing_reads_as_a_refusal() {
+        let (mut w, now) = watch_started_ago(true, UPNP_QUIET_AFTER * 4);
+        assert!(w.note_no_gateway());
+        assert_eq!(w.verdict(now), UpnpVerdict::NoRouter);
+
+        w.note_gateway_found(now);
+        assert_eq!(
+            w.verdict(now),
+            UpnpVerdict::Searching,
+            "its mappings are only being asked for now"
+        );
+        assert!(
+            !w.silence_to_explain(now, false),
+            "the silence is measured from the find"
+        );
+
+        let later = now + UPNP_QUIET_AFTER;
+        assert_eq!(w.verdict(later), UpnpVerdict::Refused);
+        assert!(w.silence_to_explain(later, false));
+
+        w.note_mapped();
+        assert_eq!(w.verdict(later), UpnpVerdict::Mapped);
+    }
+
+    /// Found at the first search, a find changes nothing outside WSL; under
+    /// WSL's mirrored networking it says the router's answer got in, so a
+    /// silence after it is the router refusing, not Windows' firewall.
+    #[test]
+    fn a_router_found_first_time_keeps_the_verdicts_but_rules_out_the_wsl_firewall() {
+        let (mut w, now) = watch_started_ago(true, UPNP_QUIET_AFTER);
+        w.note_gateway_found(now);
+        assert_eq!(w.verdict(now), UpnpVerdict::Refused);
+        assert!(w.silence_to_explain(now, false));
+
+        let started = now
+            .checked_sub(UPNP_QUIET_AFTER)
+            .expect("a clock old enough");
+        let mut mirrored = UpnpWatch::new(true, Wsl::Mirrored, started);
+        assert_eq!(mirrored.verdict(now), UpnpVerdict::WslMirrored);
+        mirrored.note_gateway_found(started);
+        assert_eq!(mirrored.verdict(now), UpnpVerdict::Refused);
     }
 
     #[test]

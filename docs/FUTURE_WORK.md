@@ -7444,16 +7444,6 @@ chunk, without breaking the OpenAI/Anthropic wire shapes.
 
 ### Dashboard and first-hour experience
 
-#### #439 — The relay hint says "turn on UPnP" where a router found late refused the ports
-`P3` · ux · **OPEN** — 2026-11-09 · history: the pre-release review of `7b2229f5` (the relay hint)
-
-`UpnpWatch::verdict` reads any earlier "no gateway" as `NoRouter` until a mapping lands. A router missed at the first
-search, found by a later one (vendor/libp2p-upnp searches again on a backoff, #329) and then refusing the mapping emits
-nothing: the hint stays "turn UPnP on in the router" where "another device holds the ports" is the cause. Narrow (a
-router slow to answer at boot AND a held port). **Fix**: the vendored crate emits a gateway-found event (it knows: the
-search succeeded), and `UpnpWatch` clears `gateway_misses` on it, so the silence after it reads `Refused`. Prior art:
-none needed beyond the crate's own search loop — the event is the missing half of `GatewayNotFound`.
-
 #### #62 — The Network map is blank on a node that has not served across regions
 `P3` · ux · **PARTIAL** — 2026-09-13 · history: archive row #62 and § "The Network map is blank on a node that has not served across regions"
 
@@ -8290,6 +8280,14 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-11-21, on main** (#439)
+- #439 — `P3` — **The relay hint said "turn on UPnP" where a router found late refused the ports.** Fixed as the entry
+  proposed: vendor/libp2p-upnp emits `Event::GatewayFound` where a search succeeds (upstream 0.5/0.6 emit nothing
+  there), and `UpnpWatch::note_gateway_found` makes the earlier misses history and measures the refusal's quiet period
+  from the find; a found router also rules out WSL's mirrored-networking firewall. Tests
+  `a_router_found_late_that_maps_nothing_reads_as_a_refusal`,
+  `a_router_found_first_time_keeps_the_verdicts_but_rules_out_the_wsl_firewall`.
 
 **Closed 2026-11-21, released in v0.3.304** (#489)
 - #489 — `P1` — **The card clock hold slowed a split whose drafter model shares the card, so it was off by default.**

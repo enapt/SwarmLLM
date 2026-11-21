@@ -53,6 +53,9 @@
   means it will not list (`choice::Table`).
 - A gateway not found is searched for again after 2 minutes, doubling to 30 (FUTURE_WORK
   #329); listen addresses seen meanwhile are mapped when one is found.
+- A search that finds a routable gateway says so (`Event::GatewayFound`, 2026-11-21, #439):
+  upstream emits nothing there, so a gateway found by a later search left the earlier
+  `GatewayNotFound` standing and a router that then refused every mapping read as no router.
 
 ## 0.6.0
 

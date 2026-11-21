@@ -213,6 +213,11 @@ pub enum Event {
     GatewayNotFound,
     /// The Gateway is not exposed directly to the public network.
     NonRoutableGateway,
+    /// SwarmLLM patch (#439): a search found a routable gateway. Upstream says
+    /// nothing here, so a gateway found by a LATER search (searched again on a
+    /// backoff, #329) left the earlier [`Event::GatewayNotFound`] standing, and a
+    /// router that then refused every mapping read as "no router".
+    GatewayFound,
 }
 
 /// A list of port mappings and its state.
@@ -630,6 +635,10 @@ impl NetworkBehaviour for Behaviour {
                                 self.mappings.set(mapping, MappingState::Inactive);
                             }
                             self.state = GatewayState::Available(gateway);
+                            // SwarmLLM patch (#439). The mappings just placed are
+                            // asked for on the next poll, which the swarm makes
+                            // straight after taking this event.
+                            return Poll::Ready(ToSwarm::GenerateEvent(Event::GatewayFound));
                         }
                         Err(err) => {
                             tracing::debug!("could not find gateway: {err}");

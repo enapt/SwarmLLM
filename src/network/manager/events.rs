@@ -824,6 +824,14 @@ impl NetworkManager {
                             tracing::debug!("UPnP: still no IGD gateway");
                         }
                     }
+                    UpnpEvent::GatewayFound => {
+                        // vendor/libp2p-upnp's patch (#439): a router found by a
+                        // later search makes the earlier "no router" history, so a
+                        // refusal after it is explained as one.
+                        self.upnp_watch
+                            .note_gateway_found(std::time::Instant::now());
+                        tracing::debug!("UPnP: found the IGD gateway");
+                    }
                     UpnpEvent::NonRoutableGateway => {
                         self.upnp_watch.note_behind_another_nat();
                         // The gateway exists but is itself behind another NAT —

@@ -5799,6 +5799,16 @@ start, and keeps no timer after `GatewayNotFound`; the vendored copy searches
 again after 2 minutes, doubling to 30 (#329, below), so UPnP turned on at the
 router later is used without a restart.
 
+**A router found late is a router (2026-11-21, #439).** Upstream emits nothing when a
+search SUCCEEDS, so `UpnpWatch` kept the first search's miss: a router slow to answer at
+boot, found by a later search and then refusing every mapping (a port another device
+holds), read as `NoRouter` and the owner was told to turn UPnP on. The vendored crate now
+emits `Event::GatewayFound`; `UpnpWatch::note_gateway_found` makes the misses history and
+measures the refusal's quiet period from the find (its mappings are asked for only then),
+and a found router rules out WSL's mirrored-networking firewall (the router's answer got
+in). Tests `a_router_found_late_that_maps_nothing_reads_as_a_refusal`,
+`a_router_found_first_time_keeps_the_verdicts_but_rules_out_the_wsl_firewall`.
+
 **Two nodes behind a router that REPLACES (2026-10-24, FUTURE_WORK #332).** This
 PC's node and the Proxmox box (192.168.1.200) share one router. Its table, read
 with `GetGenericPortMappingEntry`: at 00:55Z 8810/TCP and 8800/UDP forwarded to
