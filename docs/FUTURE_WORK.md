@@ -8310,6 +8310,11 @@ grep `^| N |`).
   too); all five deciders (quant pick, download score, wishlist, capacity plan, segment registration) and #452's
   `the_cards_could_run` read it. The E2B at Q4_K_M: ~1,667 MB against the file's ~3,780 (the loader: 1,859). A manifest
   without a table prices the whole file, as before. Test `a_card_is_not_charged_the_tensors_the_machine_keeps`.
+  **Follow-up the same night (the pre-release review):** segment registration's budget can be a node with NO card
+  (`MemoryScope::AllResident`, `inference.max_split_model_memory_mb`), where the table sits in the memory the cap
+  counts — the card's share let an E2B register at ~1,667 MB under a cap its ~3.6 GB load overshot. The scope is now a
+  required argument (`vram::estimate_segment_mb`): the card's share on a card, the whole file without one (same test;
+  red with the no-card arm priced the card's way).
 
 **Closed 2026-11-21, released in v0.3.304** (#489)
 - #489 — `P1` — **The card clock hold slowed a split whose drafter model shares the card, so it was off by default.**

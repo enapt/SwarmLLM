@@ -1491,20 +1491,33 @@ pub(crate) fn query_gpu_vram_free_mb() -> Option<u64> {
     super::nvml::first_card_memory().map(|m| m.total_mb.saturating_sub(m.used_mb))
 }
 
-/// Estimate VRAM for a segment (layer range) by scaling the full-model estimate
-/// by the fraction of layers covered.
-pub(super) fn estimate_segment_vram_mb(
+/// Estimate the memory a segment (layer range) takes in `scope`'s memory, by
+/// scaling the whole model's estimate by the fraction of layers covered.
+///
+/// **The scope decides which tensors count**, so it is required: the card
+/// holds no host-resident table (`split::host_resident` — Gemma 4's per-layer
+/// token table, #297), so `GraphicsMemory` prices `card_weight_bytes`; a node
+/// with no card keeps every tensor in its own memory, so `AllResident` prices
+/// the whole file. Pricing the no-card budget by the card's share let a Gemma 4
+/// E2B register at ~1,667 MB under a cap its ~3.6 GB load then overshot.
+pub(super) fn estimate_segment_mb(
     manifest: &crate::types::ModelManifest,
     layer_start: usize,
     layer_end: usize,
+    scope: crate::daemon::state::MemoryScope,
 ) -> u64 {
+    let weight_bytes = match scope {
+        crate::daemon::state::MemoryScope::GraphicsMemory => card_weight_bytes(manifest),
+        crate::daemon::state::MemoryScope::AllResident => manifest.total_size_bytes,
+    };
+    // The same 15% over the weights either way, as the whole-file figure always had.
+    let full_mb = estimate_card_vram_mb(weight_bytes);
     let total_layers = manifest.num_layers as usize;
     if total_layers == 0 {
-        return estimate_model_vram_mb(manifest);
+        return full_mb;
     }
     let fraction = (layer_end - layer_start) as f64 / total_layers as f64;
-    let full_vram = estimate_model_vram_mb(manifest);
-    (full_vram as f64 * fraction).ceil() as u64
+    (full_mb as f64 * fraction).ceil() as u64
 }
 
 /// Compute the VRAM budget from SharedState for passing to `check_and_load_model`.
@@ -1989,9 +2002,6 @@ mod tests {
         assert_eq!(missing.run(&[]), None);
     }
 
-    /// A mixture-of-experts model needs memory for every expert, not the few a
-    /// token uses: they are all resident. Pinned against the discount this
-    /// replaced, which put Mixtral 8x7B at ~55% of its size.
     /// #297: a card is charged what it HOLDS. Gemma 4 E2B at Q4_K_M — 3,287 MiB,
     /// of which the per-layer token table the loader keeps in the machine's
     /// memory is 1,837 — reads ~1,667 MB, beside the loader's own 1,859; charged
@@ -2061,8 +2071,36 @@ mod tests {
             estimate_model_vram_mb(&no_table),
             estimate_card_vram_mb(3_287 * MIB)
         );
+
+        // The scan's pre-check weighs a segment against the memory its budget
+        // names: the card's share on a card, the whole file on a node with none
+        // (where the table sits in the same memory the cap counts).
+        use crate::daemon::state::MemoryScope;
+        let on_card = estimate_segment_mb(&e2b, 0, 35, MemoryScope::GraphicsMemory);
+        let no_card = estimate_segment_mb(&e2b, 0, 35, MemoryScope::AllResident);
+        assert_eq!(
+            on_card, priced,
+            "the card's segment is priced as the card's model"
+        );
+        assert_eq!(
+            no_card,
+            estimate_card_vram_mb(3_287 * MIB),
+            "a node with no card is charged the whole file, table included: {no_card}"
+        );
+        assert!(
+            no_card > 3_600,
+            "the E2B's ~3.6 GB load is not under-charged: {no_card}"
+        );
+        let fifth = estimate_segment_mb(&e2b, 0, 7, MemoryScope::AllResident);
+        assert!(
+            (no_card / 5..=no_card / 5 + 1).contains(&fifth),
+            "a segment is its share of the layers: {fifth} of {no_card}"
+        );
     }
 
+    /// A mixture-of-experts model needs memory for every expert, not the few a
+    /// token uses: they are all resident. Pinned against the discount this
+    /// replaced, which put Mixtral 8x7B at ~55% of its size.
     #[test]
     fn a_moe_model_is_charged_for_every_expert() {
         let total_bytes = 47u64 * 1024 * 1024 * 1024; // Mixtral 8x7B on disk

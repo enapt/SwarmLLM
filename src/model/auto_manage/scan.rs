@@ -6,7 +6,7 @@ use crate::daemon::SharedState;
 use crate::model::manifest::ModelManifestExt;
 use crate::types::{ModelId, NetworkCommand, ShardId};
 
-use super::vram::{compute_vram_budget, estimate_segment_vram_mb};
+use super::vram::{compute_vram_budget, estimate_segment_mb};
 
 /// Scan the local models directory for shard files that exist on disk but are
 /// not yet registered in the model registry. For any newly discovered shards,
@@ -644,7 +644,7 @@ pub async fn check_and_load_model(
         // never released it — see `SharedState::committed_memory_mb` for the
         // measurement, and `docs/FUTURE_WORK.md` #55.
         if let Some((budget, scope)) = shared.split_model_budget_with(vram_budget_mb) {
-            let estimated = estimate_segment_vram_mb(&manifest, layer_start, layer_end);
+            let estimated = estimate_segment_mb(&manifest, layer_start, layer_end, scope);
             let total_loaded = shared.committed_memory_mb(scope);
             if total_loaded + estimated > budget {
                 // Refuse to register; never evict. What is already registered

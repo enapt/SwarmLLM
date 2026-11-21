@@ -3816,7 +3816,7 @@ fn release_reserved(map: &dashmap::DashMap<ModelId, u64>, model_id: &ModelId, mb
 /// total `shard_bytes`.
 ///
 /// `None` asks about the whole model. Weights are charged in proportion to the
-/// layers mapped — the same approximation `auto_manage::estimate_segment_vram_mb`
+/// layers mapped — the same approximation `auto_manage::estimate_segment_mb`
 /// and the scheduler's `bytes_per_layer` make, so the planner and the loader
 /// price a segment identically.
 pub(crate) fn segment_shape(
