@@ -4483,8 +4483,17 @@ drafted / accepted / emitted triple; a verdict DELAY has no counterpart there (o
 
 #### #490 — Every `nvidia-smi` the node starts under WSL2 leaks ~15 KB of Windows' kernel memory, ~9,500 a day
 
-`P2` · reliability/perf · **FIXED 2026-11-21, released in v0.3.304 — the node starts no `nvidia-smi` (429 an hour → 0); OPEN: how much a
-launch keeps (the burst test) and whether this removes #1151's stall** · history: #146 (4), #411's 11-21 note, gotcha #1151
+`P2` · reliability/perf · **FIXED 2026-11-21, released in v0.3.304 — the node starts no `nvidia-smi` (429 an hour → 0); a launch
+KEEPS ~5.3-6 KB (burst test, below); OPEN: whether this removes #1151's stall** · history: #146 (4), #411's 11-21 note, gotcha #1151
+
+**The burst test (2026-11-21 12:55-13:58Z, Windows up ~1.5 h, the live node on official v0.3.304 — no launches of
+its own; `~/swarmllm-gate/pool490/burst490.sh`, safety kit on, 0 driver events)**: Windows' nonpaged pool, read
+every ~60 s — 562.0-562.8 MiB flat over the baseline; 2,000 `nvidia-smi` launches in 64 s → 572.4 (+10.3 MiB) →
+572.5 after 15 quiet minutes; 2,000 more → 582.0 → 584.9 after 15 min; a 19-min tail 582.8-585.7, ending 584.8.
+**A staircase: +22.8 MiB kept for 4,000 launches, ~5.8 KB a launch, held ≥ 37 min** — Windows gives none of it
+back. (The first 5,000-launch reading, ~15 KB a launch, was on the boot before; why they differ is not
+known.) At .303's 429 launches an hour that is ~2.4 MiB an hour, ~58 MiB a day, ~380 MiB by #804's 156 h reset;
+v0.3.304 adds none. The safety kit still starts one every ~10 s while a check runs (~2 MiB an hour of checking).
 
 **Measured after the fix (2026-11-21, Windows up 5.5-6.3 h, the live node = the #490 build)**: `nvidia-smi` started
 by the node 429 in the hour before (.303; 438 on the machine) → 0 (a 36-min window, `pool_hour.py`, then a 180 s
