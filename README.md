@@ -149,23 +149,23 @@ idea, applied to running AI instead of sharing files.)
 
 ## How fast is it?
 
-<!-- speeds:begin, reviewed for 0.3.303-alpha. Refreshed at every release: .claude/rules/completeness.md § "README speeds" -->
+<!-- speeds:begin, reviewed for 0.3.304-alpha. Refreshed at every release: .claude/rules/completeness.md § "README speeds" -->
 Speed is in **tokens a second**: a token is a word or part of one, and most
 people read about 5 a second. The figures are from the project's test laptop,
 with an 8 GB NVIDIA RTX 3070 graphics card and an 8-core AMD Ryzen 7 5800H
 processor, on its own or teamed up with volunteers' computers.
 
 <!-- release-check:begin -->
-<!-- from the v0.3.302 release check's speed step, timed again on the published release with the machine idle, the check's own figures set aside -->
+<!-- from the v0.3.303 release check, timed on the downloaded release -->
 **On one computer.** Each model reads a 1,800-token document and writes 128
 tokens about it.
 
 | Model | Runs on | Writing (tokens a second) | Reading (tokens a second) |
 |---|---|---|---|
-| Qwen2.5 Coder 7B | the graphics card | 67–68 | 1,800–1,820 |
-| Qwen2.5 14B | card and processor (too big for the card) | 13.5–13.7 | 380–450 |
-| Qwen3 30B-A3B (2-bit) | card and processor (a mixture of experts, too big for the card) | 26.1–26.2 | 230 |
-| Llama 3.2 3B | the processor only | 17.3–18.0 | 80 |
+| Qwen2.5 Coder 7B | the graphics card | 67 | 1,780–1,790 |
+| Qwen2.5 14B | card and processor (too big for the card) | 13.2–13.9 | 490–530 |
+| Qwen3 30B-A3B (2-bit) | card and processor (a mixture of experts, too big for the card) | 21.5–24.6 | 230 |
+| Llama 3.2 3B | the processor only | 17.3–17.6 | 80 |
 <!-- release-check:end -->
 
 **Across computers.** The same laptop, in Thailand, asking a volunteer's
@@ -411,7 +411,7 @@ SwarmLLM is built by a human developer working with Claude Code, an AI
 programming assistant: the human sets the direction, tests and reviews, and
 Claude writes the code. We say so openly so you can judge the project on its
 merits. Every change is checked by thousands of automated tests
-(4818 lib tests + 80 integration tests) before it ships, and regular
+(4829 lib tests + 80 integration tests) before it ships, and regular
 automated audits are logged in the repository. Scrutiny and contributions are
 welcome.
 

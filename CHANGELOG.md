@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.3.304-alpha] — 2026-11-21
+
+**A split with another computer keeps your graphics card at full speed between its steps — now on by default.** While
+this computer's part of a split model waits for the far computer, the card's power saving lowered its clocks, so the
+next step ran slower. The node now keeps the card awake with tiny pieces of work during those waits, and pauses that
+whenever another of its own models is using the card. Measured on this build, switched per run in one binary:
+Qwen3.8-27B split between this laptop and a computer in Australia, this side's step 24 ms against 51 ms and replies
+8-15% faster; Qwen2.5-14B split the same way with its helper model on the same card, no measurable cost (code 41.4 vs
+42.2, prose 18.2 vs 18.3 tokens a second, within the link's noise). `SWARMLLM_CARD_CLOCK_HOLD=0` turns it off (#489).
+
+**On Windows under WSL2, the node no longer leaves Windows' kernel memory behind every time it reads the graphics
+card.** It read the card by starting `nvidia-smi` — about 9,500 times a day — and under WSL2 each start left about 15 KB
+of Windows' kernel memory behind (5,000 starts: +75 MB, still there afterwards), roughly 140 MB a day. It now reads
+memory, temperature, the driver's cooling flags, the card's name and compute capability through one connection to
+NVIDIA's management library, loaded once: the node started 429 `nvidia-smi` an hour before and none after. The figures
+are the ones `nvidia-smi` printed; a reading that does not answer within 10 seconds still counts as unknown, and a
+driver stuck for a minute still sends new model processes to the processor (#490).
+
+**You are told when your graphics card has started pausing, and to restart Windows.** After a day or two of Windows
+uptime, the graphics driver under WSL2 can hold a model's short steps for half a second to 5 seconds where they take
+hundredths — once per model process, early in its first reply (a 14B split with Australia wrote prose at 8.4-14.5 tokens
+a second at 46-51 hours of uptime, 18-20 on a fresh boot). The existing check, which times fresh card memory when a
+model loads, read normal through those pauses, so its "restart Windows" notice never came. The node now times each
+short step by how long it sat waiting on the driver, leaving out its own work (a first launch that compiles a kernel
+never counts); once two of its model processes have paused half a second or more within six hours, the dashboard tells
+you to restart Windows, at most every 12 hours. It changes nothing the node does (#146).
+
 ## [0.3.303-alpha] — 2026-11-21
 
 **A computer that restarts no longer floods the swarm with model descriptions it was just sent.** After a restart,
