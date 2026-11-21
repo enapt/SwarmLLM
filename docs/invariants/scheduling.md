@@ -6610,7 +6610,10 @@ near half 15.2 against 17.0 (−10%). Tok/s stayed the same because main ran MOR
 against 476-541) for the same 400 tokens: tokens a forward fell from 0.78-0.84 to 0.73-0.75. **So
 the time split misleads: a cheaper requester grows more rows, not more reply.** What binds is how far
 ahead along the model's path the tree reaches each round trip: ~6 tokens a 430 ms round trip. Yet a
-forward adds three levels, and 9-10 forwards fit in a round trip. **Moving the split point says the same**
+forward adds three levels, and 9-10 forwards fit in a round trip. (2026-11-21, MEASURED with the flow's
+`voided_levels` / `verdict_ms`: a forward deepens the tree only ~1.1 levels in prose — its rows go mostly to
+alternatives — and the verdict delay is ~180 ms, so "430 ms" was this reading's arithmetic, not a measured
+delay; `docs/plans/standing_ring.md` § 7.) **Moving the split point says the same**
 (2026-11-16, FUTURE_WORK #411 "Also", `~/swarmllm-gate/deep/fr/real_link_bal292/`): the 14B over TH↔AU at
 130-149 ms, this node the slower side (~40 ms a forward with its drafting) — 3 and 6 of its 26 layers moved onto
 the far card (all on the card there) ran prose at 0.94x and 0.85x of the half split, code below it too. A

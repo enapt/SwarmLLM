@@ -12,8 +12,10 @@ inventors (idle swarm, the ceiling, thousands of cards), an adversary, an archit
 from our own measurements first and prior art second. It sits beside `small_slices.md` (the ranked steps toward
 20-30 tok/s) and `faster_than_local.md` § 9 (the flow); where they disagree, the measurement in § 7 below decides.
 
-**Read § 7 first**: kill ladder step 1 ran the same night on the flow's own records, and the law's split of a
-token's time does NOT hold as stated.
+**Read § 7 first** (MEASURED the same night): the verdict delay is ~180 ms, as the law has it, but misses × that
+delay are under half of a prose token's time and none of a code token's; the larger part is the head's own pace
+(busy 98-100%, ~39 ms a forward). A short loop alone reads ~1.2-1.45× prose and nothing for code on today's pair;
+the 3-8× below rests on the pacer, which is unmeasured.
 
 ## Summary
 
@@ -22,7 +24,8 @@ token's time does NOT hold as stated.
    sends their words and receives text.
 2. It gets past today's limit because our own measurements show a reply's time is mostly **wrong guesses multiplied by
    how long a guess waits for its check** (about 40 of every 53 ms today), not the cards' own work, and a short ring
-   of cards shrinks that wait three to four times.
+   of cards shrinks that wait three to four times. **MEASURED since (§ 7): ~20-24 of a 49-54 ms prose token and
+   none of a 21 ms code token — the head's own pace is the larger part.**
 3. We expect **3-8 times the speed of the same model on a member's own computer** (14B: 34-72 tok/s, 27B: 17-44,
    70B: 15-33 where no member can run it at all) and **about 1-2 times a high-end 24 GB card** for the 27B and 70B.
 4. The condition is that the ring's cards are **within one city or region of each other** (20-60 ms) and every slice
@@ -238,42 +241,70 @@ stages, legs from measured pairwise delay, uplink and card class as inputs).
 - Verdict taps, twins, canopy rounds, scout-and-stitch, a drafter guild (appendix).
 - Task-level fan-out scheduling, until the request log shows what share of real requests has that shape.
 
-## 7. Kill ladder step 1 — run 2026-11-21 on the flow's own records
+## 7. Kill ladder step 1 — MEASURED 2026-11-21 (a derivation from older lines came first, and was wrong)
 
-`python3 -I examples/standing_ring_ladder1.py rows292 wide292 lev292 line292 411 411mech 388b` reads every
-`DSD: a tree that flowed is complete` line of seven real-link runs (Qwen2.5-14B Q4_K_M, Thailand ↔ Australia,
-~130 ms, the drafters each run named; 128 replies of ≥ 40 tokens). The line carried no drafted / voided /
-verdict-delay counters, so they are DERIVED from forwards × levels, `emitted` and `misses`:
+**Measured** (`~/swarmllm-gate/deep/fr/real_link.sh` TAG=readme305, 14:28-14:35Z; main `7633b9296` built for the
+card; Qwen2.5-14B Q4_K_M split [0, 24) on this 8 GB card + [24, 48) on the Australian 12 GB card, least round trip
+119 ms; the 0.5B drafter; `flowhalf` arm, two 160-token replies of each kind; 0 driver events). The flow's reply
+line now carries three counters (`dsd_flow::Verdicts`):
 
-| | the law (§ 1) | the records |
-|---|---|---|
-| guessed levels thrown away | 74% | 65-73% |
-| a miss | m 0.177 a level | one every 11.4 tokens (~0.09 a token) |
-| levels a miss throws away | ~16 (`L/d`) | 27-31 on the knob arms (~30 at the median) |
-| verdict delay `L` | 222 ms | ~400-460 ms (levels a miss × 13.5 ms a level) |
-| the head's time a forward | drafter 14.5 + layers 26.5 = 41 ms | drafting 13.6 + layers 25.5 = 40.4 ms, waiting 2% |
+| reply | tok/s | forwards | misses | `verdict_ms` | `miss_verdict_ms` | `voided_levels` | least answer ms | far least ms | far queue ms, most |
+|---|---|---|---|---|---|---|---|---|---|
+| prose 1 | 20.35 | 202 | 18 | 178 | 180 | 84 | 159 | 25 | 60 |
+| prose 2 | 18.65 | 209 | 21 | 185 | 179 | 115 | 155 | 22 | 24 |
+| code 1 | 46.33 | 91 | 0 | 180 | — | 0 | 160 | 25 | 67 |
+| code 2 | 48.31 | 88 | 0 | 180 | — | 0 | 168 | 27 | 13 |
 
-- **The first test passes; the second fails as stated**: the same 53 ms token splits as m ≈ 0.09 × L ≈ 420 ms,
-  not 0.177 × 222. The product — and so every figure fitted to TODAY's shape — is unchanged; what moves is what a
-  short ring buys. With `L` well over the least answer (~170 ms: the round trip and a forward), ~250 ms of it is
-  time a guess waits that is NOT wire — forwards queued behind each other (12 in flight a hop, one every 40 ms).
-- **The queue is already named: FUTURE_WORK #412** (2026-11-06, `examples/far_queue_from_log.py` on #388's debug
-  logs): an answer's delay is flat to ~5 forwards out, then +~30 ms a forward ahead (385 ms at 9) — the far card
-  serving the flow's OWN forwards one at a time; the far's own time ran 120-255 ms over its least while the link's
-  queue stayed within 17 ms. So `L` ≈ the legs + the traversal + that queue, and § 3's "`L` falls to ~1.5
-  traversals plus the legs" holds only where the far keeps pace with the head. At a zero loop on today's pair the
-  records' split reads 13.5 + 0.088 × ~290 ≈ 39 ms a token (~26 tok/s), not the law's 33 — the ring's prediction
-  must be re-priced with the far's queue in `L` before step 3, and #412's merge (or a far that keeps pace) is the
-  lever on it. #412's own schedule replay found the guard's hold already at the ceiling for the 14B pair as
-  measured (far 26.5 ms a forward) and gains of 1.25-1.37x only for a far at 40-60 ms a forward.
-- **What that changes.** A short ring shortens the wire share of `L` only; the queue stays unless the far keeps
-  pace. Which share is which is now MEASURED on every reply (below), not derived.
-- **Caveats on the derivation**: forwards × 3 counts the bonus and rebase forwards as drafted levels (0.61
-  rebases a miss), so "levels thrown away" overcounts a little; `misses` counts a walk that found the target's
-  token under no row, the law's m a level that lost it — the same event.
-- **Measured from here on**: the flow's reply line carries `verdict_ms` (median wait of a kept guess, drafting
-  to the walk), `miss_verdict_ms` (the level that lost) and `voided_levels` (levels drafted under each missed row,
-  summed) — log-only (`dsd_flow::Verdicts`). The next real-link run reads `L` directly; steps 2-4 wait on it.
+- **The verdict delay `L` is ~180 ms**: the least answer (155-168 ms — the round trip and a forward each end) plus
+  ~20. Nothing waits at the far end to speak of. Test 2 (180-260 ms, law 222) sits on its lower edge (178-185).
+- **A miss throws away ~5 levels of depth** (4.7, 5.5 a miss), not the law's ~16; misses come every 7.6-8.9 prose
+  tokens (0.11-0.13 a token; the law's m 0.177) and not once in 320 code tokens.
+- **Test 1 fails, and with it the law's central claim.** Of the depth the tree reached, 37-45% was thrown away
+  (84 / 115 levels against 142 / 139 kept) — under half. In time, misses × `L` is ~20-24 ms of a 49-54 ms prose
+  token and nothing of a ~21 ms code token: a reply's time is NOT mostly wrong guesses × their wait (the Summary's
+  item 2 said ~40 of 53 ms).
+- **The larger part is this node's own pace.** It was busy 98-100% (`waiting_ms` 0-35 a reply) at ~38-39 ms a
+  forward — drafting ~13-14 + its 24 layers ~24-25 — while the far's least was 22-27 ms. A forward of ~24 rows
+  deepens the tree ~1.1 levels in prose and ~1.8 in code (rows go best-first by path probability: wide where the
+  drafter is unsure). So `d`, what a level of depth costs, is ~30-35 ms in prose (`L` ÷ levels a miss throws
+  away, or a token's time less misses × `L`) and ~21 ms in code — not § 1's 13.7.
+- **What that does to the ring** (DERIVED). Removing the wire (~120 of `L`'s 180 ms) leaves `L` ≈ 60 ms and
+  ~37-42 ms a prose token: ~24-28 tok/s on today's pair (1.2-1.45× the 19.5 measured), code unchanged at ~47 —
+  not § 1's 33, nor § 3's 3-8×. Past that, the head's pace binds both kinds: drafting is ~36% of its forward, so
+  the pacer (the drafter off the head's card, § 2) is the lever, then rows that deepen the tree more a forward.
+  Step 3's model (§ 8) read the pacer alone at +16% prose and +26-34% code on today's pair. So the next useful
+  tests are step 4 (what a short loop really buys, on one card) and step 5's pacer A/B — not step 2.
+- **Derived first, and wrong** (kept so the error can be checked): from older lines without these counters,
+  `forwards × 3 − emitted` read ~30 levels a miss and `L` ~400-460 ms (`examples/standing_ring_ladder1.py`), and
+  commit `5c62eac9a` blamed ~250 ms of it on the far card serving our own forwards one at a time (#412). Both are
+  withdrawn: a forward deepens the tree ~1.1 levels, not three, and the measured `L` is ~180 ms with no queue
+  behind it. The knob sweep's "a forward adds three levels … ~6 tokens a 430 ms round trip"
+  (`docs/invariants/scheduling.md`) rested on the same three-levels reading and now carries this correction.
+
+## 8. Kill ladder step 3 — the schedule model does not reproduce the arms (2026-11-21)
+
+`examples/tree_schedule_sim.py`'s `flow` with the five arms' MEASURED stage times (§ 7's table source; head drafting + its
+layers, far 24-46 ms a forward, 130 ms, 0.15 ms a row; 40 seeds, 160 tokens), and a variant with an explicit
+8-rows-a-level beam:
+
+| arm | prose model (best-first / beam) | prose measured | code model | code measured |
+|---|---|---|---|---|
+| 4 rows | 21.6 / 20.7 | 15.06-15.33 | 43.5 / 41.4 | 40.48-42.43 |
+| 8 × 3 (default) | 21.4 / 20.8 | 17.61-19.93 | 42.0 / 40.0 | 40.94-45.43 |
+| 16 rows | 20.0 / 18.6 | 15.72-17.89 | 31.1 / 31.4 | 33.57-34.72 |
+| 4 levels | 22.6 / 21.3 | 16.85-19.38 | 43.5 / 41.2 | 40.23-41.53 |
+| 308 ms (US card) | 13.9 / 13.0 | 11.73-11.78 | 28.2 / 26.1 | 26.85-27.16 |
+
+- **Calibration FAILS on prose** (11-42% high in four of five arms); code is within ~±9%.
+- **The model's verdict delay is 224 ms** (head layers 26 + wire out 72 + far 30 + wire back 65 + the head
+  finishing its forward 30); **measured, ~180 ms** (§ 7). Its far queue is zero in every arm (the far, 24-46 ms a
+  forward, is faster than the head, 34-58 ms) — as measured.
+- Its ranks are drawn iid from fixed shares (prose .745/.10/.04/.02), not the replay dumps; it misses every 6-9
+  prose tokens, tonight's replies every 7.6-8.9. Against tonight's default arm (prose 18.65-20.35, code
+  46.33-48.31) it reads prose 2-15% high and code 13-17% low; against the older five arms, prose 11-42% high.
+- **So the step does not rule yet.** Its pacer figures (indicative: today's pair +16% prose, +26-34% code; a 20 ms
+  ring 30-42 prose, 59-87 code) need a model whose tree deepens as the real one does (~1.1 levels a forward in
+  prose, ~1.8 in code, § 7) and whose code is not low. The scripts stay out of the repo until a calibration holds.
 
 ## Appendix — every concept raised
 
