@@ -713,7 +713,8 @@ per-token forwards are unobserved; (3) the daemon does not advertise a tripped c
 (2026-11-20/21, #411) each model process stalled once 0.45-5.0 s early in its first reply, its main thread inside a
 synchronous call to Windows' graphics kernel (`dxgvmb_send_sync_msg`, nvidia-smi frozen alongside), while
 `cuda_pool::probe_once` read 7-8 ms — so the owner's "restart Windows" notice never fired. Timing the forwards
-themselves (a card forward's own time ≥ 500 ms after the warm-up, where it is 3-15 ms) would catch it.
+themselves (a card forward's own time ≥ 500 ms after the warm-up, where it is 3-15 ms) would catch it. A suspected cause —
+each `nvidia-smi` the node starts leaking ~15 KB of Windows' kernel memory (measured 2026-11-21) — is #490.
 The stalls' root cause stays unknown and the guard does not need it. A card FAULT (not a stall)
 and the 14-minute driver reset after it are #220.
 
@@ -3534,6 +3535,14 @@ not separated from the same uptime. **So the README's 24–40 / 8.4–14.5 (and 
 46-48 h of Windows uptime and understate this build**: at the next bump measure the 14B rows on a boot under ~24 h,
 the uptime beside each run (the rig prints it).
 
+**The stall goes with the uptime (2026-11-21, the "remove it" half).** The same .303 binary against the same AU
+computer (.303, min rtt 132-149 ms), flowhalf with the clock hold off, on a Windows boot 0.1 h old (`real_link.sh`
+TAG=fresh303, 02:26-02:29Z, the thread sampler beside it in `threads_fresh303.txt`): prose 20.2 / 18.1 tok/s, code
+43.3 / 44.5 — back at 11-15's 41-46 / 17.6-19.9. The worst forward on this side was 118 ms (none ≥ 300), both stalls
+0 ms, the far wait 0-5 ms, and the longest continuous `dxgvmb_send_sync_msg` wait any thread made was 45 ms (0.45-5 s at
+50.8 h). These are the 14B rows' fresh-boot figures for the next bump (uptime 0.1 h). Detecting the stall and telling
+the owner is #146 (4).
+
 #### #412 — A busy far card is busy with our own forwards: run its backlog as one
 `P2` · perf-split · **OPEN** (conceptual, tests first) — 2026-11-06 · evidence: `docs/plans/faster_than_local.md` § 13; history: #388
 
@@ -4432,6 +4441,39 @@ Designs: `docs/plans/large_model_splits.md` (the target, the bound and the build
 the measurement that can kill it), `docs/plans/split_speculation.md` (guess-and-check across a split),
 `docs/plans/wan_parallel.md` (parallelise the reply, not the token), `docs/plans/regional_pipelines.md`
 (placement by distance, #192), `docs/plans/faster_than_local.md` (the ranked list).
+
+#### #490 — Every `nvidia-smi` the node starts under WSL2 leaks ~15 KB of Windows' kernel memory, ~9,500 a day
+
+`P1` · reliability/perf · **OPEN** — 2026-11-21 · history: #146 (4), #411's 11-21 note, gotcha #1151
+
+**Measured on this laptop (2026-11-21, a boot 0.2 h old, Windows' `\Memory\Pool Nonpaged Bytes` read from WSL)**:
+5,000 `nvidia-smi --query-gpu=temperature.gpu` launches in 222 s grew the pool 534.3 → 609.4 MB (+75 MB, ~15 KB a
+launch), and it stayed (+1.9 MB over the next 90 s idle; −0.5 MB over the 90 s before); 1,000 launches read +7.6 MB.
+The SAME readings through ONE NVML session in one process (`libnvidia-ml.so.1`, `nvmlDeviceGetMemoryInfo` +
+`nvmlDeviceGetTemperature`, 5,000 each in 0.4 s) moved it +0.2 MB. The live node (.303) started 33 `nvidia-smi` in 5
+minutes — 23 `memory.total,memory.used` (`vram::query_gpu_vram_free_mb`: the card budget, the health monitor, the
+split loader), 10 heat reads (`host_heat::read_card`, every 30 s health tick) — ~9,500 a day, ~140 MB a day, before
+the dashboard's polls, the release-check safety kit (every ~10 s, `~/swarmllm-gate-common/safety.sh`) and tools.
+
+**Prior art**: microsoft/WSL#41701 (open) and NVIDIA's forum ("GPU-PV dxgkrnl CUDA workload slows 1.7x over 3-4 days
+of host uptime", and an RTX PRO 5000 thread: onset ~24 h, worse by ~38 h) describe the #1151 shape — CUDA under WSL2
+slowing with host uptime, `dxgvmb_send_sync_msg: wait_for_completion failed` in dmesg, cleared by a reboot or
+`pnputil /restart-device`, not `wsl --shutdown`. Users there measured NVIDIA's NVRM pool tag growing ~1.9 GB a day
+from a logger running `nvidia-smi` twice a second, and recommend one persistent NVML session. Neither NVIDIA nor
+Microsoft has confirmed a cause.
+
+**What it is NOT yet**: the cause of #1151's stall. The leak is measured; that the pool's size slows the card is the
+users' hypothesis, consistent with #1151 (worst forward by uptime: 63-178 ms at 2-14 h, ≤ 965 at 30-34, 1,819-4,995
+at 46-51) but not shown. Causation needs the stall to follow the pool, not the clock: log the pool beside every
+`real_link` run from now on, and (after the fix) see whether high uptime still brings it.
+
+**The fix**: one NVML session in the daemon (driver library loaded once, `nvmlInit` once, the device handle kept)
+for every reading `vram::nvidia_smi` serves — memory, temperature and cooling flags, name, compute capability —
+keeping `BoundedCommand`'s two properties (a reading that does not answer in 10 s reads as unknown and counts toward
+`graphics_driver_not_answering`; its wait never holds a runtime worker). `nvidia-smi` stays only where NVML has no
+answer. The daemon still holds no CUDA context (NVML opens none). The safety kit reads through one long-lived NVML
+process too. Native Windows starts the same `nvidia-smi`; whether it leaks there is unmeasured. Kill/keep: the
+pool's growth with the live node running an hour, before and after (expect ~6 MB/h → ~0).
 
 #### #489 — The card clock hold slows a split whose drafter model shares the card, so it is off by default
 
