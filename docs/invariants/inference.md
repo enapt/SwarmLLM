@@ -9554,3 +9554,26 @@ guesses run inside the segment's own worker. Unmeasured and the same mechanism: 
 while a worker holds for a slice served to a peer. **What a change must keep**: hold a card only where it would
 otherwise stand idle — no other process of this node working on it — and measure it on a shape with a second
 process (the 14B flow with its drafter) as well as the 27B's.
+
+**On by default again since 2026-11-21: a hold pauses beside our other card work (FUTURE_WORK #489).** A
+drafter's `Draft` starts no hold; the daemon tells each card worker, change-only, when another of its card workers
+has a reply slot open (`DaemonMsg::CardBusyBeside`), and that work counts `CARD_WORK_LINGERS_FOR` (1 s) past its last
+step. Measured on `2271a6762` (CUDA, one binary, the switch per arm):
+
+| shape | held | off |
+|---|---|---|
+| 27B here [0, 21) → Australia (`~/swarmllm-gate/hold489`, on / off / on): this side's forward, median (p90) | 24.2 (32.6), 24.6 (28.4) ms | 50.8 (88.8) ms |
+| … its replies, prose / code tok/s | 6.37, 6.54 / 6.73, 7.04 | 5.67 / 6.26 |
+| 14B flowhalf → Australia (`real_link_ab489c`, 6 arms alternating): drafting a forward | 13.6-14.3 ms | 12.9-14.7 ms |
+| … code / prose tok/s, mean of 3 | 41.4 / 18.2 | 42.2 / 18.3 |
+| the owner's Llama 3.2 1B q8 on this card beside the held 27B (`hold489/beside.sh`, 480 tokens, 4 an arm) | 204 tok/s | 198 tok/s |
+| … the 27B beside it | 5.29 tok/s | 4.91 tok/s |
+
+From the holds' DIAG: on the 14B the hold started 0-29 pieces a reply (`busy_beside` 64-1,294 turns); beside the 1B
+it paused 103-399 turns a hold; `stream_busy` 0-5 throughout. The 14B's tok/s spread followed the Australian line
+(far waits 0 in arms 1-2, 145-963 ms in 3-6), not the switch. Before the linger (`b2aa14b9b`, 12 arms) the pause
+alone left drafting 0.6-1.1 ms a forward slower held: a piece started between two guesses. **What a change must
+keep**: re-measure all three shapes — one process (the 27B), a drafter model beside its target (the 14B flow), the
+owner's reply beside a held card — with the small model PROVEN to run here (`route=local` in its `request complete`,
+`device=Cuda` at its load): a Qwen2.5-0.5B asked from here for that check was served from Australia, and the run
+measured nothing.

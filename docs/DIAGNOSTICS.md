@@ -1013,9 +1013,9 @@ the same shape runs in a sawtooth — fast three times right after a slow one, t
 clock during the replies (`nvidia-smi --query-gpu=timestamp,clocks.gr,clocks.mem,power.draw --format=csv -lms 500`,
 local time; drop the windows the rig sits idle between asks): ~300 MHz against the card's boost is the governor.
 
-With `SWARMLLM_CARD_CLOCK_HOLD=1` (off by default, #489) a worker holds its clocks between forwards (#487); the mechanism's
-line (debug, once per hold, with `pieces`, `stream_busy`, `held_ms`, `why`) is `DIAG: the card's clocks were held between a split's forwards`. A sawtooth with no such line: the
-switch is off (the default), the computer is paced for heat (`why="paced for heat"`), a launch
+A worker holds its clocks between forwards (#487; on unless `SWARMLLM_CARD_CLOCK_HOLD=0`, #489); the mechanism's
+line (debug, once per hold, with `pieces`, `stream_busy`, `busy_beside` — turns paused because another of this node's model processes worked on the card, by design — `held_ms`, `why`) is `DIAG: the card's clocks were held between a split's forwards`. A sawtooth with no such line: the
+switch is off (`=0`), the computer is paced for heat (`why="paced for heat"`), a launch
 failed (a WARN), or the far computer runs a release without it — its `served_ms` in `DIAG: segment result received`
 is where its own clocks show. ⚠ A split's speed measured before #487 was measured at the dipped clock on both ends.
 

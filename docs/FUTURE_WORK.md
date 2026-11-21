@@ -4475,61 +4475,6 @@ answer. The daemon still holds no CUDA context (NVML opens none). The safety kit
 process too. Native Windows starts the same `nvidia-smi`; whether it leaks there is unmeasured. Kill/keep: the
 pool's growth with the live node running an hour, before and after (expect ~6 MB/h → ~0).
 
-#### #489 — The card clock hold slows a split whose drafter model shares the card, so it is off by default
-
-`P1` · perf-split · **OPEN** — 2026-11-20 evening · history: #487 (built and closed the same day), gotcha #1149
-
-The hold (#487, `inference::clock_hold`) keeps a card's clocks up between a split's forwards with a 2 ms piece every
-4 ms. It is bounded by its length only on its OWN stream: the card time-slices between PROCESSES (no MPS on a consumer
-card). On the README's headline shape — the 14B half here, half in Australia, its 0.5B drafter in a second process on
-this card (`~/swarmllm-gate/deep/fr/real_link_readme303`, main at `54876c4f9`, hold on/off/on/off/on) — code replies
-read 33.32, 33.64, 32.10 tok/s held against 36.81, 37.16 off, this side's forwards ~38 ms against ~27, drafting +15%.
-The 27B split gained (+13%, `split27_clock`; 25 vs 74-76 ms a forward) because its guesses run inside the segment's
-own worker. **Off by default** (`SWARMLLM_CARD_CLOCK_HOLD=1` turns it on); it never shipped on. With it off, main
-matches published 0.3.302 on that shape (`~/swarmllm-gate/deep/fr/ab302main.sh`, alternating, 21:15-21:33Z): code 36.4,
-38.2, 38.1, 22.6 (.302) vs 37.6, 32.4, 37.6, 24.1 (main); prose 9.7-14.6 vs 8.4-14.5 — the same spread, the link noisy
-that hour (both builds dipped to 22-24 once).
-
-**What is needed**: hold a card only where it would otherwise stand idle — no other process of this node working
-on it. A worker cannot see another process's stream; the daemon can (`WorkerHandle::in_use`, the drafter beside its
-target). Candidates: (a) a drafter model's worker never holds (`Draft` out of `starts_a_hold`) — removes the measured
-cost's likely half, leaves the target's pieces against the drafter's drafting; (b) the daemon tells each card
-worker when another worker on its card has work in flight (a `DaemonMsg`, internal: no wire change) and the hold
-pauses; (c) a run of `stream_busy` ends the hold — 19-34 a hold under contention vs 1-5 alone, but it fires only
-after the contention has cost a piece. Unmeasured, same mechanism: the owner's own reply on the card while a worker
-holds for a slice served to a peer — a change must measure that too. **Kill/keep line**: on, the 14B flow within 2%
-of off AND the 27B's forward ≤ 30 ms. Prior art: NVIDIA's time-slicing between contexts (MPS exists to share a card
-without it); filler work costs only up to its own length on its own stream ("Reducing GPU idle time").
-Searched again 2026-11-20 for holding clocks only while no other process uses the card: **none found**. Locked clocks
-(`nvidia-smi --lock-gpu-clocks`, NVML `nvmlDeviceSetGpuLockedClocks`) need an administrator and are refused on some
-GeForce cards (NVML `NO_PERMISSION`/"not supported" in NVIDIA's forums) — never a user's default. NVML's process view
-cannot say "busy now": under WDDM per-process figures read "not available", `GetComputeRunningProcesses` lists who
-holds a context, not who has work in flight, and NVIDIA calls `GetProcessUtilization` unreliable with processes
-side by side. Stream priority acts inside one process only (GCAPS, arXiv 2406.05221); green contexts partition one
-process's SMs. vLLM, SGLang, TensorRT-LLM, llama.cpp and Ollama document no keep-alive piece. So the signal is ours to
-send between our own processes — (b).
-
-**Built 2026-11-21, (a) + (b), still OFF by default until the kill/keep line is measured.** A drafter model's `Draft`
-no longer starts a hold (`clock_hold::starts_a_hold`); its target holds the card for both. And the daemon wakes a
-fan-out (`daemon::background::spawn_card_busy_fan_out`, only while the hold is on) wherever a reply's slot opens
-(`WorkerHandle::register_unseen`, just before the request is sent) or closes (`ResponseGuard`'s drop);
-`ModelProcessPool::tell_cards_who_is_busy` tells each card worker, change-only, whether ANOTHER card worker has a
-slot open (`DaemonMsg::CardBusyBeside`), the worker's reader task sets `clock_hold::set_busy_beside`, and
-`ClockHold::start_piece` starts nothing while it is set (the hold lasts; its DIAG counts `busy_beside` turns). Every
-card-charged worker counts as one card — a two-card machine loses holds it could keep, never gains a piece against
-the other card's work. A piece already queued when the word arrives still runs (≤ 2 ms). Tests fail with each part
-taken out. **Measured** (`b2aa14b9b`, CUDA, `real_link.sh` TAG=ab489 + ab489b, 12 flowhalf arms alternating off/on and
-on/off, 03:16-03:38Z, Windows up ~1 h): the pause fired (237-671 `busy_beside` turns a hold; `stream_busy` 0-3 a hold
-against 19-34 on 11-20), and this side's forward read the same held and not (~25.6 vs ~25.7 ms; 38 vs 27 on 11-20) —
-but drafting ran 0.6-1.1 ms a forward slower held (a piece started between two guesses), code 42.6 vs 43.8 tok/s
-where no far wait passed 100 ms (all replies: 40.9 vs 43.8, one held reply waited 824 ms abroad), prose 19.8 vs 19.5.
-The hold gains nothing on that shape — the drafter keeps the card's clocks up by itself — so **a card worker's work
-now counts for `CARD_WORK_LINGERS_FOR` (= `HOLD_FOR`, 1 s) past its last step** (a governor's down-switch
-hysteresis): a drafter guesses every round, so its target does not hold during the reply at all. The fan-out runs
-again when a linger runs out. Next: the same arms on a build with the linger, and the 27B (`~/swarmllm-gate/hold489`);
-on by default only if both pass.
-Evidence: `docs/invariants/inference.md` § "A card between a split's forwards keeps its clocks".
-
 #### #488 — A split's head that runs part of its layers on the processor puts its drafter in system memory, where a guess takes 54 ms
 
 **P3 (lowered the same evening by its probe, below); opened 2026-11-20 evening (Llama 3.3 70B, `~/swarmllm-gate/tier_1120c`).** The 70B ran here `[0,25)` (10 layers on
@@ -8285,6 +8230,27 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
+**Closed 2026-11-21, on main** (#489)
+- #489 — `P1` — **The card clock hold slowed a split whose drafter model shares the card, so it was off by default.**
+  The card takes turns between processes (no MPS on a consumer card), so the hold's 2 ms pieces (#487) took this card
+  from the 14B split's drafter model: code 32.1-33.6 tok/s held against 36.8-37.2, forwards ~38 ms against ~27
+  (`real_link_readme303`). Fixed in three parts: a drafter's `Draft` never starts a hold, and the daemon tells each card
+  worker when another of our card workers has a reply in flight (`DaemonMsg::CardBusyBeside`,
+  `ModelProcessPool::tell_cards_who_is_busy`), the hold starting no piece while it does (`b2aa14b9b`); that work counts
+  for 1 s past its last step, so no piece slips in between a drafter's guesses (`2271a6762` — 12 arms without it:
+  drafting +0.6-1.1 ms a forward held, code 42.6 vs 43.8). **Kill/keep line met on `2271a6762`** (CUDA, one binary,
+  the switch per arm): the 27B here [0,21) → Australia, this side's forward 24.2 / 24.6 ms held against 50.8 off
+  (line: ≤ 30), replies 8-15% faster (`~/swarmllm-gate/hold489`); the 14B flowhalf → Australia, 6 arms alternating,
+  code 41.4 vs 42.2 and prose 18.2 vs 18.3 tok/s (line: within 2%), drafting 13.6-14.3 ms a forward held against
+  12.9-14.7, the hold starting 0-29 pieces a reply, the spread following the line's far waits (`real_link_ab489c`);
+  and the case left unmeasured on 11-20 — the owner's Llama 3.2 1B on this card beside a held 27B: 204 tok/s held
+  against 198 off, the 27B 5.29 vs 4.91, the pause firing 103-399 turns a hold (`hold489/beside.sh`). **On by
+  default from this entry's close** (`SWARMLLM_CARD_CLOCK_HOLD=0` turns it off). Prior art: none found for holding
+  clocks only while no other process uses the card (searched 11-20, the entry's notes: NVML cannot say busy under
+  WDDM, stream priority is per-process); the linger is a governor's down-switch hysteresis (cpufreq ondemand's
+  `sampling_down_factor`). Evidence: `docs/invariants/inference.md` § "A card between a split's forwards keeps its
+  clocks".
+
 **Closed 2026-11-20, on main** (#487, #485)
 - #487 — `P1` — **A card between a split's forwards dropped its clocks, and this side's forward ran 3 times slower.**
   Found profiling the 27B split's ~108 ms a round on this side (plan step 2b, "measure the two stages apart"): the
@@ -8307,7 +8273,7 @@ grep `^| N |`).
   (Australia served ~400 ms a step that hour against ~121 earlier: it held 29-30 of its 43 layers on its card against
   39 earlier, so the far side's processor layers set the pace — #3 (j13)'s field note).
   **Turned off by default the same evening** — it slowed the 14B split whose drafter shares the card ~10%; the
-  idle-card condition it needs is open as #489.
+  idle-card condition it needed was #489, closed 2026-11-21.
   Evidence: `docs/invariants/inference.md` § "A card between a split's forwards keeps its clocks".
 - #485 — `P1` — **A split whose chain ended on another computer never guessed (the Qwen 3.5 family).** Filed as "the
   guesser should run where the last layers are"; that premise was WRONG: the file's guess head beside the FIRST

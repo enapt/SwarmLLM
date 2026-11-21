@@ -855,7 +855,7 @@ pub(super) fn spawn_region_detection(
 /// working on the card (`ModelProcessPool::tell_cards_who_is_busy`), so the
 /// card clock hold pauses beside it (`inference::clock_hold`, FUTURE_WORK
 /// #489). Woken where a reply's slot opens or closes on any worker; nothing
-/// runs while the hold is off, its default.
+/// runs while the hold is off (`SWARMLLM_CARD_CLOCK_HOLD=0`).
 pub(super) fn spawn_card_busy_fan_out(
     tasks: &mut BackgroundTasks,
     shared_state: Arc<SharedState>,

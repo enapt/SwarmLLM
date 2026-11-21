@@ -33,9 +33,9 @@
 //! ours held up by another program sharing the card — already keeps the card
 //! busy, so at most one piece of ours is ever queued.
 //!
-//! **Off unless `SWARMLLM_CARD_CLOCK_HOLD=1`** (2026-11-20, FUTURE_WORK #489).
-//! A piece is bounded by its length only on its OWN stream: a second process
-//! on the card — a split's drafter model beside its target, or the owner's
+//! **On unless `SWARMLLM_CARD_CLOCK_HOLD=0`.** It was off from 2026-11-20 to
+//! 11-21 (FUTURE_WORK #489): a piece is bounded by its length only on its OWN
+//! stream, and a second process on the card — a split's drafter model beside its target, or the owner's
 //! own reply beside a slice served for a peer — is time-sliced against it.
 //! The 14B split with its 0.5B drafter on this card
 //! (`~/swarmllm-gate/deep/fr/real_link_readme303`, hold on/off in one build)
@@ -53,6 +53,13 @@
 //! only while no other process uses the card — NVML cannot say "busy now"
 //! under WDDM, stream priority acts inside one process, consumer cards have
 //! no MPS (FUTURE_WORK #489) — so the signal is ours to send.
+//!
+//! That work counts for a second past its last step (`CARD_WORK_LINGERS_FOR`
+//! in `process_pool`), so no piece slips in between two of a drafter's
+//! guesses. Measured with all three (2026-11-21, `2271a6762`): the 27B split
+//! 24 ms a forward held against 51 off, replies 8-15% faster; the 14B split's
+//! drafting the same a forward held and not (0-29 pieces a reply); the owner's
+//! 1B reply on this card beside a held 27B 204 tok/s held against 198 off.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -71,16 +78,16 @@ pub(crate) const PERIOD: Duration = PIECE.saturating_mul(2);
 /// that has ended stops holding the card within a second.
 pub(crate) const HOLD_FOR: Duration = Duration::from_secs(1);
 
-/// `SWARMLLM_CARD_CLOCK_HOLD=1` turns the hold on; it is off otherwise (see
-/// the module's notes: a second process on the card pays for the pieces).
+/// `SWARMLLM_CARD_CLOCK_HOLD=0` turns the hold off; it is on otherwise (it
+/// pauses while another process of ours works on the card: the module's notes).
 pub(crate) fn enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| on_by(std::env::var("SWARMLLM_CARD_CLOCK_HOLD").ok().as_deref()))
 }
 
-/// The switch's rule: on only where it is set to `1`.
+/// The switch's rule: on unless it is set to `0`, as `SWARMLLM_HEAT_GUARD` reads.
 fn on_by(setting: Option<&str>) -> bool {
-    setting == Some("1")
+    setting.is_none_or(|v| v.trim() != "0")
 }
 
 /// Whether the daemon last said another of its model processes has work in
@@ -378,14 +385,15 @@ mod tests {
         assert!(!busy_beside());
     }
 
-    /// Off unless asked for: a second process on the card pays for the
-    /// pieces (FUTURE_WORK #489).
+    /// On unless turned off: a hold pauses beside our other work on the card
+    /// (FUTURE_WORK #489).
     #[test]
-    fn the_hold_is_off_unless_it_is_asked_for() {
-        assert!(!on_by(None));
-        assert!(!on_by(Some("0")));
-        assert!(!on_by(Some("")));
+    fn the_hold_is_on_unless_it_is_turned_off() {
+        assert!(on_by(None));
         assert!(on_by(Some("1")));
+        assert!(on_by(Some("")));
+        assert!(!on_by(Some("0")));
+        assert!(!on_by(Some(" 0 ")));
     }
 
     /// A split's step starts a hold; housekeeping between replies does not.
