@@ -87,7 +87,12 @@ ship re-cuts the release: tell the user, put `SWARMLLM_RECUT=1` in the commit
 command, abandon the draft, cut again. It reads the release with `gh` and says
 so when it cannot. Probe: `RWG_TEST_STATE=draft RWG_TEST_CHANGED=src/main.rs`.
 
-**All three fail OPEN** (unparseable payload, missing cargo, timeout — the commit
+`running-script-gate.sh` (2026-11-21) refuses an IN-PLACE rewrite (Edit/Write, `>`,
+`tee`, `cp` onto, python `open(…,'w')`) of a file a running shell is executing, in or
+out of the repo: bash reads a script by offset as it runs (gotchas #551, #813, #1153 —
+knowing did not stop the third). Write a temp file and `mv` it over. Probe: `--probe`.
+
+**All four fail OPEN** (unparseable payload, missing cargo, timeout — the commit
 gate now SAYS so when a cold build outlasts it, #779), and **a hook is verified
 by its OUTPUT, never its exit code** (#614) — three hooks here sat
 inert for months looking healthy. After touching the gate's patterns run

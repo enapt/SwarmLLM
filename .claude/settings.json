@@ -89,6 +89,12 @@
             "command": "bash ${CLAUDE_PROJECT_DIR}/.claude/scripts/research-gate.sh",
             "timeout": 15,
             "onFailure": "continue"
+          },
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PROJECT_DIR}/.claude/scripts/running-script-gate.sh",
+            "timeout": 10,
+            "onFailure": "continue"
           }
         ]
       },
