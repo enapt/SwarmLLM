@@ -1041,20 +1041,24 @@ mod tests {
     /// — a drop that named the model to every peer.
     #[test]
     fn the_room_advertised_keeps_a_carrying_copy_whoever_asked() {
-        let (state, manager, mid, _small) = the_reported_shape(16);
-        state.region_demand.remove(&(mid.clone(), "BE".to_string()));
-        let local = state.identity.node_id().clone();
-        holds(&state, &mid, &local, &[0, 1]);
-        write_sparse_shards(&state, &mid, [0, 1], PART);
         // Two more holders of parts 0 and 1 with no room to carry them, both
         // ranked above this node: neither the floor nor the rank keeps its
-        // copies, only what they carry.
-        let part = |index| ShardId {
-            model_id: mid.clone(),
-            index,
+        // copies, only what they carry. Found before anything is set, so a node
+        // ranked too high for them is drawn again (`ids_ranked_above`).
+        let (state, manager, mid, local, above) = loop {
+            let (state, manager, mid, _small) = the_reported_shape(16);
+            let local = state.identity.node_id().clone();
+            let part = |index| ShardId {
+                model_id: mid.clone(),
+                index,
+            };
+            if let Some(above) = ids_ranked_above(&local, &[part(0), part(1)], 2) {
+                break (state, manager, mid, local, above);
+            }
         };
-        let above = ids_ranked_above(&local, &[part(0), part(1)], 2);
-        assert_eq!(above.len(), 2, "two holders ranked above this node");
+        state.region_demand.remove(&(mid.clone(), "BE".to_string()));
+        holds(&state, &mid, &local, &[0, 1]);
+        write_sparse_shards(&state, &mid, [0, 1], PART);
         for id in above {
             let roomless = peer_with_id(&state, id, Some(ceiling_for(0)), 100_000);
             holds(&state, &mid, &roomless, &[0, 1]);

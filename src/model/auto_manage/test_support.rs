@@ -223,10 +223,15 @@ pub(super) fn peer_with_id(
 /// This node's own id is random (`Identity::generate`): the 253 one-byte ids a
 /// test searched found two only ~96% of the time — a node ranked near the top
 /// of both parts has few above it — and a full test run failed on it
-/// (2026-11-15). A million candidates miss about once in 36,000 runs.
-pub(super) fn ids_ranked_above(local: &NodeId, parts: &[ShardId], n: usize) -> Vec<NodeId> {
+/// (2026-11-15). A million candidates miss about once in 36,000 runs — and a
+/// fixture of the same shape in `manager.rs` did, in CI, on 2026-11-21.
+///
+/// So a miss is `None`, never a short list: the caller draws a fresh node and
+/// asks again (proptest's `prop_assume!` discards an unusable input the same
+/// way), which bounds the search where widening it never could.
+pub(super) fn ids_ranked_above(local: &NodeId, parts: &[ShardId], n: usize) -> Option<Vec<NodeId>> {
     use super::coverage::part_rank_weight;
-    (0u32..1_000_000)
+    let found: Vec<NodeId> = (0u32..1_000_000)
         .map(|i| NodeId(*blake3::hash(&i.to_le_bytes()).as_bytes()))
         .filter(|id| {
             parts
@@ -234,7 +239,8 @@ pub(super) fn ids_ranked_above(local: &NodeId, parts: &[ShardId], n: usize) -> V
                 .all(|p| part_rank_weight(p, id) > part_rank_weight(p, local))
         })
         .take(n)
-        .collect()
+        .collect();
+    (found.len() == n).then_some(found)
 }
 
 /// Record `node` as a holder of `parts` of `mid`.

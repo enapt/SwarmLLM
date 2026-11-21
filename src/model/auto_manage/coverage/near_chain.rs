@@ -1831,9 +1831,22 @@ mod tests {
     #[tokio::test]
     async fn a_full_node_makes_room_for_its_part_of_the_chain() {
         use super::super::super::manager::RoomFor;
-        use super::super::part_rank_weight;
-        let s = fleet(4.0);
-        let local = s.local();
+        use super::super::super::test_support::ids_ranked_above;
+        // The two computers ranked above this node on both of the other
+        // model's first parts are found before anything is set, so a node
+        // ranked too high for them is drawn again (`ids_ranked_above`).
+        let copies_id = ModelId("copies".into());
+        let (s, local, above) = loop {
+            let s = fleet(4.0);
+            let local = s.local();
+            let part = |index| ShardId {
+                model_id: copies_id.clone(),
+                index,
+            };
+            if let Some(above) = ids_ranked_above(&local, &[part(0), part(1)], 2) {
+                break (s, local, above);
+            }
+        };
         let mut config = Config::clone(&s.state.cfg());
         config.auto_manage.max_storage_mb = 1_000;
         config.node.contribution = crate::types::ContributionMode::Minimal;
@@ -1843,19 +1856,9 @@ mod tests {
         // this node's copies — each ranked above this node on both parts.
         let ranges = [(0, 4), (4, 8), (8, 12), (12, 16)];
         let copies = register_manifest_with_sized_shards(&s.state, "copies", 16, &ranges, PART);
+        assert_eq!(copies, copies_id, "the ranks were drawn for this model");
         holds(&s.state, &copies, &local, &[0, 1]);
         write_sparse_shards(&s.state, &copies, [0, 1], PART);
-        let part = |index| ShardId {
-            model_id: copies.clone(),
-            index,
-        };
-        let above: Vec<NodeId> = (0u32..1_000_000)
-            .map(|i| NodeId(*blake3::hash(&i.to_le_bytes()).as_bytes()))
-            .filter(|n| {
-                (0..2).all(|i| part_rank_weight(&part(i), n) > part_rank_weight(&part(i), &local))
-            })
-            .take(2)
-            .collect();
         for id in &above {
             let mut info = crate::types::PeerInfo {
                 node_id: id.clone(),
