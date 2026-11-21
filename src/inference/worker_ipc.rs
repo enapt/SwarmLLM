@@ -162,6 +162,14 @@ pub enum DaemonMsg {
     /// that reply. A worker and its daemon are always one binary, so the
     /// variant needs no feature gate.
     Pace { pause_permille: u32 },
+    /// Whether another model process of this daemon has work in flight on the
+    /// card now (`busy`), so this worker's clock hold pauses
+    /// (`inference::clock_hold`, FUTURE_WORK #489): two processes on one card
+    /// time-slice, and a piece of filler costs the other process's step. Sent
+    /// only where the answer changed (`ModelProcessPool::tell_cards_who_is_busy`)
+    /// and only while the hold is on. Taken by the reader task at once, like
+    /// `Pace`. One binary, so no feature gate.
+    CardBusyBeside { busy: bool },
     /// Graceful shutdown — worker exits cleanly.
     Shutdown,
 }

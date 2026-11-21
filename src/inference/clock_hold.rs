@@ -40,9 +40,21 @@
 //! The 14B split with its 0.5B drafter on this card
 //! (`~/swarmllm-gate/deep/fr/real_link_readme303`, hold on/off in one build)
 //! took ~38 ms a forward here held against ~27 ms off, its code replies
-//! 32.1-33.6 tok/s against 36.8-37.2. It holds a card only once it can tell
-//! the card would otherwise stand idle.
+//! 32.1-33.6 tok/s against 36.8-37.2.
+//!
+//! **So a hold pauses while another process of ours works on the card**
+//! (2026-11-21, #489): a worker cannot see another process's stream, the
+//! daemon sees every worker's replies in flight, and tells each card worker
+//! when that changes (`DaemonMsg::CardBusyBeside`,
+//! `ModelProcessPool::tell_cards_who_is_busy`); [`ClockHold::start_piece`]
+//! starts nothing while it says busy. And a drafter model never holds
+//! ([`starts_a_hold`] leaves out `Draft`): its target, waiting on the same
+//! round, holds the card for both. Prior art: none found for holding clocks
+//! only while no other process uses the card — NVML cannot say "busy now"
+//! under WDDM, stream priority acts inside one process, consumer cards have
+//! no MPS (FUTURE_WORK #489) — so the signal is ours to send.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::inference::worker_ipc::DaemonMsg;
@@ -71,6 +83,21 @@ fn on_by(setting: Option<&str>) -> bool {
     setting == Some("1")
 }
 
+/// Whether the daemon last said another of its model processes has work in
+/// flight on the card (`DaemonMsg::CardBusyBeside`). A worker process's one
+/// reading, set by its reader task the moment the message arrives.
+static BUSY_BESIDE: AtomicBool = AtomicBool::new(false);
+
+/// The daemon's word on the card ([`BUSY_BESIDE`]).
+pub(crate) fn set_busy_beside(busy: bool) {
+    BUSY_BESIDE.store(busy, Ordering::Release);
+}
+
+/// Is another process of this daemon working on the card now, as last told?
+pub(crate) fn busy_beside() -> bool {
+    BUSY_BESIDE.load(Ordering::Acquire)
+}
+
 /// One worker's hold on its card's clocks.
 #[derive(Debug, Default)]
 pub(crate) struct ClockHold {
@@ -79,6 +106,9 @@ pub(crate) struct ClockHold {
     pieces: u64,
     /// Turns a piece was not started because the stream was still working.
     busy: u64,
+    /// Turns a piece was not started because another process of ours was
+    /// working on the card ([`busy_beside`]).
+    beside: u64,
     failed: bool,
 }
 
@@ -104,13 +134,16 @@ impl ClockHold {
         self.since.get_or_insert(now);
     }
 
-    /// Starts one piece on `card` where a hold lasts and the computer is not
-    /// paced for heat, and answers how long to wait for a message before the
-    /// next; `None` where no hold lasts (nothing started).
+    /// Starts one piece on `card` where a hold lasts, the computer is not
+    /// paced for heat and no other process of ours works on the card
+    /// (`beside`, [`busy_beside`] — while it does, the hold lasts and nothing
+    /// starts), and answers how long to wait for a message before the next;
+    /// `None` where no hold lasts (nothing started).
     pub(crate) fn start_piece(
         &mut self,
         now: Instant,
         card: Option<&candle_core::Device>,
+        beside: bool,
     ) -> Option<Duration> {
         let until = self.until?;
         let Some(card) = card else {
@@ -132,6 +165,10 @@ impl ClockHold {
                 },
             );
             return None;
+        }
+        if beside {
+            self.beside += 1;
+            return Some(PERIOD);
         }
         match start_piece_on(card) {
             Ok(Launch::Started) => {
@@ -161,6 +198,7 @@ impl ClockHold {
             tracing::debug!(
                 pieces = self.pieces,
                 stream_busy = self.busy,
+                busy_beside = self.beside,
                 held_ms = now.saturating_duration_since(since).as_millis() as u64,
                 why,
                 "DIAG: the card's clocks were held between a split's forwards"
@@ -169,24 +207,28 @@ impl ClockHold {
         self.until = None;
         self.pieces = 0;
         self.busy = 0;
+        self.beside = 0;
     }
 }
 
 /// Whether `msg` is a step of a reply whose next step comes after a round
 /// trip to another computer — the work a card idles between: a segment's
-/// forward (alone or batched), and the guesses made beside one (a drafter
-/// model's, the file's guess head or block drafter, a far run's stand-in). A
-/// local reply (`Generate`) keeps its card busy itself (a card/processor run
-/// held 1440-1755 MHz, 2026-11-20), and housekeeping is no reply's step. A new
+/// forward (alone or batched), and the guesses made inside its own process
+/// (the file's guess head or block drafter, a far run's stand-in). A
+/// drafter MODEL's `Draft` does not: it runs in a process of its own beside
+/// its target, whose hold keeps the card up for both — two holding processes
+/// would time-slice their pieces against each other's work (#489). A local
+/// reply (`Generate`) keeps its card busy itself (a card/processor run held
+/// 1440-1755 MHz, 2026-11-20), and housekeeping is no reply's step. A new
 /// variant is weighed here: the match names every one.
 pub(crate) fn starts_a_hold(msg: &DaemonMsg) -> bool {
     match msg {
         DaemonMsg::Forward(_)
         | DaemonMsg::BatchForward { .. }
-        | DaemonMsg::Draft(_)
         | DaemonMsg::HeadGuess(_)
         | DaemonMsg::BlockDraft(_) => true,
-        DaemonMsg::Generate(_)
+        DaemonMsg::Draft(_)
+        | DaemonMsg::Generate(_)
         | DaemonMsg::Unload { .. }
         | DaemonMsg::PlaceRange { .. }
         | DaemonMsg::ReadCardFree
@@ -197,6 +239,7 @@ pub(crate) fn starts_a_hold(msg: &DaemonMsg) -> bool {
         | DaemonMsg::CancelRequest { .. }
         | DaemonMsg::ReleaseRequestKv { .. }
         | DaemonMsg::Pace { .. }
+        | DaemonMsg::CardBusyBeside { .. }
         | DaemonMsg::Shutdown => false,
     }
 }
@@ -268,14 +311,20 @@ mod tests {
     fn a_hold_ends_a_second_after_the_last_forward_and_never_without_a_card() {
         let t0 = Instant::now();
         let mut hold = ClockHold::default();
-        assert_eq!(hold.start_piece(t0, Some(&candle_core::Device::Cpu)), None);
+        assert_eq!(
+            hold.start_piece(t0, Some(&candle_core::Device::Cpu), false),
+            None
+        );
         hold.note_forward(t0);
         assert!(hold.until.is_some());
         // The processor is no card: the hold ends at once, nothing started.
-        assert_eq!(hold.start_piece(t0, Some(&candle_core::Device::Cpu)), None);
+        assert_eq!(
+            hold.start_piece(t0, Some(&candle_core::Device::Cpu), false),
+            None
+        );
         assert!(hold.until.is_none());
         hold.note_forward(t0);
-        assert_eq!(hold.start_piece(t0, None), None);
+        assert_eq!(hold.start_piece(t0, None, false), None);
         // A worker with no model on a card drops the hold without a report.
         assert!(hold.until.is_none() && hold.since.is_none());
         hold.note_forward(t0);
@@ -284,11 +333,49 @@ mod tests {
         assert_eq!(
             hold.start_piece(
                 t0 + Duration::from_millis(1700),
-                Some(&candle_core::Device::Cpu)
+                Some(&candle_core::Device::Cpu),
+                false
             ),
             None
         );
         assert!(hold.until.is_none() && hold.since.is_none());
+    }
+
+    /// #489: while another process of ours works on the card, a hold lasts
+    /// and starts nothing — it asks again a period later — and once that
+    /// work ends the next turn reaches the card (here the processor, which
+    /// is no card, so the hold then ends).
+    #[test]
+    fn a_hold_starts_nothing_while_another_process_works_on_the_card() {
+        let t0 = Instant::now();
+        let mut hold = ClockHold::default();
+        hold.note_forward(t0);
+        let cpu = candle_core::Device::Cpu;
+        for turn in 1..=3u64 {
+            assert_eq!(
+                hold.start_piece(t0 + PERIOD * turn as u32, Some(&cpu), true),
+                Some(PERIOD),
+                "busy beside: wait a period, start nothing"
+            );
+            assert_eq!((hold.beside, hold.pieces), (turn, 0));
+            assert!(hold.until.is_some(), "the hold lasts through it");
+        }
+        // Past the hold's end it ends, busy beside or not.
+        assert_eq!(hold.start_piece(t0 + HOLD_FOR, Some(&cpu), true), None);
+        assert!(hold.until.is_none() && hold.beside == 0);
+        // The other process done: the turn reaches the device.
+        hold.note_forward(t0);
+        assert_eq!(hold.start_piece(t0, Some(&cpu), false), None);
+        assert!(hold.until.is_none(), "the processor is no card");
+    }
+
+    /// The daemon's word is the worker's one reading.
+    #[test]
+    fn the_daemons_word_on_the_card_is_kept() {
+        set_busy_beside(true);
+        assert!(busy_beside());
+        set_busy_beside(false);
+        assert!(!busy_beside());
     }
 
     /// Off unless asked for: a second process on the card pays for the
@@ -309,15 +396,35 @@ mod tests {
             activation_lens: Vec::new(),
         };
         assert!(starts_a_hold(&batch));
+        // A drafter model's guess runs in a process of its own beside its
+        // target, which holds the card for both (#489).
+        let draft = DaemonMsg::Draft(crate::inference::worker_ipc::IpcDraft {
+            request_id: uuid::Uuid::nil(),
+            model_id: crate::types::ModelId("drafter".into()),
+            layer_range: (0, 24),
+            keep: 0,
+            append: vec![1, 2],
+            gamma: 4,
+            sampling: crate::types::SamplingParams::default(),
+            history: Vec::new(),
+            coupling_seed: None,
+            for_the_owner: false,
+            runner_ups: false,
+            stop_below: None,
+            tree: None,
+            flow: None,
+        });
         for quiet in [
+            draft,
             DaemonMsg::ReadCardFree,
             DaemonMsg::Shutdown,
             DaemonMsg::Pace { pause_permille: 0 },
+            DaemonMsg::CardBusyBeside { busy: true },
             DaemonMsg::CancelRequest {
                 request_id: uuid::Uuid::nil(),
             },
         ] {
-            assert!(!starts_a_hold(&quiet));
+            assert!(!starts_a_hold(&quiet), "{quiet:?}");
         }
         let mut hold = ClockHold::default();
         hold.note_handled(starts_a_hold(&DaemonMsg::ReadCardFree), Instant::now());

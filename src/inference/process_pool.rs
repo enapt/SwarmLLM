@@ -1492,6 +1492,25 @@ struct WorkerHandle {
     /// pool's then; after, each `DaemonMsg::Pace` it received. The fan-out
     /// tells only the workers it differs for ([`ModelProcessPool::pace_steps`]).
     told_pace: std::sync::atomic::AtomicU32,
+    /// Whether this worker was last told another of our workers is busy on
+    /// the card (`DaemonMsg::CardBusyBeside`; `false` at spawn, as the worker
+    /// starts). The fan-out tells only the workers it differs for
+    /// ([`ModelProcessPool::tell_cards_who_is_busy`]).
+    told_busy_beside: AtomicBool,
+    /// The pool's wake for that fan-out
+    /// ([`ModelProcessPool::card_work_changed`]): rung where a reply's slot
+    /// opens and closes on this worker ([`card_work_changed`]).
+    card_work_changed: Arc<tokio::sync::Notify>,
+}
+
+/// A reply's slot opened or closed on a worker: wake the fan-out that tells
+/// each card worker whether another is busy beside it (#489) — only while the
+/// clock hold is on, the one thing that reads it. `notify_one` keeps one
+/// wake for a fan-out still running, so a change during one is never lost.
+fn card_work_changed(wake: &tokio::sync::Notify) {
+    if crate::inference::clock_hold::enabled() {
+        wake.notify_one();
+    }
 }
 
 /// Longest path a Unix domain socket may have, INCLUDING its NUL terminator.
@@ -2351,6 +2370,9 @@ struct ResponseGuard {
     /// kills the process and frees its memory (`impl Drop for WorkerHandle`),
     /// and a reply's slot can outlive an evicted worker.
     used_until_now: Option<(std::sync::Weak<WorkerHandle>, Requester)>,
+    /// Rung when the slot closes, as at its opening ([`card_work_changed`]):
+    /// the worker's work on the card may have ended (#489).
+    card_work_changed: Option<Arc<tokio::sync::Notify>>,
 }
 
 /// Claim `request_id` in `map` for a fresh attempt. Returns the new attempt's
@@ -2892,6 +2914,18 @@ impl WorkerHandle {
             .unwrap_or(u32::MAX)
     }
 
+    /// Is a reply's step running on this worker NOW — a slot open from just
+    /// before its request is sent to its end? Deliberately NOT
+    /// [`Self::in_use`], which also counts a conversation held between two
+    /// forwards: then the card stands idle, the very gap the clock hold fills
+    /// (#489). Asked ONLY by [`ModelProcessPool::tell_cards_who_is_busy`] —
+    /// never for whether a worker may be retired, reclaimed or promoted, where
+    /// the gap between forwards is still a reply (#93; guard
+    /// `whether_a_worker_is_in_use_is_decided_in_one_place`).
+    fn working_now(&self) -> bool {
+        !self.responses.is_empty()
+    }
+
     /// [`Self::in_use`] asked by one request about every OTHER: a reply of
     /// another in flight, or another's conversation held between forwards.
     /// What a request that would retire this worker for itself asks
@@ -2974,6 +3008,9 @@ impl WorkerHandle {
         cancel_on_drop: bool,
     ) -> (ResponseGuard, Option<u64>) {
         let (token, displaced) = claim_response_slot(&self.responses, request_id, tx);
+        // Before the request is sent, as the load flag is: the card worker
+        // beside this one pauses its hold as this work starts (#489).
+        card_work_changed(&self.card_work_changed);
         if displaced.is_some() {
             tracing::warn!(
                 %request_id,
@@ -2988,6 +3025,7 @@ impl WorkerHandle {
                 token,
                 worker: cancel_on_drop.then(|| self.clone()),
                 used_until_now: None,
+                card_work_changed: Some(self.card_work_changed.clone()),
             },
             displaced,
         )
@@ -3077,6 +3115,9 @@ impl Drop for ResponseGuard {
         // would fail a request that is still perfectly healthy.
         self.responses
             .remove_if(&self.request_id, |_, (tok, _)| *tok == self.token);
+        if let Some(wake) = &self.card_work_changed {
+            card_work_changed(wake);
+        }
         if let Some((worker, user)) = self
             .used_until_now
             .take()
@@ -5040,6 +5081,11 @@ pub struct ModelProcessPool {
     /// The pace every worker should run at (`inference::pace`, #440 step 4):
     /// a spawn starts its worker at it, [`Self::pace_steps`] sets it.
     pace_permille: std::sync::atomic::AtomicU32,
+    /// Rung where a reply's slot opens or closes on any worker (each worker
+    /// holds a clone); awaited ONLY by the daemon's card fan-out
+    /// (`daemon::background::spawn_card_busy_fan_out` →
+    /// [`Self::tell_cards_who_is_busy`], #489).
+    card_work_changed: Arc<tokio::sync::Notify>,
     /// GPU memory charged to each live worker, in MB.
     ///
     /// Admission needs to know what is already committed, and it cannot ask the
@@ -5386,6 +5432,7 @@ impl ModelProcessPool {
             cpu_threads: std::sync::atomic::AtomicUsize::new(0),
             owner_prefill_threads: std::sync::atomic::AtomicUsize::new(0),
             pace_permille: std::sync::atomic::AtomicU32::new(0),
+            card_work_changed: Arc::default(),
             vram_reserved_mb: dashmap::DashMap::new(),
             ram_budget_mb: std::sync::atomic::AtomicU64::new(0),
             ram_budget_provider: std::sync::OnceLock::new(),
@@ -13106,6 +13153,8 @@ impl ModelProcessPool {
             drafts_for_another_model: AtomicBool::new(false),
             guesses_for: std::sync::Mutex::new(Vec::new()),
             told_pace: std::sync::atomic::AtomicU32::new(pace_at_spawn),
+            told_busy_beside: AtomicBool::new(false),
+            card_work_changed: self.card_work_changed.clone(),
         };
         Ok(SpawnedWorker {
             handle,
@@ -14785,6 +14834,59 @@ impl ModelProcessPool {
         self.pace_permille.load(Ordering::Acquire)
     }
 
+    /// The wake [`Self::tell_cards_who_is_busy`] is run on: rung where a
+    /// reply's slot opens or closes on any worker, while the clock hold is on.
+    pub fn card_work_changed(&self) -> Arc<tokio::sync::Notify> {
+        self.card_work_changed.clone()
+    }
+
+    /// Tell each card worker whether ANOTHER of this pool's card workers has
+    /// a reply in flight now (`DaemonMsg::CardBusyBeside`), so its clock hold
+    /// starts no piece the card would time-slice against that work
+    /// (`inference::clock_hold`, FUTURE_WORK #489). Two processes on a
+    /// consumer card share it by time-slicing — the 14B split's drafter
+    /// beside its target, the owner's reply beside a slice served for a peer —
+    /// and only the daemon sees both. Run on [`Self::card_work_changed`];
+    /// tells only the workers it differs for, as [`Self::pace_steps`] does,
+    /// so a steady card sends nothing.
+    ///
+    /// Busy = [`WorkerHandle::working_now`]: a reply slot open on the worker
+    /// (a generate, a forward, a guess, a peer's question) — open from just
+    /// before the request is sent to its end ([`WorkerHandle::register_response`],
+    /// `ResponseGuard`'s drop). Every worker charged against the card counts
+    /// as one card: a machine with two cards loses holds it could keep, never
+    /// gains a piece against the other card's work.
+    pub async fn tell_cards_who_is_busy(&self) {
+        let busy_on_card = self
+            .workers
+            .iter()
+            .filter(|e| {
+                let w = e.value();
+                w.holds_gpu_memory() && !w.dead.load(Ordering::Acquire) && w.working_now()
+            })
+            .count();
+        let beside = |w: &WorkerHandle| {
+            let own = usize::from(w.working_now());
+            busy_on_card.saturating_sub(own) > 0
+        };
+        for busy in [true, false] {
+            let reached = self
+                .notify_workers(
+                    |w| {
+                        w.holds_gpu_memory()
+                            && beside(w) == busy
+                            && w.told_busy_beside.load(Ordering::Acquire) != busy
+                    },
+                    &DaemonMsg::CardBusyBeside { busy },
+                    "card-busy-beside",
+                )
+                .await;
+            for worker in reached {
+                worker.told_busy_beside.store(busy, Ordering::Release);
+            }
+        }
+    }
+
     /// Tell every live worker that `request_id` is finished with its KV cache.
     ///
     /// Same fan-out as `cancel_request` and for the same reason: the request id
@@ -15823,6 +15925,7 @@ mod tests {
             token,
             worker: None,
             used_until_now: None,
+            card_work_changed: None,
         }
     }
 
@@ -20530,6 +20633,109 @@ mod tests {
         ));
     }
 
+    /// #489: a card worker is told when ANOTHER card worker of ours has a
+    /// reply in flight and when it ends — never about its own work, never
+    /// twice, and a worker on the processor neither counts nor is told.
+    #[tokio::test]
+    async fn a_card_worker_is_told_when_another_is_busy_on_the_card() {
+        use crate::inference::worker_ipc::recv_daemon;
+        async fn next(
+            worker_end: &mut interprocess::local_socket::tokio::Stream,
+        ) -> Option<DaemonMsg> {
+            tokio::time::timeout(
+                std::time::Duration::from_millis(300),
+                recv_daemon(worker_end),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .map(|(msg, _)| msg)
+        }
+        fn told(msg: Option<DaemonMsg>) -> Option<bool> {
+            match msg {
+                Some(DaemonMsg::CardBusyBeside { busy }) => Some(busy),
+                None => None,
+                Some(other) => panic!("unexpected {other:?}"),
+            }
+        }
+        let p = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-card-busy"));
+        let now = std::time::Instant::now();
+        let (target, mut target_end) =
+            fake_worker_handle_split_with_its_end(false, None, false, now, None).await;
+        let (drafter, mut drafter_end) =
+            fake_worker_handle_split_with_its_end(false, None, false, now, None).await;
+        let (on_cpu, mut cpu_end) = fake_worker_handle_split_with_its_end(
+            false,
+            Some(CpuReason::GpuUnavailable),
+            true,
+            now,
+            None,
+        )
+        .await;
+        p.workers.insert(ModelId("target".into()), target.clone());
+        p.workers.insert(ModelId("drafter".into()), drafter.clone());
+        p.workers.insert(ModelId("on-cpu".into()), on_cpu.clone());
+
+        // The drafter guesses: the target is told; the drafter, whose own
+        // work it is, and the processor worker are told nothing.
+        let (guess, _) =
+            drafter.register_response(Uuid::new_v4(), dummy_tx(), false, Requester::Swarm);
+        p.tell_cards_who_is_busy().await;
+        assert_eq!(told(next(&mut target_end).await), Some(true));
+        assert_eq!(told(next(&mut drafter_end).await), None);
+        assert_eq!(told(next(&mut cpu_end).await), None);
+        // Steady: nothing again.
+        p.tell_cards_who_is_busy().await;
+        assert_eq!(told(next(&mut target_end).await), None);
+        // The guess ends: the target is told the card is its own again.
+        drop(guess);
+        p.tell_cards_who_is_busy().await;
+        assert_eq!(told(next(&mut target_end).await), Some(false));
+
+        // Both at work: each is told of the other.
+        let (forward, _) =
+            target.register_response(Uuid::new_v4(), dummy_tx(), false, Requester::Owner);
+        let (guess, _) =
+            drafter.register_response(Uuid::new_v4(), dummy_tx(), false, Requester::Owner);
+        p.tell_cards_who_is_busy().await;
+        assert_eq!(told(next(&mut target_end).await), Some(true));
+        assert_eq!(told(next(&mut drafter_end).await), Some(true));
+        drop((forward, guess));
+        p.tell_cards_who_is_busy().await;
+        assert_eq!(told(next(&mut target_end).await), Some(false));
+        assert_eq!(told(next(&mut drafter_end).await), Some(false));
+
+        // Work on the processor does not hold the card.
+        let (cpu_reply, _) =
+            on_cpu.register_response(Uuid::new_v4(), dummy_tx(), false, Requester::Owner);
+        p.tell_cards_who_is_busy().await;
+        assert_eq!(told(next(&mut target_end).await), None);
+        assert_eq!(told(next(&mut drafter_end).await), None);
+        assert_eq!(told(next(&mut cpu_end).await), None);
+        drop(cpu_reply);
+    }
+
+    /// The fan-out's wake is rung where a reply's slot opens and where it
+    /// closes — the two ends of a worker's work — while the hold is on.
+    #[tokio::test]
+    async fn a_replys_slot_rings_the_card_fan_out_at_both_ends() {
+        use futures::FutureExt;
+        let h = fake_worker_handle_split(false, None, false, std::time::Instant::now(), None).await;
+        let wake = h.card_work_changed.clone();
+        let (guard, _) = h.register_response(Uuid::new_v4(), dummy_tx(), false, Requester::Swarm);
+        let on = crate::inference::clock_hold::enabled();
+        assert_eq!(wake.notified().now_or_never().is_some(), on, "opened");
+        drop(guard);
+        assert_eq!(wake.notified().now_or_never().is_some(), on, "closed");
+        let (question, _) = h.register_question(Uuid::new_v4(), dummy_tx());
+        assert_eq!(
+            wake.notified().now_or_never().is_some(),
+            on,
+            "a question too"
+        );
+        drop(question);
+    }
+
     /// **A card worker never asked to load anything is owed nothing back** (#3
     /// (j13)'s open case, pre-release review 2026-11-14): charged at its spawn,
     /// it loads on its first message, so retired before one it holds its device
@@ -20684,6 +20890,8 @@ mod tests {
             drafts_for_another_model: AtomicBool::new(false),
             guesses_for: std::sync::Mutex::new(Vec::new()),
             told_pace: std::sync::atomic::AtomicU32::new(0),
+            told_busy_beside: AtomicBool::new(false),
+            card_work_changed: Arc::default(),
         });
         (handle, client)
     }

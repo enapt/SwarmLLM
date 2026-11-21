@@ -9370,7 +9370,12 @@ fn bare_worker_in_use_reads(src: &str) -> Vec<(usize, String)> {
     let production = production_code(src);
     let production = production.as_str();
     let the_one_place = method_body(production, "    fn in_use(").unwrap_or("");
-    let scanned = production.replacen(the_one_place, "", 1);
+    // `working_now` asks the other question — is a step running NOW — for the
+    // clock hold alone (#489); the guard below pins that it has no other reader.
+    let running_now = method_body(production, "    fn working_now(").unwrap_or("");
+    let scanned = production
+        .replacen(the_one_place, "", 1)
+        .replacen(running_now, "", 1);
     statements(&scanned)
         .into_iter()
         .filter(|(_, stmt)| stmt.contains("responses.is_empty()"))
@@ -9405,6 +9410,18 @@ fn whether_a_worker_is_in_use_is_decided_in_one_place() {
         "decide whether a worker is in use with `WorkerHandle::in_use(window)`, \
          never `responses` alone — a reply between two forwards has nothing in \
          flight and is not finished:\n{bare:#?}"
+    );
+    // `WorkerHandle::working_now` (a step running NOW) is the clock hold's
+    // question (#489) and nobody else's: asked where a worker may be retired,
+    // reclaimed or promoted it would reopen #93.
+    let production = production_code(&src);
+    let fan_out = method_body(&production, "    pub async fn tell_cards_who_is_busy(")
+        .expect("ModelProcessPool::tell_cards_who_is_busy was renamed — re-point this guard");
+    assert_eq!(
+        production.matches(".working_now()").count(),
+        fan_out.matches(".working_now()").count(),
+        "`WorkerHandle::working_now` is asked only by `tell_cards_who_is_busy`; \
+         whether a worker is in use is `WorkerHandle::in_use`"
     );
 }
 

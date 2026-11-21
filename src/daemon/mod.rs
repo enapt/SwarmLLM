@@ -694,6 +694,11 @@ impl Daemon {
             shared_state.clone(),
             shutdown_rx.clone(),
         );
+        background::spawn_card_busy_fan_out(
+            &mut background_tasks,
+            shared_state.clone(),
+            shutdown_rx.clone(),
+        );
         background::spawn_initial_announcements(
             &mut background_tasks,
             shared_state.clone(),

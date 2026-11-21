@@ -4508,6 +4508,18 @@ holds a context, not who has work in flight, and NVIDIA calls `GetProcessUtiliza
 side by side. Stream priority acts inside one process only (GCAPS, arXiv 2406.05221); green contexts partition one
 process's SMs. vLLM, SGLang, TensorRT-LLM, llama.cpp and Ollama document no keep-alive piece. So the signal is ours to
 send between our own processes — (b).
+
+**Built 2026-11-21, (a) + (b), still OFF by default until the kill/keep line is measured.** A drafter model's `Draft`
+no longer starts a hold (`clock_hold::starts_a_hold`); its target holds the card for both. And the daemon wakes a
+fan-out (`daemon::background::spawn_card_busy_fan_out`, only while the hold is on) wherever a reply's slot opens
+(`WorkerHandle::register_unseen`, just before the request is sent) or closes (`ResponseGuard`'s drop);
+`ModelProcessPool::tell_cards_who_is_busy` tells each card worker, change-only, whether ANOTHER card worker has a
+slot open (`DaemonMsg::CardBusyBeside`), the worker's reader task sets `clock_hold::set_busy_beside`, and
+`ClockHold::start_piece` starts nothing while it is set (the hold lasts; its DIAG counts `busy_beside` turns). Every
+card-charged worker counts as one card — a two-card machine loses holds it could keep, never gains a piece against
+the other card's work. A piece already queued when the word arrives still runs (≤ 2 ms). Tests fail with each part
+taken out. Next: the 14B flow `flowhalf` vs `flowhalf:SWARMLLM_CARD_CLOCK_HOLD=1` and the 27B (`hold_query`) on a CUDA
+build of main; on by default only if both pass.
 Evidence: `docs/invariants/inference.md` § "A card between a split's forwards keeps its clocks".
 
 #### #488 — A split's head that runs part of its layers on the processor puts its drafter in system memory, where a guess takes 54 ms

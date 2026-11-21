@@ -426,6 +426,13 @@ pub async fn run_worker(
                         crate::inference::pace::set_pause_permille(pause_permille);
                         continue;
                     }
+                    // Read between the clock hold's pieces (`clock_hold`,
+                    // #489): another process of ours on the card is working,
+                    // or has stopped — taken now, not after a queued step.
+                    if let DaemonMsg::CardBusyBeside { busy } = msg {
+                        crate::inference::clock_hold::set_busy_beside(busy);
+                        continue;
+                    }
                     // Short-circuit cross-node prefix fetch results so
                     // `handle_generate` can await its oneshot without
                     // relying on the main loop to pump ipc_rx (which it
@@ -528,7 +535,13 @@ pub async fn run_worker(
             let card = models.values().map(|m| m.device()).find(|d| d.is_cuda());
             let piece = ipc_rx
                 .is_empty()
-                .then(|| clock_hold.start_piece(std::time::Instant::now(), card))
+                .then(|| {
+                    clock_hold.start_piece(
+                        std::time::Instant::now(),
+                        card,
+                        crate::inference::clock_hold::busy_beside(),
+                    )
+                })
                 .flatten();
             if let Some(wait) = piece {
                 match tokio::time::timeout(wait, ipc_rx.recv()).await {
@@ -12872,6 +12885,10 @@ async fn handle_daemon_msg(
         // The reader task takes every pace; one reaching here is set the same.
         DaemonMsg::Pace { pause_permille } => {
             crate::inference::pace::set_pause_permille(pause_permille);
+        }
+        // Likewise the daemon's word on the card (`clock_hold`).
+        DaemonMsg::CardBusyBeside { busy } => {
+            crate::inference::clock_hold::set_busy_beside(busy);
         }
         DaemonMsg::Shutdown => {
             let _ = send_worker(writer, &WorkerMsg::Bye, &[]).await;

@@ -851,6 +851,36 @@ pub(super) fn spawn_region_detection(
     });
 }
 
+/// Tell each card worker when another of our model processes starts or stops
+/// working on the card (`ModelProcessPool::tell_cards_who_is_busy`), so the
+/// card clock hold pauses beside it (`inference::clock_hold`, FUTURE_WORK
+/// #489). Woken where a reply's slot opens or closes on any worker; nothing
+/// runs while the hold is off, its default.
+pub(super) fn spawn_card_busy_fan_out(
+    tasks: &mut BackgroundTasks,
+    shared_state: Arc<SharedState>,
+    mut shutdown_rx: watch::Receiver<bool>,
+) {
+    if !crate::inference::clock_hold::enabled() {
+        return;
+    }
+    tasks.spawn(async move {
+        let pool = shared_state.model_process_pool.clone();
+        let wake = pool.card_work_changed();
+        loop {
+            tokio::select! {
+                () = wake.notified() => pool.tell_cards_who_is_busy().await,
+                changed = shutdown_rx.changed() => {
+                    if changed.is_err() || *shutdown_rx.borrow() {
+                        break;
+                    }
+                }
+            }
+        }
+        "card_busy_fan_out"
+    });
+}
+
 /// How often the country lookup looks again at whether the owner still states
 /// a country (`spawn_region_detection`, #414).
 const STATED_COUNTRY_RECHECK: std::time::Duration = std::time::Duration::from_secs(60);
