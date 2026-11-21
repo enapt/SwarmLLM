@@ -4476,9 +4476,10 @@ are ~20-24 ms of a 49-54 ms prose token, none of a 21 ms code token; the rest is
 one card: 21.6 → 33.2 tok/s from 100 to 0 ms (~0.16 ms a token per ms of loop) at the SAME miss count — more of each
 forward's rows land on the reply — so today's pair at zero wire reads ~29-33 tok/s prose (DERIVED); past that the
 head's pace binds, and the pacer (the drafter off the head) is the lever. A derivation from older lines the same night read `L` ~430 ms and blamed the far's
-queue (commit `5c62eac9a`): withdrawn by the measurement. **Step 3 (§ 8)**: the schedule model's delay (224 ms) is
-near the measured one, but it reads prose 2-42% high and code 13-17% low, so its pacer figures (+16% prose, +26-34%
-code today) do not rule yet. **Next**: the pacer A/B (step 5, the first build — after the release), and step 2
+queue (commit `5c62eac9a`): withdrawn by the measurement. **Step 3 (§ 8)**: the schedule model, re-grown as `grow_flow`
+grows the tree, reproduces the 14B pair (prose/code within 1% as fitted, the verdict delay 176 ms unfitted) but not
+step 4's rise in tokens a forward below 40 ms (−17% at 0 ms), so its pacer figures (indicative: ~1.05× prose,
+~1.5× code at a 20 ms loop) do not rule yet. **Next**: the pacer A/B (step 5, the first build — after the release), and step 2
 (drafter ranks against the 14B, offline).
 
 Prior art: none taken as the design, by the owner's direction; the debate checked each idea against our own

@@ -309,6 +309,23 @@ layers, far 24-46 ms a forward, 130 ms, 0.15 ms a row; 40 seeds, 160 tokens), an
   ring 30-42 prose, 59-87 code) need a model whose tree deepens as the real one does (~1.1 levels a forward in
   prose, ~1.8 in code, § 7) and whose code is not low. The scripts stay out of the repo until a calibration holds.
 
+- **Recalibrated the same night on the counters (§§ 7, 9)**: the tree is now grown as `SplitModel::grow_flow`
+  grows it (`src/inference/split/draft.rs`: one best-first queue of children over the live tree, a call of three
+  levels of eight, a row's children only one level after it is added, nothing past 128 live rows) — which gives the
+  measured ~1.1 levels a forward. Fitted on the 14B pair's default arm (prose: top-1 share 0.587, absent 0.081;
+  code: top-1 0.936), it reproduces that arm — 19.55 prose / 47.56 code tok/s, 0.75 / 1.83 tokens a forward,
+  verdict delay 176 ms UNFITTED against 178-185 — but code misses 6 a reply against 0. Fitted on step 4's 100 ms
+  point only, it does NOT reproduce the shorter loops: its tokens a forward stop rising at 1.54 from 40 ms down
+  (measured 1.42-1.47 / 1.50-1.51 / 1.84-1.88), so 0 ms reads 27.7 against 33.0-33.6 (−17%); no rank profile on a
+  grid fits all four loops within 14%. The real tree wastes more rows to a longer wait than the queue model does;
+  untested candidates: the guard narrowing the live budget at long loops, rebases at the 512-row cap, the delay
+  rig's own overhead (its measured delays at 40 and 20 ms are alike, 140 and 136).
+- **Indicative only** (the rule withholds a ruling): on the 14B pair today's shape at a 20 ms loop reads 30.9 prose
+  / 61.0 code (§ 9's slope gave ~29-33 prose), and the pacer there 32.3 / 92.9 (35.3 / 95.8 with the far's queue
+  merged) — ~1.05× prose, ~1.5× code over the same loop without it; most of a prose gain is the short loop.
+  Scripts in the night's scratch folder (`step3/`: `ring_sim3.py`, `fitall.py`, `evalcal.py`, `grid.py`,
+  `pacerA.py`), kept out of the repo until step 4's shape is reproduced.
+
 ## 9. Kill ladder step 4 — a shorter loop on one card, MEASURED (2026-11-21)
 
 `~/swarmllm-gate/step4/flowline.sh` (a copy of `~/swarmllm-318/flowline.sh` writing to its own folder), 14:43-15:05Z,
