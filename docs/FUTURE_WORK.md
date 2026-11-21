@@ -4454,7 +4454,32 @@ Designs: `docs/plans/large_model_splits.md` (the target, the bound and the build
 `docs/plans/small_slices.md` (**the plan since 2026-11-20**: small slices, fast replies — ordered steps, each with
 the measurement that can kill it), `docs/plans/split_speculation.md` (guess-and-check across a split),
 `docs/plans/wan_parallel.md` (parallelise the reply, not the token), `docs/plans/regional_pipelines.md`
-(placement by distance, #192), `docs/plans/faster_than_local.md` (the ranked list).
+(placement by distance, #192), `docs/plans/faster_than_local.md` (the ranked list),
+`docs/plans/standing_ring.md` (#492: one reply faster than local on a short ring of cards — a concept with its
+kill ladder).
+
+#### #492 — The standing ring: one reply faster than the same model run whole, on a short ring of cards
+
+`P1` · speed · **CONCEPT 2026-11-21; kill ladder step 1 ran — its law's split of a token's time does not hold as
+stated; the counters to measure it are on main** · plan: `docs/plans/standing_ring.md`
+
+The owner's ask (2026-11-21): past prior art, our own design, faster than local, for thousands of cards. Six agents
+in turn produced it: the fewest cards that hold a model, chosen close together, a drafter that never stops guessing
+on its own card, the asker off the ring. Its law, `time a token = d + m × L` (pace a level + misses × verdict
+delay), predicts 3-8× a member's own computer inside a region (14B 34-72 tok/s, 70B 15-33). **Step 1 (§ 7 of the
+plan)**, on 128 flow replies of seven real-link runs: 65-73% of guessed levels thrown away (law 74%, passes), but
+a miss every 11.4 tokens and ~30 levels thrown away a miss — a verdict delay of ~400-460 ms, not the law's 222.
+The product is unchanged; what moves is what a short ring buys: ~250 ms of the delay is not wire — #412's
+measured queue of our own forwards at the far card (+~30 ms a forward past ~5 out) — so a short ring alone gives
+~26 tok/s at a zero loop on today's pair, not 33, unless the far keeps pace (#412's merge is that lever). The flow's reply line now
+says `verdict_ms`, `miss_verdict_ms` and `voided_levels` (`dsd_flow::Verdicts`, log-only). **Next**: one real-link
+run reads `L` directly (the README rows' run will); then steps 2-4 (drafter ranks against the 14B, the schedule
+simulation reproducing the arms, the delay rig to 0 ms). Nothing is built past the counters until they pass.
+
+Prior art: none taken as the design, by the owner's direction; the debate checked each idea against our own
+measured kills instead (lanes, twins, a drafter guild, verdict taps, scout-and-stitch: the plan's appendix), and
+§ 2 "What is not new" names what it shares with our earlier plans. The counters take vLLM's spec-decode metrics'
+drafted / accepted / emitted triple; a verdict DELAY has no counterpart there (one machine, no wire).
 
 #### #490 — Every `nvidia-smi` the node starts under WSL2 leaks ~15 KB of Windows' kernel memory, ~9,500 a day
 

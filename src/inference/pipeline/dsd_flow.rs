@@ -1168,6 +1168,12 @@ struct FlowRun<'a, 'r> {
     guard: FlowGuard,
     /// Where each row came from (`copy_ahead`), beside `draws`.
     copied: Vec<Copied>,
+    /// When each GUESSED row was made (the drafter's or a copied run's),
+    /// beside `draws`; `None` for the root and the model's own bonus rows.
+    drafted_at: Vec<Option<std::time::Instant>>,
+    /// The verdicts the walk took (`Verdicts`): how long a guess waited from
+    /// its drafting to the walk reaching it, and what a miss threw away.
+    verdicts: Verdicts,
     /// The lookup's shape; `None` where copied runs are off.
     copy: Option<crate::inference::ngram_lookup::NgramLookupConfig>,
     /// The owner's earlier replies, which this flow may copy from and is kept
@@ -1310,6 +1316,8 @@ impl PipelineExecutor {
             bonus_waiting: None,
             guard,
             copied: vec![Copied::No],
+            drafted_at: vec![None],
+            verdicts: Verdicts::default(),
             copy,
             earlier,
             copied_from: None,
@@ -1420,6 +1428,9 @@ impl PipelineExecutor {
             earlier_rows = run.earlier_rows,
             earlier_walked = run.earlier_walked,
             window = forwards_in_flight(chained),
+            verdict_ms = format_args!("{:.0}", run.verdicts.kept_ms_median()),
+            miss_verdict_ms = format_args!("{:.0}", run.verdicts.missed_ms_median()),
+            voided_levels = run.verdicts.voided_levels,
             "DSD: a tree that flowed is complete"
         );
         outcome.map_err(|error| FlowFailed {
@@ -1557,12 +1568,14 @@ impl FlowRun<'_, '_> {
         // pushed here too, and no op says so. A refusal would leave the two
         // trees apart, so it ends the flow.
         let pushed = proposed.len() as u32;
+        let drafted = std::time::Instant::now();
         for (parent, token) in proposed {
             self.flow
                 .push(usize::from(parent), token)
                 .map_err(|e| SwarmError::Internal(format!("a drafter's proposal: {e}")))?;
             self.draws.push(None);
             self.copied.push(Copied::No);
+            self.drafted_at.push(Some(drafted));
         }
         *self.reply.proposed += pushed;
         Ok(pushed > 0)
@@ -1582,6 +1595,11 @@ impl FlowRun<'_, '_> {
         }
         self.draws = rebased.kept.iter().map(|&old| self.draws[old]).collect();
         self.copied = rebased.kept.iter().map(|&old| self.copied[old]).collect();
+        self.drafted_at = rebased
+            .kept
+            .iter()
+            .map(|&old| self.drafted_at[old])
+            .collect();
         self.remap = Some((self.epoch, new_index));
         self.epoch += 1;
         self.rebases += 1;
@@ -1677,6 +1695,7 @@ impl FlowRun<'_, '_> {
             };
             self.draws.push(None);
             self.copied.push(from);
+            self.drafted_at.push(Some(std::time::Instant::now()));
             self.ops.push(FlowOp::Copy {
                 parent: parent as u16,
                 token,
@@ -1712,6 +1731,46 @@ impl FlowRun<'_, '_> {
         copied
     }
 
+    /// The verdicts this walk took, from the walk's row down to `reached`: each
+    /// guess on the path was kept, and where the walk `missed` below `reached`
+    /// the level under it lost — its rows and every level drafted beneath them
+    /// thrown away. Read only for the reply's line (the standing ring's kill
+    /// ladder step 1, `docs/plans/standing_ring.md`).
+    fn note_verdicts(&mut self, reached: usize, missed: bool) {
+        let now = std::time::Instant::now();
+        let from = self.flow.at();
+        let mut row = reached;
+        while row != from {
+            if let Some(Some(at)) = self.drafted_at.get(row) {
+                self.verdicts.kept(now.duration_since(*at));
+            }
+            match self.flow.tree().parent(row) {
+                Some(parent) => row = parent,
+                None => break,
+            }
+        }
+        if !missed {
+            return;
+        }
+        let tree = self.flow.tree();
+        let lost = tree
+            .children(Some(reached))
+            .filter_map(|child| self.drafted_at.get(child).copied().flatten())
+            .min();
+        // Levels beneath the walk's row, deepest first found breadth-first.
+        let mut levels = 0u32;
+        let mut frontier: Vec<usize> = tree.children(Some(reached)).collect();
+        while !frontier.is_empty() {
+            levels += 1;
+            frontier = frontier
+                .iter()
+                .flat_map(|&row| tree.children(Some(row)))
+                .collect();
+        }
+        self.verdicts
+            .missed(lost.map(|at| now.duration_since(at)), levels);
+    }
+
     /// The draw no row carried, a row of its own under the walk's row, and the
     /// walk on it; sent with the drafter's next rows after it.
     fn push_bonus(&mut self, token: u32) -> Result<(), SwarmError> {
@@ -1719,6 +1778,7 @@ impl FlowRun<'_, '_> {
         let row = self.flow.push(at, token).map_err(SwarmError::Internal)?;
         self.draws.push(None);
         self.copied.push(Copied::No);
+        self.drafted_at.push(None);
         self.ops.push(FlowOp::Push {
             parent: at as u16,
             token,
@@ -2456,6 +2516,7 @@ impl FlowRun<'_, '_> {
             return Ok(Taken::Continue);
         }
         let (WalkEnd::Waiting { row: reached } | WalkEnd::Missed { row: reached, .. }) = end;
+        self.note_verdicts(reached, matches!(end, WalkEnd::Missed { .. }));
         let (walked, earlier) = self.copied_between(self.flow.at(), reached);
         self.copied_walked += walked;
         self.earlier_walked += earlier;
@@ -2526,6 +2587,58 @@ impl FlowRun<'_, '_> {
     }
 }
 
+/// What the walk's verdicts cost a reply's guesses (the standing ring's kill
+/// ladder step 1, `docs/plans/standing_ring.md`): how long a kept guess
+/// waited from its drafting to the walk reaching it, how long the level that
+/// lost waited, and how many levels each miss threw away. Logged on the
+/// reply's line only; nothing reads it to decide.
+#[derive(Default)]
+struct Verdicts {
+    kept_ms: Vec<f32>,
+    missed_ms: Vec<f32>,
+    /// Levels drafted beneath a missed row, summed over the reply's misses.
+    voided_levels: u32,
+}
+
+impl Verdicts {
+    /// A reply's line needs a median, not every verdict: past this many the
+    /// rest are not kept.
+    const MOST_KEPT: usize = 4096;
+
+    fn kept(&mut self, waited: std::time::Duration) {
+        if self.kept_ms.len() < Self::MOST_KEPT {
+            self.kept_ms.push(waited.as_secs_f32() * 1000.0);
+        }
+    }
+
+    fn missed(&mut self, waited: Option<std::time::Duration>, levels: u32) {
+        self.voided_levels = self.voided_levels.saturating_add(levels);
+        if let Some(waited) = waited {
+            if self.missed_ms.len() < Self::MOST_KEPT {
+                self.missed_ms.push(waited.as_secs_f32() * 1000.0);
+            }
+        }
+    }
+
+    fn kept_ms_median(&self) -> f32 {
+        median_of(&self.kept_ms)
+    }
+
+    fn missed_ms_median(&self) -> f32 {
+        median_of(&self.missed_ms)
+    }
+}
+
+/// The median of `values`, 0 for none.
+fn median_of(values: &[f32]) -> f32 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(f32::total_cmp);
+    sorted[sorted.len() / 2]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2533,6 +2646,23 @@ mod tests {
 
     fn at(t0: Instant, ms: u64) -> Instant {
         t0 + Duration::from_millis(ms)
+    }
+
+    /// The reply's line reports the median wait of a kept guess and of a lost
+    /// level, and every level a miss threw away; a miss at a leaf (nothing
+    /// drafted under the walk) adds no wait.
+    #[test]
+    fn verdicts_report_the_median_waits_and_the_levels_a_miss_threw_away() {
+        let mut verdicts = Verdicts::default();
+        assert_eq!(verdicts.kept_ms_median(), 0.0);
+        for ms in [100, 400, 200] {
+            verdicts.kept(Duration::from_millis(ms));
+        }
+        verdicts.missed(Some(Duration::from_millis(300)), 12);
+        verdicts.missed(None, 0);
+        assert_eq!(verdicts.kept_ms_median(), 200.0);
+        assert_eq!(verdicts.missed_ms_median(), 300.0);
+        assert_eq!(verdicts.voided_levels, 12);
     }
 
     fn feed(g: &mut FlowGuard, t0: Instant, sent_ms: u64, delay: f64) {

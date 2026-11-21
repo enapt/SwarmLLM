@@ -1674,6 +1674,12 @@ stream or flow numbers `from` to `from + count − 1` that much longer, before t
 `ahead:count x median delay ms`: a delay flat while few are out, then rising one far service time
 per forward ahead, is a serial queue of the flow's OWN forwards (2026-11-06 TH↔AU: +~30 ms a
 forward past ~5, FUTURE_WORK #412); a delay that jumps regardless of the count is the far's own load.
+**What a guess waits for its verdict** (2026-11-21, FUTURE_WORK #492, log-only): `verdict_ms` is the median time
+a KEPT guess waited from its drafting to the walk reaching it, `miss_verdict_ms` the median wait of a level that
+LOST (the earliest-drafted row under the missed row), and `voided_levels` the levels drafted beneath every missed
+row, summed — `voided_levels / misses` is what a miss throws away. A reply's time a token is about the drafter's
+pace a level plus `misses / emitted × miss_verdict_ms`; `examples/standing_ring_ladder1.py` derives the same from
+older lines that lack these fields.
 
 **CUDA-graph decode** (on by default since 2026-09-30; `SWARMLLM_CUDA_GRAPH=0` or `SWARMLLM_CUDA_OWN_STREAM=0` turns it off; recorded in groups of `SWARMLLM_CUDA_GRAPH_GROUP` layers, default 2, `0` = one graph per step):
 
