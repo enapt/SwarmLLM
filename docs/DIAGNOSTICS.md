@@ -1872,6 +1872,14 @@ grep -a "DIAG: card allocation probe" ~/.local/share/swarmllm/node.log | grep -o
 
 `SWARMLLM_CARD_PROBE=0` turns the probe off; `SWARMLLM_CARD_PROBE_SLOW_MS=0` makes every probe count as slow, to watch the notice fire end to end on a healthy card.
 
+**The probe can read healthy while the card stalls** (2026-11-21, FUTURE_WORK #411, #146 (4)): at 46-51 h each model
+process stalled once 0.45-5 s early in its first reply while the probe read 7-8 ms. The tell is a forward's own time
+(`-v`): `grep -a "SplitModel forward pass complete" <log> | grep -v check-widths | grep -E "forward_ms=[0-9]{3,}"` —
+on the card it is 3-15 ms. To prove the wait is in Windows' graphics kernel, read the worker's threads while it runs:
+`while :; do for t in /proc/<worker pid>/task/*; do echo "$(date +%T.%N) $(cut -d' ' -f3 $t/stat) $(cat $t/wchan)"; done; sleep 0.02; done | grep dxgvmb_send_sync_msg`
+(state `D` for the stall's length; nvidia-smi records nothing meanwhile). A split speed measured past ~30 h of uptime
+carries it: state the uptime beside the figure (`real_link.sh` prints it).
+
 ### Recommendation
 
 For production testing, use native Linux (dual boot or bare metal). WSL2 is suitable for single-node development and basic multi-node testing with the above mitigations, but production distributed inference should run on native networking.
