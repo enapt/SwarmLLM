@@ -4460,9 +4460,9 @@ kill ladder).
 
 #### #492 — The standing ring: one reply faster than the same model run whole, on a short ring of cards
 
-`P1` · speed · **CONCEPT 2026-11-21; kill ladder step 1 MEASURED — the verdict delay is the law's, but misses × it
-are under half of a prose token; the head's own pace binds; step 3 (the schedule model) does not calibrate yet** ·
-plan: `docs/plans/standing_ring.md`
+`P1` · speed · **CONCEPT 2026-11-21; kill ladder steps 1 and 4 MEASURED — the verdict delay is the law's; a shorter
+loop pays (1.54× on one card, 100 → 0 ms) but through rows kept, not fewer misses; step 3 (the schedule model) does not
+calibrate yet** · plan: `docs/plans/standing_ring.md`
 
 The owner's ask (2026-11-21): past prior art, our own design, faster than local, for thousands of cards. Six agents
 in turn produced it: the fewest cards that hold a model, chosen close together, a drafter that never stops guessing
@@ -4472,13 +4472,14 @@ delay), predicts 3-8× a member's own computer inside a region (14B 34-72 tok/s,
 reply line, `dsd_flow::Verdicts`) on the 14B Thailand ↔ Australia split: `L` ≈ 180 ms (the least answer + ~20, no
 far queue), ~5 levels thrown away a miss (law ~16), a miss every 7.6-8.9 prose tokens and none in code. Misses × `L`
 are ~20-24 ms of a 49-54 ms prose token, none of a 21 ms code token; the rest is this node's pace — busy 98-100% at
-~39 ms a forward (drafting ~14 + layers ~25), each forward deepening the tree only ~1.1 levels in prose. So a short
-loop alone reads ~24-28 tok/s prose (1.2-1.45×) and nothing for code on today's pair; the larger lever is the pacer
-(the drafter off the head). A derivation from older lines the same night read `L` ~430 ms and blamed the far's
+~39 ms a forward (drafting ~14 + layers ~25), each forward deepening the tree only ~1.1 levels in prose. **Step 4 (§ 9)**, the loop swept on
+one card: 21.6 → 33.2 tok/s from 100 to 0 ms (~0.16 ms a token per ms of loop) at the SAME miss count — more of each
+forward's rows land on the reply — so today's pair at zero wire reads ~29-33 tok/s prose (DERIVED); past that the
+head's pace binds, and the pacer (the drafter off the head) is the lever. A derivation from older lines the same night read `L` ~430 ms and blamed the far's
 queue (commit `5c62eac9a`): withdrawn by the measurement. **Step 3 (§ 8)**: the schedule model's delay (224 ms) is
 near the measured one, but it reads prose 2-42% high and code 13-17% low, so its pacer figures (+16% prose, +26-34%
-code today) do not rule yet. **Next**: step 4 (the delay rig to 0 ms: what a short loop buys, one card), then the
-pacer A/B (step 5).
+code today) do not rule yet. **Next**: the pacer A/B (step 5, the first build — after the release), and step 2
+(drafter ranks against the 14B, offline).
 
 Prior art: none taken as the design, by the owner's direction; the debate checked each idea against our own
 measured kills instead (lanes, twins, a drafter guild, verdict taps, scout-and-stitch: the plan's appendix), and

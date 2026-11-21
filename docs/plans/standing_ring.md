@@ -12,10 +12,11 @@ inventors (idle swarm, the ceiling, thousands of cards), an adversary, an archit
 from our own measurements first and prior art second. It sits beside `small_slices.md` (the ranked steps toward
 20-30 tok/s) and `faster_than_local.md` § 9 (the flow); where they disagree, the measurement in § 7 below decides.
 
-**Read § 7 first** (MEASURED the same night): the verdict delay is ~180 ms, as the law has it, but misses × that
-delay are under half of a prose token's time and none of a code token's; the larger part is the head's own pace
-(busy 98-100%, ~39 ms a forward). A short loop alone reads ~1.2-1.45× prose and nothing for code on today's pair;
-the 3-8× below rests on the pacer, which is unmeasured.
+**Read §§ 7 and 9 first** (MEASURED the same night): the verdict delay is ~180 ms, as the law has it, but misses ×
+that delay are under half of a prose token's time and none of a code token's, and the law's mechanism is wrong in
+part: on one card a shorter loop bought 1.54× (100 → 0 ms, 21.6 → 33.2 tok/s) at the SAME miss count, through more
+of each forward's rows landing on the reply. The head stays busy 98-100% at every loop, so past a short loop the
+pacer is the lever — unmeasured.
 
 ## Summary
 
@@ -274,6 +275,8 @@ line now carries three counters (`dsd_flow::Verdicts`):
   the pacer (the drafter off the head's card, § 2) is the lever, then rows that deepen the tree more a forward.
   Step 3's model (§ 8) read the pacer alone at +16% prose and +26-34% code on today's pair. So the next useful
   tests are step 4 (what a short loop really buys, on one card) and step 5's pacer A/B — not step 2.
+  **§ 9 (step 4) found a loop costs ~3× what misses × `L` account for**, so the figures in this bullet are low: by
+  its slope, today's pair at zero wire reads ~29-33 tok/s prose.
 - **Derived first, and wrong** (kept so the error can be checked): from older lines without these counters,
   `forwards × 3 − emitted` read ~30 levels a miss and `L` ~400-460 ms (`examples/standing_ring_ladder1.py`), and
   commit `5c62eac9a` blamed ~250 ms of it on the far card serving our own forwards one at a time (#412). Both are
@@ -305,6 +308,40 @@ layers, far 24-46 ms a forward, 130 ms, 0.15 ms a row; 40 seeds, 160 tokens), an
 - **So the step does not rule yet.** Its pacer figures (indicative: today's pair +16% prose, +26-34% code; a 20 ms
   ring 30-42 prose, 59-87 code) need a model whose tree deepens as the real one does (~1.1 levels a forward in
   prose, ~1.8 in code, § 7) and whose code is not low. The scripts stay out of the repo until a calibration holds.
+
+## 9. Kill ladder step 4 — a shorter loop on one card, MEASURED (2026-11-21)
+
+`~/swarmllm-gate/step4/flowline.sh` (a copy of `~/swarmllm-318/flowline.sh` writing to its own folder), 14:43-15:05Z,
+Windows up 3.1 h, 0 driver events; main `7633b9296` built for the card. Qwen2.5-Coder-7B Q4_K_M split 4 + 4 parts
+over two processes on this one 8 GB card (they share it, gotcha #759), the 0.5B drafter beside the first, every
+packet between them delayed for the round trip named; the rig's one prose prompt, 160 tokens,
+`SWARMLLM_FLOW_COPY_STORE=0`; the flow (`SWARMLLM_DRAFT_TREES=1`) against the chain stream (`=0`), ABBA, three asks
+an arm (the first carries the load and is left out). Flow figures are the node's own reply line:
+
+| loop | flow tok/s | `verdict_ms` | least answer | misses a reply | `voided_levels` | forwards | tokens a forward | stream tok/s (client) |
+|---|---|---|---|---|---|---|---|---|
+| 100 ms | 21.27-21.90 | 188-191 | 157-160 | 7-8 | 32-38 | 127-130 | 1.23-1.26 | 21.68-23.92 |
+| 40 ms | 25.46-25.90 | 140 | 96-106 | 5-6 | 18-31 | 109-113 | 1.42-1.47 | 28.12-29.88 |
+| 20 ms | 23.86-26.62 | 134-139 | 72-80 | 8-12 | 28-58 | 106-107 | 1.50-1.51 | 27.87-32.77 |
+| 0 ms | 32.96-33.57 | 76-78 | 57-63 | 8 | 35-36 | 85-87 | 1.84-1.88 | 18.15-19.31 (a), 36.27-39.70 (b) |
+
+- One 40 ms flow arm (b) is left out: its drafter loaded on the processor (`reason="not_enough_vram"` — a guest
+  takes only memory that stands free, and the other process held it), drafting 123 ms a call, 12.7-12.9 tok/s.
+- **The kill test passes**: ms a token kept falling, 46.3 → 38.9 → 39.4 → 30.1, ~0.16 ms per ms of loop over
+  100 → 0 (the test asks ~0.18), with a flat stretch between 40 and 20 ms.
+- **But not by the law's mechanism.** The head's forward cost the same at every loop (~56 ms: drafting ~31 — this
+  card serves both halves — and its layers ~25; `waiting_ms` 0); misses stayed ~8 a reply, and a miss threw away
+  ~4.5 levels at 100 ms and at 0. Misses × `L` fell only from ~9 to ~4 ms a token while a token's time fell 16.
+  What rose is how many of each forward's ~24 rows the reply kept: 1.24 tokens a forward at 100 ms, 1.86 at 0. A
+  longer wait makes the tree spend its rows deeper, where fewer land on the reply, between misses too. So the slope
+  is not `m`: on this rig `m` is ~0.05 a token against a slope of 0.16; on the 14B pair 0.11-0.13 (§ 7) against
+  § 1's 0.18. § 1's "slope equals m" check matched by coincidence.
+- **For the ring**: a short loop is worth more than § 7's arithmetic, which priced only misses × `L`. Applied to
+  today's 14B pair (DERIVED, prose only — the rig asked no code): 119 ms of wire × 0.16 ≈ 19 ms off a 49-54 ms
+  prose token → ~29-33 tok/s at zero wire. The head stays busy at every loop, so beyond that the pacer is the
+  lever; step 5 (its A/B) is the first build, after the release.
+- The chain stream beat the flow on this rig at 100, 40 and 20 ms (as on 11-15: two processes on one card favour
+  the stream); at 0 ms its two arms disagreed (18-19 against 36-40 tok/s) and are not read.
 
 ## Appendix — every concept raised
 
