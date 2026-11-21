@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #490**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #491**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -712,7 +712,7 @@ stress test: safety kit, live node stopped); (2) split-pipeline segment forwards
 per-token forwards are unobserved; (3) the daemon does not advertise a tripped card to peers; (4) **the probe no longer sees it**: at 46-51 h
 (2026-11-20/21, #411) each model process stalled once 0.45-5.0 s early in its first reply, its main thread inside a
 synchronous call to Windows' graphics kernel (`dxgvmb_send_sync_msg`, nvidia-smi frozen alongside), while
-`cuda_pool::probe_once` read 7-8 ms — so the owner's "restart Windows" notice never fired. **Built 2026-11-21, on main,
+`cuda_pool::probe_once` read 7-8 ms — so the owner's "restart Windows" notice never fired. **Built 2026-11-21, released in v0.3.304,
 not in a release yet**: `pace::Step` judges each outermost short step (≤ 64 rows) of a model wholly on the card by the
 time its thread was BLOCKED (wall − thread processor time, so a kernel compile is never a stall) ≥ 500 ms, and the owner
 is told (`activity.card_stalled_restart_windows`, WSL2) once two model processes stalled within 6 h — no warm-up
@@ -4458,7 +4458,7 @@ the measurement that can kill it), `docs/plans/split_speculation.md` (guess-and-
 
 #### #490 — Every `nvidia-smi` the node starts under WSL2 leaks ~15 KB of Windows' kernel memory, ~9,500 a day
 
-`P2` · reliability/perf · **FIXED on main 2026-11-21 — the node starts no `nvidia-smi` (429 an hour → 0); OPEN: how much a
+`P2` · reliability/perf · **FIXED 2026-11-21, released in v0.3.304 — the node starts no `nvidia-smi` (429 an hour → 0); OPEN: how much a
 launch keeps (the burst test) and whether this removes #1151's stall** · history: #146 (4), #411's 11-21 note, gotcha #1151
 
 **Measured after the fix (2026-11-21, Windows up 5.5-6.3 h, the live node = the #490 build)**: `nvidia-smi` started
@@ -8291,7 +8291,7 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-11-21, on main** (#489)
+**Closed 2026-11-21, released in v0.3.304** (#489)
 - #489 — `P1` — **The card clock hold slowed a split whose drafter model shares the card, so it was off by default.**
   The card takes turns between processes (no MPS on a consumer card), so the hold's 2 ms pieces (#487) took this card
   from the 14B split's drafter model: code 32.1-33.6 tok/s held against 36.8-37.2, forwards ~38 ms against ~27

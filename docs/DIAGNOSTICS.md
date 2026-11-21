@@ -1881,6 +1881,15 @@ on the card it is 3-15 ms. To prove the wait is in Windows' graphics kernel, rea
 (state `D` for the stall's length; nvidia-smi records nothing meanwhile). A split speed measured past ~30 h of uptime
 carries it: state the uptime beside the figure (`real_link.sh` prints it).
 
+**Since v0.3.304 the node logs the stall itself** (#146 (4)): a worker's short step (≤ 64 rows, a model wholly on the
+card, the thread BLOCKED ≥ 500 ms — wall time minus its own processor time, so a kernel compile never counts; Linux
+only) logs `WARN … DIAG: card step stalled — one short step on the graphics card waited N s`; once two model
+processes have stalled within 6 h the daemon warns `The graphics card has started stalling …` and, under WSL2, shows
+the owner `activity.card_stalled_restart_windows` (12 h cadence shared with the probe's notice). Count them against
+uptime: `grep -a -c "card step stalled" ~/.local/share/swarmllm/node.log`. `SWARMLLM_CARD_STALL_MS=0` makes every
+judged step a stall, to watch it end to end on a healthy card (`~/swarmllm-gate/pool490/probe146.sh` runs that
+and a control at the default floor).
+
 ### Recommendation
 
 For production testing, use native Linux (dual boot or bare metal). WSL2 is suitable for single-node development and basic multi-node testing with the above mitigations, but production distributed inference should run on native networking.
