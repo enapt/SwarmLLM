@@ -1598,8 +1598,8 @@ pub(super) fn spawn_model_autoload(
             }
             // A model with no part here only has its geometry learned — all
             // `check_and_load_model` does for it before returning — without
-            // asking the card: the budget is an `nvidia-smi` run (30-60 ms on
-            // WSL), and the registry holds every model the network has named
+            // asking the card: the budget is a reading of the driver (an
+            // `nvidia-smi` run took 30-60 ms on WSL before #490), and the registry holds every model the network has named
             // (40 on the rig's node: 1.75 s of the pass), while the first
             // requests after a start wait for this pass (#460). A part landing
             // later is loaded by its own landing path with a fresh budget.

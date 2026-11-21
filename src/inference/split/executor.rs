@@ -45,6 +45,14 @@ fn window_overflow_is_a_finished_reply(seq_len: usize, index_pos: usize) -> bool
     seq_len == 1 && index_pos > 0
 }
 
+/// The rows a forward's input carries — batch × positions, for token ids
+/// `[b, seq]` and hidden states `[b, seq, d]` alike: what `pace::CardStep`
+/// weighs a step by (#146 (4)).
+fn rows_in(input: &Tensor) -> usize {
+    let dims = input.dims();
+    dims.first().copied().unwrap_or(1) * dims.get(1).copied().unwrap_or(1)
+}
+
 /// What only a decode step being recorded as a CUDA graph hands its forward
 /// (`decode_step_with_graph`); every other forward passes `None`.
 struct RecordedStep<'a> {
@@ -1100,7 +1108,10 @@ impl SplitModel {
         if let Ok(read) = input.dim(1) {
             WIDEST_FORWARD.with(|w| w.set(w.get().max(read)));
         }
-        let step = crate::inference::pace::Step::begin();
+        let step = crate::inference::pace::Step::begin(crate::inference::pace::CardStep::of(
+            rows_in(input),
+            self.runs_entirely_on_card(),
+        ));
         let out = self.forward_inner_unpaced(
             input,
             index_pos,
@@ -2725,7 +2736,11 @@ impl SplitModel {
     ) -> Result<Vec<Tensor>, SwarmError> {
         // One paced step for the whole batch (`inference::pace`, #440 step 4);
         // a batch of one goes through `forward`, which does not pause again.
-        let step = crate::inference::pace::Step::begin();
+        // Judged as a card step by every row it carries (#146 (4)).
+        let step = crate::inference::pace::Step::begin(crate::inference::pace::CardStep::of(
+            items.iter().map(|i| rows_in(i.input)).sum(),
+            self.runs_entirely_on_card(),
+        ));
         let out = self.forward_batch_unpaced(items, kv_cache_store);
         step.end(
             || {
@@ -3462,7 +3477,9 @@ impl SplitModel {
         abs_layer: usize,
         phase: &crate::types::TpPhase,
     ) -> Result<Tensor, SwarmError> {
-        let step = crate::inference::pace::Step::begin();
+        // A phase waits on the other computers of its group: its length says
+        // nothing about this card (#146 (4)).
+        let step = crate::inference::pace::Step::begin(crate::inference::pace::CardStep::NotJudged);
         let out = self.forward_tp_phase_unpaced(
             input,
             index_pos,

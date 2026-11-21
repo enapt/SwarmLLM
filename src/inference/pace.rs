@@ -187,6 +187,58 @@ impl Stopwatch {
     }
 }
 
+/// Whether a step's length says anything about the graphics card — what
+/// [`Step::begin`] is REQUIRED to be told, so every forward entry point states
+/// it (#146 (4)). Only a SHORT step (`cuda_pool::SHORT_STEP_ROWS` rows or
+/// fewer: a decode step, a check, a drafter's block) of a model held wholly on
+/// the card is judged (`cuda_pool::note_card_step`): a prompt pass, a step with
+/// processor work (`SplitModel::runs_entirely_on_card`, gotcha #191) or a phase
+/// waiting on other computers can take seconds for reasons not the card's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CardStep {
+    Judged,
+    NotJudged,
+}
+
+impl CardStep {
+    /// A step of `rows` rows on a model that does (`all_on_card`) or does not
+    /// run entirely on the card.
+    pub(crate) fn of(rows: usize, all_on_card: bool) -> Self {
+        if all_on_card && rows <= crate::inference::cuda_pool::SHORT_STEP_ROWS {
+            Self::Judged
+        } else {
+            Self::NotJudged
+        }
+    }
+}
+
+/// The processor time this thread has used, which a judged step takes from its
+/// own time to learn how long the thread was BLOCKED (#146 (4)). An all-card
+/// forward runs on its caller's thread (`cpu_pools::in_phase_pool` hands
+/// `cpu_layers == 0` straight back), so this is the step's own work. `None`
+/// off Linux — the one place the stall is known (WSL2) — and then the whole
+/// time counts.
+fn thread_processor_time() -> Option<Duration> {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: an all-zero `timespec` is a valid value (some targets pad
+        // it, so no struct literal).
+        let mut ts: libc::timespec = unsafe { std::mem::zeroed() };
+        // SAFETY: `ts` is a valid, writable `timespec`; the clock id is a constant.
+        if unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) } != 0 {
+            return None;
+        }
+        Some(Duration::new(
+            u64::try_from(ts.tv_sec).ok()?,
+            u32::try_from(ts.tv_nsec).ok()?,
+        ))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
 /// The pause a step of `busy` is owed at `permille`, before any carried debt.
 fn owed(busy: Duration, permille: u32) -> Duration {
     busy.saturating_mul(permille) / 1000
@@ -222,35 +274,55 @@ fn plan(debt_nanos: i64, owed: Duration, from: Duration) -> (Duration, i64) {
 
 /// One step a worker runs, paced at its end while the computer is hot. Open
 /// one at the top of every forward entry point; only the outermost on a
-/// thread pauses.
+/// thread pauses — and only the outermost is judged as a card step
+/// ([`CardStep`]).
 #[must_use = "a step is paced only when it is ended"]
 pub(crate) struct Step {
     started: Instant,
     outermost: bool,
     open: bool,
+    card: CardStep,
+    /// [`thread_processor_time`] at the start of an outermost judged step.
+    processor_at_start: Option<Duration>,
 }
 
 impl Step {
-    pub(crate) fn begin() -> Self {
+    pub(crate) fn begin(card: CardStep) -> Self {
         let outermost = DEPTH.with(|d| {
             let depth = d.get();
             d.set(depth + 1);
             depth == 0
         });
+        let processor_at_start = (outermost && card == CardStep::Judged)
+            .then(thread_processor_time)
+            .flatten();
         Self {
             started: Instant::now(),
             outermost,
             open: true,
+            card,
+            processor_at_start,
         }
     }
 
-    /// End the step. While the computer is hot, an outermost step first lets
-    /// the device finish (`synchronize`, so the time is the device's work),
-    /// then pauses for its share — stopping early once `cancelled` says so.
+    /// End the step. An outermost judged step is timed first — its own time,
+    /// before any synchronize or pause: the stall it looks for holds this
+    /// thread inside the driver (gotcha #1151). Then, while the computer is
+    /// hot, an outermost step lets the device finish (`synchronize`, so the
+    /// time is the device's work) and pauses for its share — stopping early
+    /// once `cancelled` says so.
     pub(crate) fn end(mut self, synchronize: impl FnOnce(), cancelled: impl Fn() -> bool) {
         self.close();
         if !self.outermost {
             return;
+        }
+        if self.card == CardStep::Judged {
+            let took = self.started.elapsed();
+            let blocked = self
+                .processor_at_start
+                .zip(thread_processor_time())
+                .map(|(start, now)| took.saturating_sub(now.saturating_sub(start)));
+            crate::inference::cuda_pool::note_card_step(took, blocked);
         }
         let permille = pause_permille();
         if permille == 0 {
@@ -331,7 +403,7 @@ mod tests {
         DEBT_NANOS.with(|d| d.set(0));
         let paused_before = paused_total();
         let t = Instant::now();
-        let step = Step::begin();
+        let step = Step::begin(CardStep::NotJudged);
         busy_for(Duration::from_millis(40));
         step.end(|| {}, || false);
         let took = t.elapsed();
@@ -354,7 +426,7 @@ mod tests {
         set_pause_permille(HOT_PAUSE_PERMILLE);
         DEBT_NANOS.with(|d| d.set(0));
         let watch = Stopwatch::start();
-        let step = Step::begin();
+        let step = Step::begin(CardStep::NotJudged);
         busy_for(Duration::from_millis(30));
         step.end(|| {}, || false);
         set_pause_permille(0);
@@ -373,7 +445,7 @@ mod tests {
         set_pause_permille(0);
         let paused_before = paused_total();
         let synchronized = Cell::new(false);
-        let step = Step::begin();
+        let step = Step::begin(CardStep::NotJudged);
         busy_for(Duration::from_millis(10));
         step.end(|| synchronized.set(true), || false);
         assert_eq!(paused_total(), paused_before);
@@ -385,9 +457,9 @@ mod tests {
         let _lock = pace_lock();
         set_pause_permille(HOT_PAUSE_PERMILLE);
         DEBT_NANOS.with(|d| d.set(0));
-        let outer = Step::begin();
+        let outer = Step::begin(CardStep::NotJudged);
         let paused_before = paused_total();
-        let inner = Step::begin();
+        let inner = Step::begin(CardStep::NotJudged);
         busy_for(Duration::from_millis(20));
         inner.end(|| {}, || false);
         assert_eq!(
@@ -410,9 +482,9 @@ mod tests {
         let _lock = pace_lock();
         set_pause_permille(HOT_PAUSE_PERMILLE);
         DEBT_NANOS.with(|d| d.set(0));
-        drop(Step::begin()); // a `?` out of a forward
+        drop(Step::begin(CardStep::NotJudged)); // a `?` out of a forward
         let paused_before = paused_total();
-        let step = Step::begin();
+        let step = Step::begin(CardStep::NotJudged);
         busy_for(Duration::from_millis(10));
         step.end(|| {}, || false);
         set_pause_permille(0);
@@ -425,7 +497,7 @@ mod tests {
         set_pause_permille(MOST_PERMILLE);
         DEBT_NANOS.with(|d| d.set(0));
         let t = Instant::now();
-        let step = Step::begin();
+        let step = Step::begin(CardStep::NotJudged);
         busy_for(Duration::from_millis(100));
         step.end(|| {}, || t.elapsed() > Duration::from_millis(150));
         set_pause_permille(0);
@@ -481,12 +553,12 @@ mod tests {
         LAST_END.with(|e| e.set(None));
         let paused_before = paused_total();
         for _ in 0..2 {
-            let step = Step::begin();
+            let step = Step::begin(CardStep::NotJudged);
             busy_for(Duration::from_millis(40));
             step.end(|| {}, || false);
         }
         let after_two = paused_total().saturating_sub(paused_before);
-        let step = Step::begin();
+        let step = Step::begin(CardStep::NotJudged);
         busy_for(Duration::from_millis(40));
         step.end(|| {}, || false);
         let after_three = paused_total().saturating_sub(paused_before);
@@ -541,5 +613,54 @@ mod tests {
         assert!(!work_ahead_may_run());
         set_pause_permille(0);
         assert!(work_ahead_may_run());
+    }
+
+    #[test]
+    fn only_a_short_step_of_a_model_wholly_on_the_card_is_judged() {
+        use crate::inference::cuda_pool::SHORT_STEP_ROWS;
+        assert_eq!(CardStep::of(1, true), CardStep::Judged);
+        assert_eq!(CardStep::of(SHORT_STEP_ROWS, true), CardStep::Judged);
+        assert_eq!(CardStep::of(SHORT_STEP_ROWS + 1, true), CardStep::NotJudged);
+        assert_eq!(CardStep::of(1, false), CardStep::NotJudged);
+    }
+
+    /// #146 (4): only an OUTERMOST judged step counts, and only the time its
+    /// thread spent BLOCKED — asleep in the driver, as the stall is (gotcha
+    /// #1151) — never time it spent working, as a first launch that compiles a
+    /// kernel for the card does.
+    #[test]
+    fn a_card_step_is_a_stall_only_for_the_time_its_thread_was_blocked() {
+        use crate::inference::cuda_pool::{take_stall_report, CARD_STEP_STALL};
+        let _lock = pace_lock();
+        set_pause_permille(0);
+        let _ = take_stall_report();
+        let long = CARD_STEP_STALL + Duration::from_millis(50);
+        // Not judged (a prompt pass, processor work): never a stall.
+        let step = Step::begin(CardStep::NotJudged);
+        std::thread::sleep(long);
+        step.end(|| {}, || false);
+        assert_eq!(take_stall_report(), None);
+        // Judged, inside a step that is not: only the outermost is judged.
+        let outer = Step::begin(CardStep::NotJudged);
+        let inner = Step::begin(CardStep::Judged);
+        std::thread::sleep(long);
+        inner.end(|| {}, || false);
+        outer.end(|| {}, || false);
+        assert_eq!(take_stall_report(), None);
+        // Judged and blocked: a stall, handed out once.
+        let step = Step::begin(CardStep::Judged);
+        std::thread::sleep(long);
+        step.end(|| {}, || false);
+        let told = take_stall_report().expect("a blocked judged step is a stall");
+        assert!(told >= CARD_STEP_STALL, "{told:?}");
+        assert_eq!(take_stall_report(), None, "handed out once");
+        // Judged and BUSY as long: never blocked, so no stall — where the
+        // platform can say how long the thread worked.
+        if thread_processor_time().is_some() {
+            let step = Step::begin(CardStep::Judged);
+            busy_for(long);
+            step.end(|| {}, || false);
+            assert_eq!(take_stall_report(), None);
+        }
     }
 }

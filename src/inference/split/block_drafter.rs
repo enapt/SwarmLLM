@@ -70,6 +70,13 @@ pub(crate) const BLOCK_PROMPT_ROWS: usize = 2_048;
 /// drafter is attached ([`SplitModel::attach_block_drafter`]).
 pub(crate) const BLOCK_MOST_POSITIONS: usize = 8_192;
 
+/// The rows one draft reads: the context rows it takes in (`[1, n, hidden]`)
+/// and its block, the anchor and `guesses` masks — what `pace::CardStep`
+/// weighs it by (#146 (4)); a first draft after a long prompt reads many.
+fn rows_read(context: Option<&Tensor>, guesses: usize) -> usize {
+    context.map_or(0, |c| c.dim(1).unwrap_or(0)) + guesses + 1
+}
+
 /// Context rows taken in per forward when the drafter catches up.
 pub(crate) const BLOCK_CATCH_UP_CHUNK: usize = 512;
 
@@ -737,7 +744,7 @@ impl BlockDrafter {
         for_the_owner: bool,
         over: super::GuessOver<'_>,
     ) -> Result<Vec<u32>, SwarmError> {
-        self.paced(|| {
+        self.paced(rows_read(context, guesses), || {
             self.draft_unpaced(
                 target,
                 cache,
@@ -773,7 +780,7 @@ impl BlockDrafter {
         over: super::GuessOver<'_>,
         k: usize,
     ) -> Result<Vec<Vec<(u32, f32)>>, SwarmError> {
-        self.paced(|| {
+        self.paced(rows_read(context, guesses), || {
             let guesses = guesses.min(self.block_size - 1);
             if guesses == 0 || k == 0 {
                 return Ok(Vec::new());
@@ -803,9 +810,14 @@ impl BlockDrafter {
         })
     }
 
-    /// `work` as one paced step (`inference::pace`, #440 step 4).
-    fn paced<T>(&self, work: impl FnOnce() -> T) -> T {
-        let step = crate::inference::pace::Step::begin();
+    /// `work` as one paced step (`inference::pace`, #440 step 4), judged as a
+    /// card step by the `rows` it reads (#146 (4)): the context it takes in
+    /// and the block. Every weight of the drafter is on its own device.
+    fn paced<T>(&self, rows: usize, work: impl FnOnce() -> T) -> T {
+        let step = crate::inference::pace::Step::begin(crate::inference::pace::CardStep::of(
+            rows,
+            self.device.is_cuda(),
+        ));
         let out = work();
         step.end(
             || {

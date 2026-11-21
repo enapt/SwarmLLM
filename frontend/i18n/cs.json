@@ -16,6 +16,7 @@
   "actions.saving": "Ukládání...",
   "actions.unlock": "Odemknout",
   "activity.card_slow_restart_windows": "Grafická karta začala pomalu přidělovat paměť ({detail} s, obvykle několik tisícin sekundy). Zhoršuje se to, čím déle Windows běží bez restartu. Restartujte Windows, abyste obnovili plnou rychlost a stabilitu.",
+  "activity.card_stalled_restart_windows": "Grafická karta se při práci začala zastavovat až na {detail} s (obvykle odpoví za několik setin sekundy). Zhoršuje se to, čím déle Windows běží bez restartu. Restartujte Windows, abyste obnovili plnou rychlost a stabilitu.",
   "activity.card_unresponsive_paused": "Vaše grafická karta přestala reagovat, proto je práce pro ostatní počítače pozastavená, dokud znovu nezačne reagovat.",
   "activity.clock_fast": "Hodiny vašeho počítače se předbíhají o {detail} s. Když se odchýlí o víc než půl minuty, ostatní počítače mohou část toho, co jim váš počítač sděluje, přehlížet. Zapněte automatické nastavení času v nastavení data a času počítače.",
   "activity.clock_slow": "Hodiny vašeho počítače se zpožďují o {detail} s. Když se odchýlí o víc než půl minuty, váš počítač může část toho, co mu sdělují ostatní počítače, přehlížet. Zapněte automatické nastavení času v nastavení data a času počítače.",

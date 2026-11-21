@@ -204,6 +204,11 @@ pub(crate) const DAEMON_READS_PROMPT_ROOM: &str = "SWARMLLM_DAEMON_READS_PROMPT_
 /// [`DAEMON_READS_LOAD_TIMING`].
 pub(crate) const DAEMON_READS_CARD_BESIDE: &str = "SWARMLLM_DAEMON_READS_CARD_BESIDE";
 
+/// Set by the daemon in every worker's environment: this daemon decodes
+/// `WorkerMsg::CardStepStalled` (#146 (4)). Gated like
+/// [`DAEMON_READS_LOAD_TIMING`].
+pub(crate) const DAEMON_READS_CARD_STALL: &str = "SWARMLLM_DAEMON_READS_CARD_STALL";
+
 /// Whether the daemon that spawned this worker reads
 /// `WorkerMsg::PromptRoomWanted`. Read once, where a refusal is sent.
 pub(crate) fn daemon_reads_prompt_room() -> bool {
@@ -304,6 +309,15 @@ pub enum WorkerMsg {
     /// worker-to-daemon message the same way while any can: the IPC twin of
     /// gating a new wire message on a peer's `features`.
     CardAllocationProbe { took_ms: u32 },
+    /// The longest a short step on the card stayed blocked since the last
+    /// report (`cuda_pool::take_stall_report`, #146 (4)), and this worker's
+    /// process id — the daemon tells the owner once two processes stalled
+    /// (`cuda_pool::SlowCardNotice::record_stall`). Side-band, sent at the
+    /// drain point after a message batch.
+    ///
+    /// ⚠ Sent only when the daemon said it reads it
+    /// ([`DAEMON_READS_CARD_STALL`]) — see `CardAllocationProbe`.
+    CardStepStalled { blocked_ms: u32, pid: u32 },
     /// How long one model load took this worker and how much of the model it
     /// read (`bytes`: the model's size × the share of its layers loaded — the
     /// basis the planner prices a load on). Timed inside the load itself, so a
@@ -1209,6 +1223,7 @@ enum WorkerMsgTag {
     Token,
     GenerateDone,
     CardAllocationProbe,
+    CardStepStalled,
     ModelLoadTimed,
     ContextFits,
     CardFree,
@@ -1526,6 +1541,7 @@ mod tests {
                 WorkerMsg::Token { .. } => WorkerMsgTag::Token,
                 WorkerMsg::GenerateDone { .. } => WorkerMsgTag::GenerateDone,
                 WorkerMsg::CardAllocationProbe { .. } => WorkerMsgTag::CardAllocationProbe,
+                WorkerMsg::CardStepStalled { .. } => WorkerMsgTag::CardStepStalled,
                 WorkerMsg::ModelLoadTimed { .. } => WorkerMsgTag::ModelLoadTimed,
                 WorkerMsg::ContextFits { .. } => WorkerMsgTag::ContextFits,
                 WorkerMsg::CardFree { .. } => WorkerMsgTag::CardFree,
@@ -1543,6 +1559,10 @@ mod tests {
             WorkerMsg::Ready,
             WorkerMsg::Bye,
             WorkerMsg::CardAllocationProbe { took_ms: 1 },
+            WorkerMsg::CardStepStalled {
+                blocked_ms: 4_995,
+                pid: 4242,
+            },
             WorkerMsg::ModelLoadTimed {
                 bytes: 1 << 30,
                 ms: 2_500,

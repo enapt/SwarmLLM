@@ -1707,6 +1707,7 @@ fn worker_msg_request_id(msg: &WorkerMsg) -> Option<Uuid> {
         | WorkerMsg::PrefixFetchProbe { .. }
         | WorkerMsg::Progress { .. }
         | WorkerMsg::CardAllocationProbe { .. }
+        | WorkerMsg::CardStepStalled { .. }
         | WorkerMsg::ModelLoadTimed { .. }
         | WorkerMsg::ContextFits { .. }
         | WorkerMsg::CardBeside { .. }
@@ -1954,6 +1955,16 @@ async fn reader_actor(
                 // for the health monitor to tell the owner.
                 if let WorkerMsg::CardAllocationProbe { took_ms } = msg {
                     slow_card.record(std::time::Duration::from_millis(u64::from(took_ms)));
+                    continue;
+                }
+                // A short card step of this worker stayed blocked (#146 (4)):
+                // its log line carries it; the daemon counts the processes.
+                if let WorkerMsg::CardStepStalled { blocked_ms, pid } = msg {
+                    slow_card.record_stall(
+                        pid,
+                        std::time::Duration::from_millis(u64::from(blocked_ms)),
+                        std::time::Instant::now(),
+                    );
                     continue;
                 }
                 // One model load, timed inside the worker (#129) — and the
@@ -12973,6 +12984,8 @@ impl ModelProcessPool {
         command.env(crate::inference::worker_ipc::DAEMON_READS_PROMPT_ROOM, "1");
         // ...and what its guessers keep on the card (#481 (5)).
         command.env(crate::inference::worker_ipc::DAEMON_READS_CARD_BESIDE, "1");
+        // ...and its card steps that stalled (#146 (4)).
+        command.env(crate::inference::worker_ipc::DAEMON_READS_CARD_STALL, "1");
         // The pace it starts at (#440 step 4): a worker spawned while the
         // computer is hot is paced from its first step.
         let pace_at_spawn = self.pace_permille.load(Ordering::Acquire);

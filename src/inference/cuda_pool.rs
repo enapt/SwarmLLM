@@ -371,6 +371,82 @@ pub(crate) fn card_is_reached_through_wsl() -> bool {
 /// lasts until Windows restarts, and a notice per worker start would nag.
 pub(crate) const SLOW_CARD_NOTICE_EVERY: Duration = Duration::from_secs(12 * 3600);
 
+/// A short step of a model held wholly on the card whose thread stayed BLOCKED
+/// at least this long is a stall (#146 (4)). The allocation probe misses it:
+/// at 46-51 h of Windows uptime each model process stalled 0.45-5.0 s once,
+/// early in its first reply, its main thread asleep inside Windows' graphics
+/// kernel (`dxgvmb_send_sync_msg`) while the probe read 7-8 ms. The worst single
+/// forward of a reply — its first included — was 63-178 ms at 2-14 h and 118 ms
+/// on a fresh boot (gotcha #1151): far enough apart either way for a fixed floor
+/// and no warm-up rule.
+pub(crate) const CARD_STEP_STALL: Duration = Duration::from_millis(500);
+
+/// The most rows a step may carry and still be judged (`pace::CardStep`): a
+/// decode step, a speculative check, a drafter's block. A prompt pass's own
+/// work can take seconds on any card.
+pub(crate) const SHORT_STEP_ROWS: usize = 64;
+
+/// [`CARD_STEP_STALL`], unless `SWARMLLM_CARD_STALL_MS` says otherwise — for a
+/// check that must watch the notice fire end to end on a healthy card (`0`
+/// makes every judged step a stall, and logs each one).
+fn stall_threshold() -> Duration {
+    static T: OnceLock<Duration> = OnceLock::new();
+    *T.get_or_init(|| {
+        std::env::var("SWARMLLM_CARD_STALL_MS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map_or(CARD_STEP_STALL, Duration::from_millis)
+    })
+}
+
+/// This worker's longest stall not yet handed to the daemon, in ms; 0 = none.
+static STALL_MS: AtomicU32 = AtomicU32::new(0);
+
+/// A judged card step ended (`pace::Step::end`, the one caller): `took` is its
+/// time, `blocked` the part of it its thread spent OFF the processor — `None`
+/// where the platform cannot say, and then all of it. Only blocked time counts:
+/// the stall holds the thread asleep in the driver, while a first launch that
+/// compiles a kernel the release has no machine code for keeps it working, and
+/// an update would otherwise tell the owner to restart Windows. Every stall is
+/// logged; the longest waits for [`take_stall_report`].
+pub(crate) fn note_card_step(took: Duration, blocked: Option<Duration>) {
+    let blocked = blocked.unwrap_or(took);
+    if blocked < stall_threshold() {
+        return;
+    }
+    tracing::warn!(
+        took_ms = took.as_millis() as u64,
+        blocked_ms = blocked.as_millis() as u64,
+        "DIAG: card step stalled — one short step on the graphics card waited {:.2} s \
+         where it takes hundredths (on WSL2 this grows with Windows uptime; restarting \
+         Windows clears it — microsoft/WSL#41701, FUTURE_WORK #146)",
+        blocked.as_secs_f64()
+    );
+    let ms = u32::try_from(blocked.as_millis())
+        .unwrap_or(u32::MAX)
+        .max(1);
+    STALL_MS.fetch_max(ms, Ordering::Relaxed);
+}
+
+/// The longest stall since the last report, handed out once — the worker sends
+/// it to the daemon (`WorkerMsg::CardStepStalled`) at its side-band drain point.
+pub(crate) fn take_stall_report() -> Option<Duration> {
+    let ms = STALL_MS.swap(0, Ordering::Relaxed);
+    (ms > 0).then(|| Duration::from_millis(u64::from(ms)))
+}
+
+/// How many model processes must have stalled within [`STALLS_COUNTED_FOR`]
+/// before the owner hears of it. At high uptime EVERY model process here
+/// stalled once, early in its first reply (gotcha #1151) — a split and its
+/// guesser, two at once — so two is the shape and one is a single sample: no
+/// latency alert pages on one (microsoft/WSL#41701's reporters, the prior art
+/// in FUTURE_WORK #146).
+pub(crate) const STALLED_PROCESSES_TO_TELL: usize = 2;
+
+/// How long a process's stall counts toward [`STALLED_PROCESSES_TO_TELL`]: two
+/// unrelated hiccups days apart are not the slowdown.
+pub(crate) const STALLS_COUNTED_FOR: Duration = Duration::from_secs(6 * 3600);
+
 /// This worker's probe: `None` inside while it has not run, or could not.
 static PROBE: OnceLock<Option<Duration>> = OnceLock::new();
 static PROBE_REPORTED: AtomicBool = AtomicBool::new(false);
@@ -450,14 +526,26 @@ pub(crate) fn take_probe_report() -> Option<Duration> {
     (!PROBE_REPORTED.swap(true, Ordering::Relaxed)).then_some(took)
 }
 
-/// The daemon's side: the slowest probe its workers reported since the owner
-/// was last told, and when that was. Held by `ModelProcessPool`, written by
-/// each worker's reader, read by the health monitor's tick.
+/// The daemon's side: the slowest probe its workers reported, and the stalls of
+/// each model process, since the owner was last told — and when that was. Held
+/// by `ModelProcessPool`, written by each worker's reader, read by the health
+/// monitor's tick.
 #[derive(Debug, Default)]
 pub(crate) struct SlowCardNotice {
     /// Milliseconds; 0 = nothing slow waiting to be told.
     pending_ms: AtomicU32,
+    /// Each model process's longest stall: (process id, when, how long).
+    stalls: Mutex<Vec<(u32, Instant, Duration)>>,
     last_told: Mutex<Option<Instant>>,
+}
+
+/// What the owner is told — the advice is the same, the cause it names is not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SlowCard {
+    /// The slowest allocation probe at or over [`SLOW_FRESH_ALLOCATIONS`].
+    FreshMemory(Duration),
+    /// The longest stall, once [`STALLED_PROCESSES_TO_TELL`] processes stalled.
+    Stalled(Duration),
 }
 
 impl SlowCardNotice {
@@ -469,20 +557,51 @@ impl SlowCardNotice {
         }
     }
 
-    /// The slowest probe to tell the owner about now, if any: at most once per
-    /// [`SLOW_CARD_NOTICE_EVERY`]. A slow probe inside that window is dropped
-    /// rather than kept — the owner has just been told the same thing.
-    pub(crate) fn take(&self, now: Instant) -> Option<Duration> {
-        let ms = self.pending_ms.swap(0, Ordering::Relaxed);
-        if ms == 0 {
-            return None;
-        }
+    /// A worker's stall arrived (`WorkerMsg::CardStepStalled`): `pid` is the
+    /// model process, `blocked` its longest stall since its last report.
+    pub(crate) fn record_stall(&self, pid: u32, blocked: Duration, now: Instant) {
+        let mut stalls = self.stalls.lock().unwrap_or_else(|e| e.into_inner());
+        let before = stalls
+            .iter()
+            .filter(|(p, ..)| *p == pid)
+            .map(|(.., d)| *d)
+            .max()
+            .unwrap_or_default();
+        stalls.retain(|(p, at, _)| {
+            *p != pid && now.saturating_duration_since(*at) < STALLS_COUNTED_FOR
+        });
+        stalls.push((pid, now, blocked.max(before)));
+    }
+
+    /// What to tell the owner now, if anything: at most once per
+    /// [`SLOW_CARD_NOTICE_EVERY`]. Stalls of [`STALLED_PROCESSES_TO_TELL`]
+    /// processes within [`STALLS_COUNTED_FOR`] come first — the probe misses
+    /// them. Whatever is due inside the window is dropped rather than kept: the
+    /// owner has just been told the same thing.
+    pub(crate) fn take(&self, now: Instant) -> Option<SlowCard> {
+        let probe_ms = self.pending_ms.swap(0, Ordering::Relaxed);
+        let stalled = {
+            let mut stalls = self.stalls.lock().unwrap_or_else(|e| e.into_inner());
+            stalls.retain(|(_, at, _)| now.saturating_duration_since(*at) < STALLS_COUNTED_FOR);
+            (stalls.len() >= STALLED_PROCESSES_TO_TELL).then(|| {
+                let longest = stalls.iter().map(|(.., d)| *d).max().unwrap_or_default();
+                stalls.clear();
+                longest
+            })
+        };
+        let due = match stalled {
+            Some(longest) => SlowCard::Stalled(longest),
+            None if probe_ms > 0 => {
+                SlowCard::FreshMemory(Duration::from_millis(u64::from(probe_ms)))
+            }
+            None => return None,
+        };
         let mut last = self.last_told.lock().unwrap_or_else(|e| e.into_inner());
-        if last.is_some_and(|t| now.duration_since(t) < SLOW_CARD_NOTICE_EVERY) {
+        if last.is_some_and(|t| now.saturating_duration_since(t) < SLOW_CARD_NOTICE_EVERY) {
             return None;
         }
         *last = Some(now);
-        Some(Duration::from_millis(u64::from(ms)))
+        Some(due)
     }
 }
 
@@ -789,7 +908,10 @@ mod tests {
         notice.record(Duration::from_millis(900));
         notice.record(Duration::from_millis(2_400));
         notice.record(Duration::from_millis(700));
-        assert_eq!(notice.take(t0), Some(Duration::from_millis(2_400)));
+        assert_eq!(
+            notice.take(t0),
+            Some(SlowCard::FreshMemory(Duration::from_millis(2_400)))
+        );
         // Told: nothing more until a new slow probe arrives...
         assert_eq!(notice.take(t0 + Duration::from_secs(1)), None);
         // ...and one inside the window is dropped, not saved for later.
@@ -800,8 +922,59 @@ mod tests {
         notice.record(Duration::from_secs(4));
         assert_eq!(
             notice.take(t0 + SLOW_CARD_NOTICE_EVERY),
-            Some(Duration::from_secs(4))
+            Some(SlowCard::FreshMemory(Duration::from_secs(4)))
         );
+    }
+
+    /// #146 (4): one process's stall is a single sample; a second process's
+    /// within the window is the slowdown's shape (gotcha #1151: a split and its
+    /// guesser each stalled once), and what is told is the longest.
+    #[test]
+    fn stalls_are_told_once_two_processes_have_stalled() {
+        let notice = SlowCardNotice::default();
+        let t0 = Instant::now();
+        notice.record_stall(101, Duration::from_millis(900), t0);
+        notice.record_stall(101, Duration::from_millis(4_800), t0);
+        assert_eq!(notice.take(t0), None, "one process, however often");
+        notice.record_stall(
+            202,
+            Duration::from_millis(1_200),
+            t0 + Duration::from_secs(30),
+        );
+        assert_eq!(
+            notice.take(t0 + Duration::from_secs(31)),
+            Some(SlowCard::Stalled(Duration::from_millis(4_800)))
+        );
+        // Told: the next pair inside the window is dropped, not saved.
+        notice.record_stall(303, Duration::from_secs(1), t0 + Duration::from_secs(60));
+        notice.record_stall(404, Duration::from_secs(1), t0 + Duration::from_secs(61));
+        assert_eq!(notice.take(t0 + Duration::from_secs(62)), None);
+        assert_eq!(notice.take(t0 + SLOW_CARD_NOTICE_EVERY), None);
+    }
+
+    #[test]
+    fn stalls_hours_apart_are_not_the_slowdown() {
+        let notice = SlowCardNotice::default();
+        let t0 = Instant::now();
+        notice.record_stall(101, Duration::from_secs(2), t0);
+        let later = t0 + STALLS_COUNTED_FOR + Duration::from_secs(1);
+        notice.record_stall(202, Duration::from_secs(2), later);
+        assert_eq!(notice.take(later), None);
+        // A stall, then a slow probe: the probe is told — the stall was one.
+        notice.record(SLOW_FRESH_ALLOCATIONS);
+        assert_eq!(
+            notice.take(later),
+            Some(SlowCard::FreshMemory(SLOW_FRESH_ALLOCATIONS))
+        );
+    }
+
+    #[test]
+    fn the_stall_floor_sits_between_a_healthy_card_and_a_stalled_one() {
+        // gotcha #1151: worst healthy forward 178 ms (2-14 h of uptime, first
+        // reply included); stalls 450 ms to 5 s at 46-51 h.
+        assert!(CARD_STEP_STALL > Duration::from_millis(178));
+        assert!(CARD_STEP_STALL <= Duration::from_millis(500));
+        assert_eq!(STALLED_PROCESSES_TO_TELL, 2);
     }
 
     #[test]

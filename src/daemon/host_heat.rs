@@ -152,7 +152,7 @@ impl CardHeat {
 pub struct HeatReading {
     pub card: Option<CardHeat>,
     pub processor_c: Option<f32>,
-    /// An `nvidia-smi` has waited on the driver for a minute or more
+    /// A card reading has waited on the driver for a minute or more
     /// (`vram::graphics_driver_not_answering`).
     pub driver_not_answering: bool,
 }
@@ -244,7 +244,7 @@ impl HeatTracker {
         // met (`thresholdsFirstObservedAt`, pkg/kubelet/eviction/helpers.go),
         // and the gate kit's sustained stops do the same. The cool line only
         // ENDS a hold. An unknown reading neither starts nor resets the clock
-        // (a blocked `nvidia-smi` is the driver watch's to judge, not a sign of
+        // (a blocked card reading is the driver watch's to judge, not a sign of
         // cooling) — but a hold needs a reading at the line NOW, and a sensor
         // silent for `READING_GONE_AFTER` is forgotten: one hot reading
         // followed by a sensor that stopped answering (a driver updated under
@@ -488,8 +488,8 @@ impl SharedState {
         running.len()
     }
 
-    /// Read the computer's heat (off the calling task: `nvidia-smi` and the
-    /// sensors run on the blocking pool), update the hold, and tell the owner
+    /// Read the computer's heat (off the calling task: the card's NVML reading
+    /// and the sensors run on the blocking pool), update the hold, and tell the owner
     /// when it changes. From the health monitor's tick; one at a time.
     pub async fn refresh_host_heat(self: &std::sync::Arc<Self>) {
         let watch = &self.metrics.host_heat;
@@ -968,7 +968,7 @@ mod tests {
     }
 
     /// Unknown is never hot, and an unknown reading in the middle of a hot
-    /// spell neither starts nor ends anything (a blocked `nvidia-smi`).
+    /// spell neither starts nor ends anything (a blocked card reading).
     #[test]
     fn an_unknown_reading_is_never_hot_and_never_cools_a_hot_card() {
         let t0 = Instant::now();
@@ -988,7 +988,7 @@ mod tests {
     }
 
     /// One hot reading, then a sensor that stopped answering (a driver
-    /// updated under a running system answers every `nvidia-smi` with an
+    /// updated under a running system answers every card reading with an
     /// error at once, never a stuck call): nothing is known to be hot, so
     /// nothing is held back and nothing running is stopped. It held for good,
     /// and stopped the work for others at 240 s (the pre-release review,

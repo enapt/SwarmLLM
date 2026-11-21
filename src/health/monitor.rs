@@ -2919,8 +2919,15 @@ impl HealthMonitor {
     /// (#146's deep dive, microsoft/WSL#41701); this PC crashed twice at 52-54 h
     /// of uptime with it (#754, #762). The log line is written everywhere; the
     /// dashboard notice only where its advice — restart Windows — applies.
+    ///
+    /// Or that its short steps STALLED (#146 (4)): at 46-51 h of uptime every
+    /// model process here stalled 0.45-5 s once, inside Windows' graphics kernel,
+    /// while the probe read 7-8 ms (gotcha #1151) — told once two processes did
+    /// (`cuda_pool::STALLED_PROCESSES_TO_TELL`), under its own activity kind,
+    /// since "slow to set aside memory" would be untrue of it.
     fn maybe_warn_slow_card(&self) {
-        let Some(took) = self
+        use crate::inference::cuda_pool::SlowCard;
+        let Some(slow) = self
             .shared_state
             .model_process_pool
             .slow_card_notice()
@@ -2929,16 +2936,49 @@ impl HealthMonitor {
             return;
         };
         let wsl = crate::config::network::is_wsl2();
-        tracing::warn!(
-            took_ms = took.as_millis() as u64,
-            wsl,
-            "The graphics card has become slow to hand out memory — a fresh allocation \
-             probe took {:.1} s where a healthy card takes a few milliseconds. Under WSL2 \
-             this builds up the longer Windows runs, and restarting Windows restores it \
-             (microsoft/WSL#41701); the node keeps working, but more slowly, and this PC \
-             has crashed under load in this state",
-            took.as_secs_f64()
-        );
+        let (took, kind, toast) = match slow {
+            SlowCard::FreshMemory(took) => {
+                tracing::warn!(
+                    took_ms = took.as_millis() as u64,
+                    wsl,
+                    "The graphics card has become slow to hand out memory — a fresh allocation \
+                     probe took {:.1} s where a healthy card takes a few milliseconds. Under WSL2 \
+                     this builds up the longer Windows runs, and restarting Windows restores it \
+                     (microsoft/WSL#41701); the node keeps working, but more slowly, and this PC \
+                     has crashed under load in this state",
+                    took.as_secs_f64()
+                );
+                (
+                    took,
+                    "card_slow_restart_windows",
+                    "Your graphics card has become slow to set aside memory ({secs} s, \
+                     normally a few thousandths of a second). This builds up the longer \
+                     Windows runs without a restart. Restart Windows to bring back full \
+                     speed and stability.",
+                )
+            }
+            SlowCard::Stalled(took) => {
+                tracing::warn!(
+                    stalled_ms = took.as_millis() as u64,
+                    processes = crate::inference::cuda_pool::STALLED_PROCESSES_TO_TELL,
+                    wsl,
+                    "The graphics card has started stalling — short steps of {} model processes \
+                     each waited up to {:.1} s where a healthy card takes hundredths. Under WSL2 \
+                     this builds up the longer Windows runs, and restarting Windows restores it \
+                     (microsoft/WSL#41701); the node keeps working, but more slowly",
+                    crate::inference::cuda_pool::STALLED_PROCESSES_TO_TELL,
+                    took.as_secs_f64()
+                );
+                (
+                    took,
+                    "card_stalled_restart_windows",
+                    "Your graphics card has started pausing for up to {secs} s while it \
+                     works (normally it answers in a few hundredths of a second). This builds \
+                     up the longer Windows runs without a restart. Restart Windows to bring \
+                     back full speed and stability.",
+                )
+            }
+        };
         if !wsl {
             return;
         }
@@ -2946,13 +2986,8 @@ impl HealthMonitor {
         self.shared_state.emit_activity(
             crate::daemon::state::ActivityEvent::new(
                 "system",
-                "card_slow_restart_windows",
-                format!(
-                    "Your graphics card has become slow to set aside memory ({secs} s, \
-                     normally a few thousandths of a second). This builds up the longer \
-                     Windows runs without a restart. Restart Windows to bring back full \
-                     speed and stability."
-                ),
+                kind,
+                toast.replace("{secs}", &secs),
             )
             .with_detail_str(secs)
             .with_toast("warning", 20000),

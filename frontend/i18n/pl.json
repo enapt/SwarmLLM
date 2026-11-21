@@ -16,6 +16,7 @@
   "actions.saving": "Zapisywanie...",
   "actions.unlock": "Odblokuj",
   "activity.card_slow_restart_windows": "Karta graficzna zaczęła wolno przydzielać pamięć ({detail} s, zwykle kilka tysięcznych sekundy). Narasta to, im dłużej Windows działa bez ponownego uruchomienia. Uruchom Windows ponownie, aby przywrócić pełną szybkość i stabilność.",
+  "activity.card_stalled_restart_windows": "Karta graficzna zaczęła zatrzymywać się w trakcie pracy nawet na {detail} s (zwykle odpowiada w kilka setnych sekundy). Narasta to, im dłużej Windows działa bez ponownego uruchomienia. Uruchom Windows ponownie, aby przywrócić pełną szybkość i stabilność.",
   "activity.card_unresponsive_paused": "Twoja karta graficzna przestała odpowiadać, więc praca dla innych komputerów jest wstrzymana, dopóki znów nie zacznie odpowiadać.",
   "activity.clock_fast": "Zegar Twojego komputera spieszy się o {detail} s. Gdy różnica przekracza pół minuty, inne komputery mogą ignorować część tego, co przekazuje im Twój. Włącz automatyczne ustawianie czasu w ustawieniach daty i godziny komputera.",
   "activity.clock_slow": "Zegar Twojego komputera spóźnia się o {detail} s. Gdy różnica przekracza pół minuty, Twój komputer może ignorować część tego, co przekazują mu inne komputery. Włącz automatyczne ustawianie czasu w ustawieniach daty i godziny komputera.",

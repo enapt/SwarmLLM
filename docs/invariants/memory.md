@@ -5192,6 +5192,48 @@ worker, at `load_device`** — never through the pool, never per request. Every 
 to restart Windows, under WSL2 only, at most every 12 h (#762, WSL#41701). It changes nothing the
 node does; the threshold is a guess until the DIAG lines cover a few days of uptime.
 
+## … and when its short steps stall (2026-11-21, #146 (4))
+
+**Why.** The probe misses the slowdown's second shape. At 46-51 h of Windows uptime every model
+process here stalled 0.45-5.0 s ONCE, early in its first reply — a 14B split's half and its guesser,
+each — with the worker's main thread in `dxgvmb_send_sync_msg`, state D, for the whole stall, while
+the probe read 7-8 ms (gotcha #1151; sampler `~/swarmllm-gate/deep/fr/threads_stall303.txt`). The
+worst single forward of a reply, its first included, followed uptime, not the version: 63-178 ms at
+2-14 h, ≤ 965 ms at 30-34 h, 1,819-4,995 ms at 46-51 h (.302 and .303); on a fresh boot 118 ms, the
+longest driver wait 45 ms. A 14B split's prose fell from 18-20 to 8.4-14.5 tok/s and the first read
+blamed the far computer.
+
+**Prior art (2026-11-21).** Ollama, llama.cpp, vLLM, SGLang, TGI and PyTorch watch for a card that
+HANGS (a watchdog, a timeout, a NCCL abort), none for one that is SLOW and still answers; NVIDIA's
+DCGM reads clocks and throttle reasons, not a step's length. microsoft/WSL#41701's reporters find it
+by hand, by timing a known kernel across days. So a fixed floor where the healthy and stalled
+distributions do not touch, never a learned baseline that a slow week would teach as normal.
+
+**The rule.** `pace::Step` — already the one place every forward entry point opens (#440) — is told
+whether the step's length says anything about the card (`pace::CardStep`, REQUIRED by `begin`):
+`forward_inner_impl` and `forward_batch` by their rows and `SplitModel::runs_entirely_on_card`, the
+block drafter by the rows it reads (context taken in + block) on its own device, the guess head by
+its rows where it is not in system memory, a tensor-parallel phase never (it waits on other
+computers). Only the OUTERMOST step is judged — a batch of one through `forward` is one step — and
+only by the time its thread was BLOCKED: wall time less the thread's processor time
+(`CLOCK_THREAD_CPUTIME_ID`; an all-card forward runs on its caller's thread, `in_phase_pool` hands
+`cpu_layers == 0` straight back). A first launch compiling a kernel the release carries no machine
+code for keeps the thread WORKING and is never a stall; the driver stall sleeps it. At ≥
+`CARD_STEP_STALL` (0.5 s) the worker logs `DIAG: card step stalled` and keeps its longest; the drain
+point sends it (`WorkerMsg::CardStepStalled { blocked_ms, pid }`, sent only where the daemon set
+`DAEMON_READS_CARD_STALL`). `SlowCardNotice::record_stall` keeps each process's longest for
+`STALLS_COUNTED_FOR` (6 h); `take` answers `SlowCard::Stalled` once `STALLED_PROCESSES_TO_TELL` (2)
+processes stalled — before a slow probe, both under the one 12 h cadence — and the health monitor
+tells the owner `activity.card_stalled_restart_windows` under WSL2 (the log line everywhere).
+
+**What a change must keep.**
+- **No warm-up exclusion.** The stall comes EARLY in a process's first reply; a rule skipping the
+  first steps would skip it. The floor holds because healthy first replies stay ≤ 178 ms.
+- **Blocked time, not wall time**, wherever the platform can say; off Linux all of it counts.
+- **Two processes, not one sample** — a single slow step is a hiccup; the shape is every process.
+- **Changes nothing the node does**, like the probe. `CardPace` (2 s, wall time) still paces.
+- Test end to end on a healthy card with `SWARMLLM_CARD_STALL_MS=0` (every judged step a stall).
+
 ## A lone decode stream is never held for a batch (2026-09-29)
 
 **What it replaced.** `process_pool::batch_scheduler_loop` — which every decode forward a node

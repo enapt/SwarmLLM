@@ -712,9 +712,23 @@ stress test: safety kit, live node stopped); (2) split-pipeline segment forwards
 per-token forwards are unobserved; (3) the daemon does not advertise a tripped card to peers; (4) **the probe no longer sees it**: at 46-51 h
 (2026-11-20/21, #411) each model process stalled once 0.45-5.0 s early in its first reply, its main thread inside a
 synchronous call to Windows' graphics kernel (`dxgvmb_send_sync_msg`, nvidia-smi frozen alongside), while
-`cuda_pool::probe_once` read 7-8 ms — so the owner's "restart Windows" notice never fired. Timing the forwards
-themselves (a card forward's own time ≥ 500 ms after the warm-up, where it is 3-15 ms) would catch it. A suspected cause —
-each `nvidia-smi` the node starts leaking ~15 KB of Windows' kernel memory (measured 2026-11-21) — is #490.
+`cuda_pool::probe_once` read 7-8 ms — so the owner's "restart Windows" notice never fired. **Built 2026-11-21, on main,
+not in a release yet**: `pace::Step` judges each outermost short step (≤ 64 rows) of a model wholly on the card by the
+time its thread was BLOCKED (wall − thread processor time, so a kernel compile is never a stall) ≥ 500 ms, and the owner
+is told (`activity.card_stalled_restart_windows`, WSL2) once two model processes stalled within 6 h — no warm-up
+exclusion, since the stall comes early in the first reply and healthy first replies stay ≤ 178 ms
+(`docs/invariants/memory.md` § "… and when its short steps stall"). Open for (4): seeing it fire on a high-uptime boot
+(past ~30 h) — the notice's only end-to-end check so far is `SWARMLLM_CARD_STALL_MS=0` on a healthy card. A suspected
+cause — each `nvidia-smi` the node starts leaking ~15 KB of Windows' kernel memory (measured 2026-11-21) — is #490.
+Prior art for (4) (searched 2026-11-21: Ollama, llama.cpp, vLLM, SGLang, TGI, PyTorch, microsoft/WSL#41701): nobody
+watches for a card that is SLOW without hanging — vLLM's `VLLM_ENGINE_ITERATION_TIMEOUT_S` (60 s), SGLang's
+`--watchdog-timeout` and PyTorch's NCCL heartbeat all catch hangs only; Ollama and llama.cpp have no check. #41701's
+reporters (no Microsoft or NVIDIA answer) give the shape: onset after days of host uptime, guest dmesg
+`dxgvmb_send_sync_msg: wait_for_completion failed`, one reporter's non-paged pool 1.5 → 10.9 GB over 5 days beside
+repeated `nvidia-smi` calls; `wsl --shutdown` alone did NOT clear it, `pnputil /restart-device` or a reboot did. So for
+(4): a fixed floor (a steady-state forward ≥ 500 ms where it runs 3-15 ms; 30-1000x apart, no baseline maths), told
+only when two model processes stalled (each stalls once here), at most every 12 h, worded for the owner ("restart
+Windows"), and never by polling the card — the detector reads the forwards it already times.
 The stalls' root cause stays unknown and the guard does not need it. A card FAULT (not a stall)
 and the 14-minute driver reset after it are #220.
 
@@ -4444,7 +4458,18 @@ the measurement that can kill it), `docs/plans/split_speculation.md` (guess-and-
 
 #### #490 — Every `nvidia-smi` the node starts under WSL2 leaks ~15 KB of Windows' kernel memory, ~9,500 a day
 
-`P1` · reliability/perf · **BUILT on main 2026-11-21, OPEN until measured** · history: #146 (4), #411's 11-21 note, gotcha #1151
+`P2` · reliability/perf · **FIXED on main 2026-11-21 — the node starts no `nvidia-smi` (429 an hour → 0); OPEN: how much a
+launch keeps (the burst test) and whether this removes #1151's stall** · history: #146 (4), #411's 11-21 note, gotcha #1151
+
+**Measured after the fix (2026-11-21, Windows up 5.5-6.3 h, the live node = the #490 build)**: `nvidia-smi` started
+by the node 429 in the hour before (.303; 438 on the machine) → 0 (a 36-min window, `pool_hour.py`, then a 180 s
+`/proc` scan: 1 launch, the check's own); under `strace -e execve` the CUDA build started none in 100 s. The pool's
+hourly fit read −10.9 MB/h before and −5.0 after — both inside the ±13 MB the hour swings, against ~6 MB/h the
+launches could add, so an hour cannot weigh the leak; a burst can (2 × 2,000 launches then 15 min quiet each:
+a staircase if it is kept), run after the release. Native Windows (the MinGW build, `C:\temp\swarm-test`):
+NVML loaded from `C:\WINDOWS\System32\nvml.dll`, the card's name and memory (650 of 8192 MiB) as `nvidia-smi`
+read them; its heat is read only by a CUDA build, as before. The safety kit reads through `nvml_watch.py`
+(its harness: winsilent, diskblock, nonvml — the `nvidia-smi` fallback — and stucksmi all as designed).
 
 **Measured on this laptop (2026-11-21, a boot 0.2 h old, Windows' `\Memory\Pool Nonpaged Bytes` read from WSL)**:
 5,000 `nvidia-smi --query-gpu=temperature.gpu` launches in 222 s grew the pool 534.3 → 609.4 MB (+75 MB, ~15 KB a

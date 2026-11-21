@@ -265,7 +265,9 @@ Prune's soft-unload narrows a model only when our CHARGED memory (`vram_committe
 
 **`cuda_pool::probe_once`** times 16 fresh 4 MB allocations once per worker at `load_device`, never per request; a probe ≥ 0.5 s reaches `ModelProcessPool::slow_card_notice` (`WorkerMsg::CardAllocationProbe`), WSL2 only, at most every 12 h. It changes nothing the node does.
 
-→ `docs/invariants/memory.md` § "The owner is told when the card has become slow to hand out memory (2026-10-01)"
+**And when its short steps STALL (2026-11-21, #146 (4))** — the probe read 7-8 ms through 0.45-5 s stalls (gotcha #1151). `pace::Step::begin`'s **`CardStep` is REQUIRED** at every forward entry point: only an OUTERMOST step of ≤ `SHORT_STEP_ROWS` (64) rows on a model wholly on the card is judged (`cuda_pool::note_card_step`), by the time its thread was BLOCKED (wall − `CLOCK_THREAD_CPUTIME_ID`: a kernel compile keeps the thread busy, the stall sleeps in the driver) ≥ `CARD_STEP_STALL` (0.5 s). The worker sends its longest once per drain (`WorkerMsg::CardStepStalled`, gated `DAEMON_READS_CARD_STALL`); the owner is told (`card_stalled_restart_windows`) once `STALLED_PROCESSES_TO_TELL` (2) processes stalled within 6 h, on the same 12 h cadence. A new entry point states its `CardStep`; a step that waits on other computers is `NotJudged`. End to end on a healthy card: `SWARMLLM_CARD_STALL_MS=0`.
+
+→ `docs/invariants/memory.md` § "The owner is told when the card has become slow to hand out memory (2026-10-01)", § "… and when its short steps stall (2026-11-21, #146 (4))"
 
 ## A lone decode stream is never held for a batch (2026-09-29)
 

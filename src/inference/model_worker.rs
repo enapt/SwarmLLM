@@ -480,6 +480,9 @@ pub async fn run_worker(
     let daemon_reads_load_timing = crate::inference::worker_ipc::daemon_reads_card_probe(
         std::env::var_os(crate::inference::worker_ipc::DAEMON_READS_LOAD_TIMING).as_deref(),
     );
+    let daemon_reads_card_stall = crate::inference::worker_ipc::daemon_reads_card_probe(
+        std::env::var_os(crate::inference::worker_ipc::DAEMON_READS_CARD_STALL).as_deref(),
+    );
     let daemon_reads_context_fits = crate::inference::worker_ipc::daemon_reads_card_probe(
         std::env::var_os(crate::inference::worker_ipc::DAEMON_READS_CONTEXT_FITS).as_deref(),
     );
@@ -653,6 +656,27 @@ pub async fn run_worker(
                 .await
                 {
                     tracing::debug!(error = %e, "model-worker: could not report the card probe");
+                }
+            }
+            // A short card step that stayed blocked (`pace::Step`, #146 (4)) —
+            // the longest since the last report, the same drain point and gate
+            // rule; the daemon counts the processes that stalled.
+            if let Some(blocked) = daemon_reads_card_stall
+                .then(crate::inference::cuda_pool::take_stall_report)
+                .flatten()
+            {
+                let blocked_ms = u32::try_from(blocked.as_millis()).unwrap_or(u32::MAX);
+                if let Err(e) = send_worker(
+                    &mut writer,
+                    &WorkerMsg::CardStepStalled {
+                        blocked_ms,
+                        pid: std::process::id(),
+                    },
+                    &[],
+                )
+                .await
+                {
+                    tracing::debug!(error = %e, "model-worker: could not report a card stall");
                 }
             }
             // Every load this batch ran, for the rate this node advertises
@@ -4858,7 +4882,12 @@ impl MtpGuesses {
         index_pos: usize,
         gamma: usize,
     ) -> Result<Vec<u32>, SwarmError> {
-        let step = crate::inference::pace::Step::begin();
+        // Judged as a card step (#146 (4)) by what it reads — the rows waiting
+        // to be read in and the guesses — where the head is on the card too.
+        let step = crate::inference::pace::Step::begin(crate::inference::pace::CardStep::of(
+            self.tokens.len() + 1 + gamma,
+            model.runs_entirely_on_card() && !model.guess_head_in_system_memory(),
+        ));
         let out = self.guesses_unpaced(model, next_token, index_pos, gamma);
         step.end(
             || {

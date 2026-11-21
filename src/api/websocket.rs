@@ -232,9 +232,9 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
                 _ = stats_interval.tick() => {
                     // Keep the hardware panel current without paying for it
                     // here. One refresh at a time across every connected
-                    // client — each runs this loop, and `nvidia-smi` is a
-                    // subprocess spawn, so an unguarded trigger would start
-                    // one per open dashboard tab.
+                    // client — each runs this loop, and the refresh asks the
+                    // card's driver and every disk, so an unguarded trigger
+                    // would run one per open dashboard tab.
                     if crate::api::admin::hardware_snapshot_is_stale()
                         && !HW_REFRESH_IN_FLIGHT.swap(true, std::sync::atomic::Ordering::AcqRel)
                     {
@@ -615,8 +615,9 @@ async fn build_stats_message(state: &SharedState) -> String {
     // still while everything around them updated every two seconds
     // (report #016).
     //
-    // **Read from a cache; measured elsewhere.** `detect_hardware` spawns
-    // `nvidia-smi` (measured at 90 ms here) and enumerates every mounted disk,
+    // **Read from a cache; measured elsewhere.** `detect_hardware` asks the
+    // card's driver (an `nvidia-smi` spawn measured 90 ms here before #490) and
+    // enumerates every mounted disk,
     // so it is ~100 ms — NOT the 0.43 ms that the comment inside it quotes,
     // which is the sysinfo refresh alone (gotcha #417's fix). This payload is
     // coalesced across every connected client, so measuring here would spend

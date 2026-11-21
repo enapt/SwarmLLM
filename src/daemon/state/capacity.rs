@@ -81,8 +81,8 @@ pub struct SwarmCapacity {
     /// by the health monitor's tick, off the network loop
     /// ([`refresh_swarm_capacity_reading_the_budget`]). The refreshes on every
     /// peer connect and disconnect run ON that loop and carry this figure over:
-    /// on a computer with a graphics card the reading is an `nvidia-smi`, 2-6 s
-    /// on a busy card under WSL (gotcha #831). `None` until first read, or when
+    /// on a computer with a graphics card the reading asks the driver (through
+    /// NVML since #490; `nvidia-smi` took 2-6 s on a busy card under WSL, gotcha #831). `None` until first read, or when
     /// it cannot be.
     #[serde(default)]
     pub model_budget_mb: Option<u64>,
@@ -128,7 +128,7 @@ pub struct HeadlineModel {
 /// the model + peer registries, no allocations beyond the result vectors.
 /// Safe to call from any context — does not block, does not lock writers.
 ///
-/// `model_budget_mb` is REQUIRED, never read here: it is an `nvidia-smi` on a
+/// `model_budget_mb` is REQUIRED, never read here: it asks the card's driver on a
 /// computer with a graphics card, and this runs on the network loop at every
 /// peer connect (pre-release review, 2026-10-15). Pass the snapshot's own
 /// ([`current_model_budget_mb`]) unless the caller is the one reading it.
@@ -368,7 +368,7 @@ pub fn refresh_swarm_capacity(state: &SharedState) {
 }
 
 /// [`refresh_swarm_capacity`] with the model budget read afresh — on a
-/// blocking thread (an `nvidia-smi` on a computer with a graphics card), by the
+/// blocking thread (it asks the card's driver on a computer with a graphics card), by the
 /// health monitor's tick, never the network loop. The snapshot is computed
 /// AFTER the reading returns: computed before it, a reading of a few seconds
 /// would store peer counts older than a refresh the network loop made
