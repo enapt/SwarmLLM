@@ -318,8 +318,9 @@ layers, far 24-46 ms a forward, 130 ms, 0.15 ms a row; 40 seeds, 160 tokens), an
   point only, it does NOT reproduce the shorter loops: its tokens a forward stop rising at 1.54 from 40 ms down
   (measured 1.42-1.47 / 1.50-1.51 / 1.84-1.88), so 0 ms reads 27.7 against 33.0-33.6 (−17%); no rank profile on a
   grid fits all four loops within 14%. The real tree wastes more rows to a longer wait than the queue model does;
-  untested candidates: the guard narrowing the live budget at long loops, rebases at the 512-row cap, the delay
-  rig's own overhead (its measured delays at 40 and 20 ms are alike, 140 and 136).
+  candidates left: rebases at the 512-row cap (5 a reply at 100 ms, 3 at 0) and the copied rows (66 against 102
+  a reply). Ruled out from the rig's lines: the guard (it never narrowed), and the 40/20 ms points (they are the
+  rig's own delay — one line against the measured `verdict_ms`, § 9).
 - **Indicative only** (the rule withholds a ruling): on the 14B pair today's shape at a 20 ms loop reads 30.9 prose
   / 61.0 code (§ 9's slope gave ~29-33 prose), and the pacer there 32.3 / 92.9 (35.3 / 95.8 with the far's queue
   merged) — ~1.05× prose, ~1.5× code over the same loop without it; most of a prose gain is the short loop.
@@ -345,7 +346,10 @@ an arm (the first carries the load and is left out). Flow figures are the node's
 - One 40 ms flow arm (b) is left out: its drafter loaded on the processor (`reason="not_enough_vram"` — a guest
   takes only memory that stands free, and the other process held it), drafting 123 ms a call, 12.7-12.9 tok/s.
 - **The kill test passes**: ms a token kept falling, 46.3 → 38.9 → 39.4 → 30.1, ~0.16 ms per ms of loop over
-  100 → 0 (the test asks ~0.18), with a flat stretch between 40 and 20 ms.
+  100 → 0 (the test asks ~0.18), with a flat stretch between 40 and 20 ms. **The flat stretch is the rig's, not
+  the flow's**: its verdict delay barely fell there (140 → 136 ms). Against the MEASURED delay the four points lie
+  on one line — ms a token = 19.1 + 0.144 × `verdict_ms`, each within 0.6 ms — and the guard never narrowed
+  (8 × 128 at start, least and end; no cuts) at any loop.
 - **But not by the law's mechanism.** The head's forward cost the same at every loop (~56 ms: drafting ~31 — this
   card serves both halves — and its layers ~25; `waiting_ms` 0); misses stayed ~8 a reply, and a miss threw away
   ~4.5 levels at 100 ms and at 0. Misses × `L` fell only from ~9 to ~4 ms a token while a token's time fell 16.
