@@ -4518,8 +4518,16 @@ slot open (`DaemonMsg::CardBusyBeside`), the worker's reader task sets `clock_ho
 `ClockHold::start_piece` starts nothing while it is set (the hold lasts; its DIAG counts `busy_beside` turns). Every
 card-charged worker counts as one card — a two-card machine loses holds it could keep, never gains a piece against
 the other card's work. A piece already queued when the word arrives still runs (≤ 2 ms). Tests fail with each part
-taken out. Next: the 14B flow `flowhalf` vs `flowhalf:SWARMLLM_CARD_CLOCK_HOLD=1` and the 27B (`hold_query`) on a CUDA
-build of main; on by default only if both pass.
+taken out. **Measured** (`b2aa14b9b`, CUDA, `real_link.sh` TAG=ab489 + ab489b, 12 flowhalf arms alternating off/on and
+on/off, 03:16-03:38Z, Windows up ~1 h): the pause fired (237-671 `busy_beside` turns a hold; `stream_busy` 0-3 a hold
+against 19-34 on 11-20), and this side's forward read the same held and not (~25.6 vs ~25.7 ms; 38 vs 27 on 11-20) —
+but drafting ran 0.6-1.1 ms a forward slower held (a piece started between two guesses), code 42.6 vs 43.8 tok/s
+where no far wait passed 100 ms (all replies: 40.9 vs 43.8, one held reply waited 824 ms abroad), prose 19.8 vs 19.5.
+The hold gains nothing on that shape — the drafter keeps the card's clocks up by itself — so **a card worker's work
+now counts for `CARD_WORK_LINGERS_FOR` (= `HOLD_FOR`, 1 s) past its last step** (a governor's down-switch
+hysteresis): a drafter guesses every round, so its target does not hold during the reply at all. The fan-out runs
+again when a linger runs out. Next: the same arms on a build with the linger, and the 27B (`~/swarmllm-gate/hold489`);
+on by default only if both pass.
 Evidence: `docs/invariants/inference.md` § "A card between a split's forwards keeps its clocks".
 
 #### #488 — A split's head that runs part of its layers on the processor puts its drafter in system memory, where a guess takes 54 ms

@@ -1501,7 +1501,32 @@ struct WorkerHandle {
     /// ([`ModelProcessPool::card_work_changed`]): rung where a reply's slot
     /// opens and closes on this worker ([`card_work_changed`]).
     card_work_changed: Arc<tokio::sync::Notify>,
+    /// What that fan-out last saw of this worker's work on the card — kept
+    /// only by [`ModelProcessPool::tell_cards_who_is_busy`].
+    card_work_seen: std::sync::Mutex<CardWorkSeen>,
 }
+
+/// A worker's work on the card as the card fan-out last saw it (#489).
+#[derive(Debug, Default, Clone, Copy)]
+struct CardWorkSeen {
+    /// A reply's step was running at the last look.
+    working: bool,
+    /// When it was last seen running, or seen to have just ended.
+    at: Option<std::time::Instant>,
+}
+
+/// How long a card worker's work counts as going on after its last step ends
+/// (#489): a drafter model guesses for its target every round, well inside a
+/// second, so its target's hold stays paused for the whole reply instead of
+/// starting pieces between two guesses that the next guess then waits behind
+/// (12 arms of the 14B split, 2026-11-21: with the pause at the step alone,
+/// drafting ran 0.6-1.1 ms a forward slower held, code 42.6 vs 43.8 tok/s,
+/// while this side's forwards read the same ~25.6 ms — the drafter keeps that
+/// card's clocks up by itself). The hold's own span: a reply is over after
+/// it ([`crate::inference::clock_hold::HOLD_FOR`]). Prior art: a frequency
+/// governor's down-switch hysteresis (cpufreq ondemand's
+/// `sampling_down_factor`, devfreq's `downdifferential`).
+const CARD_WORK_LINGERS_FOR: std::time::Duration = crate::inference::clock_hold::HOLD_FOR;
 
 /// A reply's slot opened or closed on a worker: wake the fan-out that tells
 /// each card worker whether another is busy beside it (#489) — only while the
@@ -13155,6 +13180,7 @@ impl ModelProcessPool {
             told_pace: std::sync::atomic::AtomicU32::new(pace_at_spawn),
             told_busy_beside: AtomicBool::new(false),
             card_work_changed: self.card_work_changed.clone(),
+            card_work_seen: std::sync::Mutex::default(),
         };
         Ok(SpawnedWorker {
             handle,
@@ -14840,35 +14866,60 @@ impl ModelProcessPool {
         self.card_work_changed.clone()
     }
 
-    /// Tell each card worker whether ANOTHER of this pool's card workers has
-    /// a reply in flight now (`DaemonMsg::CardBusyBeside`), so its clock hold
+    /// Tell each card worker whether ANOTHER of this pool's card workers is
+    /// at work on the card (`DaemonMsg::CardBusyBeside`), so its clock hold
     /// starts no piece the card would time-slice against that work
     /// (`inference::clock_hold`, FUTURE_WORK #489). Two processes on a
     /// consumer card share it by time-slicing — the 14B split's drafter
     /// beside its target, the owner's reply beside a slice served for a peer —
-    /// and only the daemon sees both. Run on [`Self::card_work_changed`];
+    /// and only the daemon sees both. Run on [`Self::card_work_changed`] and
+    /// again at the moment it answers (where a worker's work stops counting);
     /// tells only the workers it differs for, as [`Self::pace_steps`] does,
     /// so a steady card sends nothing.
     ///
-    /// Busy = [`WorkerHandle::working_now`]: a reply slot open on the worker
-    /// (a generate, a forward, a guess, a peer's question) — open from just
+    /// At work = [`WorkerHandle::working_now`] — a reply slot open on the
+    /// worker (a generate, a forward, a guess, a peer's question), from just
     /// before the request is sent to its end ([`WorkerHandle::register_response`],
-    /// `ResponseGuard`'s drop). Every worker charged against the card counts
-    /// as one card: a machine with two cards loses holds it could keep, never
-    /// gains a piece against the other card's work.
-    pub async fn tell_cards_who_is_busy(&self) {
-        let busy_on_card = self
-            .workers
-            .iter()
-            .filter(|e| {
-                let w = e.value();
-                w.holds_gpu_memory() && !w.dead.load(Ordering::Acquire) && w.working_now()
-            })
-            .count();
-        let beside = |w: &WorkerHandle| {
-            let own = usize::from(w.working_now());
-            busy_on_card.saturating_sub(own) > 0
+    /// `ResponseGuard`'s drop) — or seen to end less than
+    /// [`CARD_WORK_LINGERS_FOR`] before `now`. Every worker charged against the
+    /// card counts as one card: a machine with two cards loses holds it could
+    /// keep, never gains a piece against the other card's work.
+    pub async fn tell_cards_who_is_busy(
+        &self,
+        now: std::time::Instant,
+    ) -> Option<std::time::Instant> {
+        let mut busy_on_card = 0usize;
+        let mut look_again: Option<std::time::Instant> = None;
+        for entry in self.workers.iter() {
+            let w = entry.value();
+            if !w.holds_gpu_memory() || w.dead.load(Ordering::Acquire) {
+                continue;
+            }
+            let working = w.working_now();
+            let mut seen = w
+                .card_work_seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if working || seen.working {
+                seen.at = Some(now);
+            }
+            seen.working = working;
+            let lingers_until = seen.at.map(|at| at + CARD_WORK_LINGERS_FOR);
+            if working || lingers_until.is_some_and(|until| now < until) {
+                busy_on_card += 1;
+            }
+            if let Some(until) = lingers_until.filter(|until| !working && now < *until) {
+                look_again = Some(look_again.map_or(until, |t| t.min(until)));
+            }
+        }
+        let at_work = |w: &WorkerHandle| {
+            let seen = *w
+                .card_work_seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            seen.working || seen.at.is_some_and(|at| now < at + CARD_WORK_LINGERS_FOR)
         };
+        let beside = |w: &WorkerHandle| busy_on_card.saturating_sub(usize::from(at_work(w))) > 0;
         for busy in [true, false] {
             let reached = self
                 .notify_workers(
@@ -14885,6 +14936,7 @@ impl ModelProcessPool {
                 worker.told_busy_beside.store(busy, Ordering::Release);
             }
         }
+        look_again
     }
 
     /// Tell every live worker that `request_id` is finished with its KV cache.
@@ -20678,37 +20730,60 @@ mod tests {
 
         // The drafter guesses: the target is told; the drafter, whose own
         // work it is, and the processor worker are told nothing.
+        let t0 = std::time::Instant::now();
+        let ms = std::time::Duration::from_millis;
         let (guess, _) =
             drafter.register_response(Uuid::new_v4(), dummy_tx(), false, Requester::Swarm);
-        p.tell_cards_who_is_busy().await;
+        assert_eq!(
+            p.tell_cards_who_is_busy(t0).await,
+            None,
+            "nothing lingers yet"
+        );
         assert_eq!(told(next(&mut target_end).await), Some(true));
         assert_eq!(told(next(&mut drafter_end).await), None);
         assert_eq!(told(next(&mut cpu_end).await), None);
         // Steady: nothing again.
-        p.tell_cards_who_is_busy().await;
+        p.tell_cards_who_is_busy(t0).await;
         assert_eq!(told(next(&mut target_end).await), None);
-        // The guess ends: the target is told the card is its own again.
+        // The guess ends: it still counts until CARD_WORK_LINGERS_FOR has
+        // passed — the next guess of a reply comes well inside it — and the
+        // fan-out says when to look again.
         drop(guess);
-        p.tell_cards_who_is_busy().await;
+        let ended = t0 + ms(10);
+        assert_eq!(
+            p.tell_cards_who_is_busy(ended).await,
+            Some(ended + CARD_WORK_LINGERS_FOR)
+        );
+        assert_eq!(told(next(&mut target_end).await), None, "lingering");
+        assert_eq!(
+            p.tell_cards_who_is_busy(ended + CARD_WORK_LINGERS_FOR)
+                .await,
+            None
+        );
         assert_eq!(told(next(&mut target_end).await), Some(false));
 
         // Both at work: each is told of the other.
+        let t1 = t0 + ms(5_000);
         let (forward, _) =
             target.register_response(Uuid::new_v4(), dummy_tx(), false, Requester::Owner);
         let (guess, _) =
             drafter.register_response(Uuid::new_v4(), dummy_tx(), false, Requester::Owner);
-        p.tell_cards_who_is_busy().await;
+        p.tell_cards_who_is_busy(t1).await;
         assert_eq!(told(next(&mut target_end).await), Some(true));
         assert_eq!(told(next(&mut drafter_end).await), Some(true));
         drop((forward, guess));
-        p.tell_cards_who_is_busy().await;
+        p.tell_cards_who_is_busy(t1 + ms(1)).await;
+        assert_eq!(told(next(&mut target_end).await), None, "lingering");
+        p.tell_cards_who_is_busy(t1 + ms(1) + CARD_WORK_LINGERS_FOR)
+            .await;
         assert_eq!(told(next(&mut target_end).await), Some(false));
         assert_eq!(told(next(&mut drafter_end).await), Some(false));
 
         // Work on the processor does not hold the card.
+        let t2 = t1 + ms(10_000);
         let (cpu_reply, _) =
             on_cpu.register_response(Uuid::new_v4(), dummy_tx(), false, Requester::Owner);
-        p.tell_cards_who_is_busy().await;
+        assert_eq!(p.tell_cards_who_is_busy(t2).await, None);
         assert_eq!(told(next(&mut target_end).await), None);
         assert_eq!(told(next(&mut drafter_end).await), None);
         assert_eq!(told(next(&mut cpu_end).await), None);
@@ -20892,6 +20967,7 @@ mod tests {
             told_pace: std::sync::atomic::AtomicU32::new(0),
             told_busy_beside: AtomicBool::new(false),
             card_work_changed: Arc::default(),
+            card_work_seen: std::sync::Mutex::default(),
         });
         (handle, client)
     }

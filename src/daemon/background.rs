@@ -867,15 +867,27 @@ pub(super) fn spawn_card_busy_fan_out(
     tasks.spawn(async move {
         let pool = shared_state.model_process_pool.clone();
         let wake = pool.card_work_changed();
+        // When a worker's ended work stops counting as going on: the fan-out
+        // runs again then, with no slot opening or closing to wake it.
+        let mut look_again: Option<std::time::Instant> = None;
         loop {
+            let until_look_again = async {
+                match look_again {
+                    Some(at) => tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await,
+                    None => std::future::pending().await,
+                }
+            };
             tokio::select! {
-                () = wake.notified() => pool.tell_cards_who_is_busy().await,
+                () = wake.notified() => {}
+                () = until_look_again => {}
                 changed = shutdown_rx.changed() => {
                     if changed.is_err() || *shutdown_rx.borrow() {
                         break;
                     }
+                    continue;
                 }
             }
+            look_again = pool.tell_cards_who_is_busy(std::time::Instant::now()).await;
         }
         "card_busy_fan_out"
     });
