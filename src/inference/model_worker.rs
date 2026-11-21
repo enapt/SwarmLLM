@@ -1190,20 +1190,13 @@ fn release_caches_of_cancelled(
 
 /// Whole-device GPU memory in use, in MB, or `None` when there is no GPU to ask.
 ///
-/// Whole-device rather than per-process because WSL reports `[N/A]` for
-/// `--query-compute-apps` memory, so process attribution is simply unavailable
-/// there. Sound enough to bracket a single load in a process that does one at a
-/// time; not sound as a live admission input.
+/// Whole-device rather than per-process because WSL reports no per-process
+/// memory (`nvidia-smi --query-compute-apps` printed `[N/A]`), so process
+/// attribution is simply unavailable there. Sound enough to bracket a single
+/// load in a process that does one at a time; not sound as a live admission
+/// input. Read through this process's own NVML session (`nvml`, #490).
 fn current_vram_used_mb() -> Option<u64> {
-    crate::model::auto_manage::vram::nvidia_smi(&[
-        "--query-gpu=memory.used",
-        "--format=csv,noheader,nounits",
-    ])?
-    .lines()
-    .next()?
-    .trim()
-    .parse()
-    .ok()
+    crate::model::auto_manage::vram::query_gpu_vram_used()
 }
 
 /// GPU memory this load appears to have cost, in MB.

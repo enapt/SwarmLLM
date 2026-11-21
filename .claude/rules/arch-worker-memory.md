@@ -206,11 +206,11 @@ The loader records the card's KV budget with or without `inference.max_seq_len_o
 
 → `docs/invariants/memory.md` § "The daemon holds no CUDA context (2026-10-05)"
 
-## nvidia-smi is asked through one bounded helper (2026-10-05)
+## The card is read through ONE NVML session, bounded (2026-11-21, #490)
 
-**`vram::nvidia_smi`** (a `BoundedCommand`: 10 s, never two copies at once) is the only way to run `nvidia-smi`. Guard: `nvidia_smi_is_asked_only_through_the_bounded_helper`. A copy stuck 60 s (`DRIVER_NOT_ANSWERING_AFTER`, #802) makes `vram::graphics_driver_not_answering` true: new workers go to the processor (`CpuReason::DriverNotAnswering`, transient). **Its wait never holds a Tokio runtime worker** (`executor::without_starving_the_runtime`, #244; test `a_slow_bounded_command_does_not_hold_the_runtime_worker`).
+**`model::auto_manage::nvml`** is the only reading of the card — memory, temperature and cooling flags, target, name, compute capability: NVIDIA's library loaded at runtime, `nvmlInit` once a process, every call on ONE thread. A caller waits ≤ `READING_TIMEOUT` (10 s); while a call has outlived it, every reading is `None` at once, and the session is never shut down under it. A field is read only where its call answered `NVML_SUCCESS`. `src/` starts no `nvidia-smi` — under WSL2 each one left ~15 KB of Windows' kernel memory behind — and loads the library nowhere else: guard `the_card_is_read_through_one_nvml_session` (the launcher is exempt). A call stuck 60 s (`DRIVER_NOT_ANSWERING_AFTER`, #802; `nvml::still_not_answering`, which never starts a reading) makes `vram::graphics_driver_not_answering` true: new workers go to the processor (`CpuReason::DriverNotAnswering`, transient). **A wait never holds a Tokio runtime worker** (`executor::without_starving_the_runtime`, #244; test `a_slow_card_reading_does_not_hold_the_runtime_worker`). `vram::BoundedCommand` keeps the same rules for the programs still started (`busctl`, `powershell`).
 
-→ `docs/invariants/memory.md` § "nvidia-smi is asked through one bounded helper (2026-10-05)"
+→ `docs/invariants/memory.md` § "The card is read through one NVML session, bounded"
 
 ## A card full of our own model is not pressure (2026-10-12, field report #035)
 

@@ -44,17 +44,6 @@ pub fn compute_cap_supported(cap: (u32, u32)) -> bool {
     cap >= MIN_COMPUTE_CAP
 }
 
-/// Parse the `major.minor` string `nvidia-smi --query-gpu=compute_cap` prints.
-///
-/// Returns `None` for anything unexpected, which every caller must treat as
-/// "unknown", never as "unsupported" — refusing the GPU because a subprocess
-/// printed something surprising would break working cards, which is a worse
-/// failure than the one this module prevents.
-pub fn parse_compute_cap(s: &str) -> Option<(u32, u32)> {
-    let (major, minor) = s.trim().split_once('.')?;
-    Some((major.trim().parse().ok()?, minor.trim().parse().ok()?))
-}
-
 /// The message shown to someone whose card this build has left behind.
 ///
 /// Names the card, the requirement, and what actually happens next — the node
@@ -200,7 +189,7 @@ pub fn local_card_refusal() -> Option<CardRefusal> {
         }
         match crate::model::auto_manage::vram::detect_gpu_compute_cap() {
             Some(cap) if !compute_cap_supported(cap) => {
-                let (name, _) = crate::model::auto_manage::vram::detect_gpu_nvidia_smi();
+                let (name, _) = crate::model::auto_manage::vram::detect_gpu();
                 let name = name.unwrap_or_else(|| "This NVIDIA GPU".to_string());
                 tracing::warn!(
                     gpu = %name,
@@ -382,15 +371,6 @@ mod tests {
         assert!(compute_cap_supported((8, 1)));
     }
 
-    #[test]
-    fn parses_what_nvidia_smi_prints() {
-        assert_eq!(parse_compute_cap("8.6"), Some((8, 6)));
-        assert_eq!(parse_compute_cap("7.5"), Some((7, 5)));
-        // --format=csv,noheader leaves the trailing newline on.
-        assert_eq!(parse_compute_cap("8.9\n"), Some((8, 9)));
-        assert_eq!(parse_compute_cap(" 12.0 "), Some((12, 0)));
-    }
-
     /// The latch is process-global, so the tests that move it must not run
     /// beside each other — two of them interleaving would each see the other's
     /// write and both could pass while the logic was wrong.
@@ -497,22 +477,6 @@ mod tests {
             !err.is_empty(),
             "the failure must carry something a reader can act on"
         );
-    }
-
-    #[test]
-    fn unparseable_output_is_unknown_not_unsupported() {
-        // Every one of these must reach the caller as None so it treats the
-        // capability as unknown and leaves the GPU alone. A card that works
-        // must never be sent to the CPU because nvidia-smi was odd.
-        for junk in [
-            "",
-            "N/A",
-            "8",
-            "eight.six",
-            "Failed to initialize NVML: Driver/library version mismatch",
-        ] {
-            assert_eq!(parse_compute_cap(junk), None, "input {junk:?}");
-        }
     }
 
     #[test]

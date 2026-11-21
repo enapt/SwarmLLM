@@ -745,8 +745,8 @@ set as administrator (the forum's second value, `GPUDebugger` `EnableInterface`,
 unnecessary here — run 2026-10-10, below);
 (2) the re-plan sat in GPU admission because `nvidia-smi` waits as long as the driver does — FIXED
 2026-10-05: `vram::nvidia_smi` bounds it at 10 s and never runs two at once (while a stuck one
-lives the next reading is unknown at once; `docs/invariants/memory.md` § "nvidia-smi is asked
-through one bounded helper"). And FIXED 2026-10-07, released in v0.3.230: while that
+lives the next reading is unknown at once; since #490 the one NVML session, same rules;
+`docs/invariants/memory.md` § "The card is read through one NVML session, bounded"). And FIXED 2026-10-07, released in v0.3.230: while that
 stuck `nvidia-smi` lives and has for a minute (`vram::graphics_driver_not_answering`, asked
 without waiting on the helper's lock; `DRIVER_NOT_ANSWERING_AFTER` — the release gate caught
 the first draft acting on one 10-15 s stall and sending a card-only model to a processor it did
@@ -4444,7 +4444,7 @@ the measurement that can kill it), `docs/plans/split_speculation.md` (guess-and-
 
 #### #490 — Every `nvidia-smi` the node starts under WSL2 leaks ~15 KB of Windows' kernel memory, ~9,500 a day
 
-`P1` · reliability/perf · **OPEN** — 2026-11-21 · history: #146 (4), #411's 11-21 note, gotcha #1151
+`P1` · reliability/perf · **BUILT on main 2026-11-21, OPEN until measured** · history: #146 (4), #411's 11-21 note, gotcha #1151
 
 **Measured on this laptop (2026-11-21, a boot 0.2 h old, Windows' `\Memory\Pool Nonpaged Bytes` read from WSL)**:
 5,000 `nvidia-smi --query-gpu=temperature.gpu` launches in 222 s grew the pool 534.3 → 609.4 MB (+75 MB, ~15 KB a
@@ -4474,6 +4474,42 @@ keeping `BoundedCommand`'s two properties (a reading that does not answer in 10 
 answer. The daemon still holds no CUDA context (NVML opens none). The safety kit reads through one long-lived NVML
 process too. Native Windows starts the same `nvidia-smi`; whether it leaks there is unmeasured. Kill/keep: the
 pool's growth with the live node running an hour, before and after (expect ~6 MB/h → ~0).
+
+**Design (2026-11-21, before building).** Prior art: Ollama `dlopen`s `libnvidia-ml.so.1` (Windows: `nvml.dll` from
+System32, then `NVIDIA Corporation\NVSMI`) and `dlsym`s the three functions it needs, init → read → shutdown per
+probe (`discover/native_probe_linux.go`); PyTorch opens it with a raw `CDLL` and `pynvml`, re-initialising per call
+(`torch/cuda/__init__.py`); vLLM wraps each call in `nvmlInit`/`nvmlShutdown` and took that pair off a hot path for
+its cost (`platforms/cuda.py`); llama.cpp asks `cudaMemGetInfo` only. None keeps one session — ours rests on the
+pynvml measurement above, re-measured in Rust. The `nvml-wrapper` crate (0.13, MIT/Apache, runtime-loaded) was
+weighed and left: its `memory_info` calls only `_v2` with no fallback, and it brings a proc-macro stack for ~11
+functions. So: the library loaded at runtime through `libloading` (already in the lock), each symbol optional (a
+missing one reads that field as unknown), on ONE thread that owns the session; a caller waits ≤ 10 s, and while a
+call has outlived that, every reading is unknown at once and `graphics_driver_not_answering` counts from its start —
+`BoundedCommand`'s rules, the session never shut down under a stuck call (NVML has no timeout and a call stuck in the
+driver cannot be cancelled). A failed open is retried after 30 s; a lost card or driver reopens the session.
+**Fields, checked against `nvidia-smi` on this card (driver 621.24, WSL2)**: `memory.used` 877 = `_v2`'s `used`
+(876; v1's 1,050 counts the driver's 174 MB reserve, which `_v2` reports apart) → `_v2`, v1 where it is missing;
+"GPU Target Temperature Specification" 87 = threshold `GPS_CURR` (7) — `ACOUSTIC_CURR` answers NOT_SUPPORTED under
+WSL2 and leaves the buffer as the last call wrote it, so a field is read only on `NVML_SUCCESS`; the target is the
+lowest of the two within 40-120 °C, as `parse_card_target` took every "Target Temperature" line; the thermal flags
+are `nvmlDeviceGetCurrentClocksEventReasons` (`…ThrottleReasons` on older drivers) bits 0x20 / 0x40; the
+temperature is whole degrees (63 for `nvidia-smi`'s 63.10). Every card for heat, device 0 for the rest — NVML's
+order is `nvidia-smi`'s. ⚠ Kept as it was, noted apart: free = total − used overstates what the card can hand out by
+that reserve (7,315 vs `_v2`'s free 7,141 MB here).
+
+**Built (2026-11-21, on main).** `model::auto_manage::nvml` serves every reading the daemon and its workers took from
+`nvidia-smi`: `vram::{detect_gpu, detect_gpu_with_used, detect_gpu_compute_cap, query_gpu_vram_used,
+query_gpu_vram_free_mb}`, `host_heat::read_card`, `model_worker::current_vram_used_mb` (a worker opens its own
+session, once). `src/` starts none — guard `the_card_is_read_through_one_nvml_session`, the launcher exempt (it asks
+once, before the daemon). Each test was watched go red with its rule broken (NOT_SUPPORTED read as an answer; a
+reading asked while one is stuck; a planted `nvidia-smi`; used memory truncated). `nvidia-smi` rounds used memory UP
+(839,172,096 B, 800.3 MiB, printed 801), so the session does too and free memory reads as it did. **Checked on this
+card** (driver 621.24, the CUDA build off the swarm under `strace -e execve`, 100 s): no `nvidia-smi` among its 297
+program starts; the diagnostics' `heat: card 63 C (target 87 C)`, flags off, `driver not answering: false`, against
+`nvidia-smi`'s 63.6 °C and target 87; used 716 MiB against its 716; the card kept for inference (compute capability
+8.6 read through `nvmlDeviceGetCudaComputeCapability`, `nvidia-smi`'s 8.6). **Left before closing**: the live node's pool growth over
+an hour on this build against .303 (the kill/keep line), the release-check safety kit (`safety.sh`, outside the
+repo, still `nvidia-smi` every ~10 s while a check runs) and a run on native Windows (`nvml.dll`).
 
 #### #488 — A split's head that runs part of its layers on the processor puts its drafter in system memory, where a guess takes 54 ms
 
@@ -11580,7 +11616,7 @@ alone, sustained", v0.3.262)
   card's memory.** `nvidia-smi` (2-6 s on WSL with the card busy) was waited for on a thread
   that also runs the node's network task, so a peer's answers sat unread. The 12h release-check
   shape read one request in three at 11.5-16 tok/s instead of 24-27. Same binary, old wait
-  restored by `SWARMLLM_NVIDIA_SMI_ON_RUNTIME=1`: the old wait stalled 3 rounds of 3 (13.6, 11.5,
+  restored by `SWARMLLM_NVIDIA_SMI_ON_RUNTIME=1` (retired with #490): the old wait stalled 3 rounds of 3 (13.6, 11.5,
   13.0 tok/s), the fix 0 of 3 (23.4-27.6). The guess-check controller also no longer lets one slow
   check decide how many guesses to make (shipped first, 2026-10-12). Leaves #256.
   ⚠ The stall was first put down to the HuggingFace watcher and the canonical-upload check, which

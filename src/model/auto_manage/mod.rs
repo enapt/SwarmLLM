@@ -7,6 +7,7 @@
 pub mod canonical;
 mod coverage;
 mod download;
+pub(crate) mod nvml;
 mod parallax;
 mod prune;
 pub mod quant;

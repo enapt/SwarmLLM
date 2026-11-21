@@ -2588,10 +2588,10 @@ pub(crate) fn detect_hardware(shared_state: &crate::daemon::SharedState) -> serd
             crate::model::auto_manage::vram::query_gpu_vram_used(),
         ),
         None => {
-            // One `nvidia-smi` spawn, not two: this branch used to ask for the
-            // name and total with one call and the usage with another, on an
-            // endpoint the dashboard polls.
-            crate::model::auto_manage::vram::detect_gpu_nvidia_smi_with_used()
+            // One reading, not two: this branch used to ask for the name and
+            // total with one call and the usage with another, on an endpoint
+            // the dashboard polls.
+            crate::model::auto_manage::vram::detect_gpu_with_used()
         }
     };
 

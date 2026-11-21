@@ -107,8 +107,8 @@ pub(crate) const RUNNING_WORK_STOPS_AFTER: Duration = Duration::from_secs(120);
 /// within the pressure-transition period (`nodeConditionsObservedSince`,
 /// kubelet's default 5 min).
 const READING_GONE_AFTER: Duration = Duration::from_secs(300);
-/// How long one reading of every sensor may take. `nvidia-smi` is bounded
-/// (`vram::nvidia_smi`: 10 s a call, three calls at most); the processor's
+/// How long one reading of every sensor may take. The card's is bounded
+/// (`auto_manage::nvml`: 10 s a call, two calls at most); the processor's
 /// sensors are not (sysinfo's WMI, PDH), and one that never returned froze the
 /// guard in whatever state it was in.
 const SENSOR_READ_LIMIT: Duration = Duration::from_secs(40);
@@ -363,7 +363,7 @@ pub struct HostHeatWatch {
     refreshing: AtomicBool,
     /// A reading of the sensors is still out on a blocking thread, past
     /// [`SENSOR_READ_LIMIT`] or not: the next round never starts a second
-    /// (one stuck reader at a time, as `vram::nvidia_smi` keeps one stuck copy).
+    /// (one stuck reader at a time, as `auto_manage::nvml` keeps one stuck call).
     sensors_out: AtomicBool,
 }
 
@@ -719,78 +719,39 @@ fn driver_not_answering() -> bool {
 }
 
 /// The card's temperature and the driver's cooling flags, through the one
-/// bounded `nvidia-smi` (a driver that does not answer reads as unknown, and
-/// is the driver watch's to judge). Its target is asked until the driver
-/// answers once, N/A included: `target` holds the answer.
+/// NVML session (`auto_manage::nvml`: a driver that does not answer reads as
+/// unknown, and is the driver watch's to judge). Its target is asked until the
+/// driver answers once, N/A included: `target` holds the answer.
 fn read_card(target: &mut Option<Option<f32>>) -> Option<CardHeat> {
-    use crate::model::auto_manage::vram::nvidia_smi;
-    // `clocks_throttle_reasons` is the older spelling, which current drivers
-    // still take (621.01 answers both, 2026-11-11).
-    let fields = |prefix: &str| {
-        format!(
-            "--query-gpu=temperature.gpu,{prefix}.sw_thermal_slowdown,{prefix}.hw_thermal_slowdown"
-        )
-    };
-    let out = nvidia_smi(&[
-        &fields("clocks_event_reasons"),
-        "--format=csv,noheader,nounits",
-    ])
-    .or_else(|| {
-        nvidia_smi(&[
-            &fields("clocks_throttle_reasons"),
-            "--format=csv,noheader,nounits",
-        ])
-    })?;
+    use crate::model::auto_manage::nvml;
+    let cards = nvml::card_temperatures()?;
     if target.is_none() {
-        *target = nvidia_smi(&["-q", "-d", "TEMPERATURE"]).map(|q| parse_card_target(&q));
+        *target = nvml::target_temperature_c();
     }
-    parse_card_heat(&out, target.flatten())
+    hottest(&cards, target.flatten())
 }
 
-/// `temperature, sw_thermal, hw_thermal` per card, one line each: the hottest
-/// card's temperature, and a flag set if any card's is.
-pub(crate) fn parse_card_heat(out: &str, target_c: Option<f32>) -> Option<CardHeat> {
-    let mut heat: Option<CardHeat> = None;
-    for line in out.lines() {
-        let f: Vec<&str> = line.split(',').map(str::trim).collect();
-        if f.len() < 3 {
-            continue;
-        }
-        let Ok(temp_c) = f[0].parse::<f32>() else {
-            continue;
-        };
-        if !(0.0..150.0).contains(&temp_c) {
-            continue;
-        }
-        let active = |s: &str| s.eq_ignore_ascii_case("active");
-        let card = CardHeat {
-            temp_c,
-            driver_cooling: active(f[1]),
-            hardware_protecting: active(f[2]),
-            target_c,
-        };
-        heat = Some(match heat {
-            None => card,
+/// The hottest card's temperature, and a flag set if any card's is.
+fn hottest(
+    cards: &[crate::model::auto_manage::nvml::CardTemperature],
+    target_c: Option<f32>,
+) -> Option<CardHeat> {
+    cards.iter().fold(None, |heat: Option<CardHeat>, card| {
+        Some(match heat {
+            None => CardHeat {
+                temp_c: card.temp_c,
+                driver_cooling: card.driver_cooling,
+                hardware_protecting: card.hardware_protecting,
+                target_c,
+            },
             Some(h) => CardHeat {
                 temp_c: h.temp_c.max(card.temp_c),
                 driver_cooling: h.driver_cooling || card.driver_cooling,
                 hardware_protecting: h.hardware_protecting || card.hardware_protecting,
                 target_c,
             },
-        });
-    }
-    heat
-}
-
-/// "GPU Target Temperature Specification : 87 C" from `nvidia-smi -q -d
-/// TEMPERATURE` — the lowest if several cards name one; `None` for N/A.
-pub(crate) fn parse_card_target(out: &str) -> Option<f32> {
-    out.lines()
-        .filter(|l| l.contains("Target Temperature"))
-        .filter_map(|l| l.split(':').nth(1))
-        .filter_map(|v| v.trim().trim_end_matches('C').trim().parse::<f32>().ok())
-        .filter(|t| (40.0..120.0).contains(t))
-        .reduce(f32::min)
+        })
+    })
 }
 
 /// `SWARMLLM_FAULT_HOST_HEAT=card|protecting|processor|driver|cool`: a reading
@@ -1177,32 +1138,29 @@ mod tests {
         assert_eq!(t.observe(&r, t0 + secs(120)), Some(HeatCause::Card));
     }
 
-    /// The fields as this laptop's driver prints them (621.01, RTX 3070 Laptop,
-    /// read 2026-11-11), and two cards on one line each.
+    /// The hottest card's temperature, any card's flags, and the target as the
+    /// driver named it.
     #[test]
-    fn nvidia_smis_answers_are_read() {
+    fn the_hottest_card_and_any_cards_flags_are_read() {
+        use crate::model::auto_manage::nvml::CardTemperature;
+        let card = |temp_c, driver_cooling| CardTemperature {
+            temp_c,
+            driver_cooling,
+            hardware_protecting: false,
+        };
         assert_eq!(
-            parse_card_heat("52.60, Not Active, Not Active\n", Some(87.0)),
+            hottest(&[card(52.0, false)], Some(87.0)),
             Some(CardHeat {
-                temp_c: 52.6,
+                temp_c: 52.0,
                 driver_cooling: false,
                 hardware_protecting: false,
                 target_c: Some(87.0),
             })
         );
-        let two = parse_card_heat("61, Not Active, Not Active\n87, Active, Not Active\n", None)
-            .expect("two cards");
+        let two = hottest(&[card(61.0, false), card(87.0, true)], None).expect("two cards");
         assert_eq!(two.temp_c, 87.0);
         assert!(two.driver_cooling && !two.hardware_protecting);
-        assert_eq!(parse_card_heat("[N/A], [N/A], [N/A]\n", None), None);
-        assert_eq!(parse_card_heat("", None), None);
-
-        let q = "    Temperature\n        GPU Current Temp                               : 52.60 C\n        GPU Current Max Temp                           : N/A\n        GPU Current T.Limit Temp                       : N/A\n        GPU Shutdown Temp                              : 101 C\n        GPU Slowdown Temp                              : 98 C\n        GPU Max Operating Temp                         : 105 C\n        GPU Target Temperature Specification           : 87 C\n        Memory Current Temp                            : N/A\n";
-        assert_eq!(parse_card_target(q), Some(87.0));
-        assert_eq!(
-            parse_card_target("        GPU Target Temperature Specification : N/A\n"),
-            None
-        );
+        assert_eq!(hottest(&[], None), None);
     }
 
     /// The control for the tests above: a tracker that held back on the first

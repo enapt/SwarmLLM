@@ -6774,7 +6774,8 @@ And the sensors themselves: only `nvidia-smi` was bounded, and the refresh held
 its one-at-a-time flag while it waited for sysinfo's WMI or PDH, so a call that
 never returned froze the guard in whatever state it was in — a stuck driver
 unseen, a held computer held. `read_sensors_within` waits `SENSOR_READ_LIMIT`
-(40 s: `nvidia-smi`'s three bounded calls at 10 s each, with room) and reads
+(40 s: `nvidia-smi`'s three bounded calls at 10 s each, with room; the card's
+readings are two NVML calls since #490) and reads
 unknown past it; while that read is still out, the next round asks no sensor
 (`sensors_out`, one stuck reader at a time, as `BoundedCommand` keeps one stuck
 copy) and reads only the driver watch, which asks nothing. Prior art: kubelet's

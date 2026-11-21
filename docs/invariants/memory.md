@@ -4970,7 +4970,24 @@ models: TinyLlama 636 vs 638 MiB, Mistral-7B 4170 vs 4170 MiB. Test
 `a_models_weights_are_its_headers_whatever_this_node_holds` (none, part, and a segment's share of
 the WHOLE model; red with a disk sum restored).
 
-## nvidia-smi is asked through one bounded helper (2026-10-05)
+## The card is read through one NVML session, bounded (2026-10-05, 2026-11-21)
+
+**Why one session (2026-11-21, FUTURE_WORK #490).** Under WSL2 every `nvidia-smi` the node started
+left ~15 KB of Windows' non-paged kernel pool behind: 5,000 launches in 222 s grew it 534.3 → 609.4
+MB and it stayed, while the same readings through ONE NVML session in one process (5,000 each in
+0.4 s) moved it +0.2 MB. The live node started ~9,500 a day (the card budget, the health monitor,
+the split loader, the 30 s heat read) — ~140 MB a day. So `auto_manage::nvml` loads NVIDIA's library
+at runtime (`libnvidia-ml.so.1`, WSL's `/usr/lib/wsl/lib/`, Windows' `nvml.dll` from System32 then
+`NVSMI` — Ollama's search; the `nvml-wrapper` crate was left because its memory call has no v1
+fallback), calls `nvmlInit` once and keeps it, and serves every reading `nvidia-smi` gave. Each
+field was checked against `nvidia-smi` on this card (driver 621.24): `memory.used` is `_v2`'s
+`used` (v1's counts the driver's 174 MB reserve), the target temperature the lowest of thresholds
+`ACOUSTIC_CURR`/`GPS_CURR` within 40-120 °C, the cooling flags the clocks-event reasons 0x20/0x40.
+⚠ An NVML call that answers NOT_SUPPORTED leaves its out-parameter as the last call wrote it
+(`ACOUSTIC_CURR` under WSL2 kept the previous card's 45), so a field is read only on `NVML_SUCCESS`
+(test `a_field_is_read_only_where_its_call_answered`). NVML opens no CUDA context, so the daemon
+still holds none. The rules below are `nvidia-smi`'s, kept: the history names it.
+
 
 **What happened.** At 18:52:06 UTC on 2026-10-04 a worker died of an illegal memory access and
 the graphics driver began resetting the card ("UCodeReset TDR"); the reset finished at 19:06:16.
@@ -4983,24 +5000,29 @@ threads: the capability broadcast every cycle, admission, the dashboard's stats.
 each one parks its thread for the reset's length, and each new call starts one more process
 waiting on a driver that is trying to recover (FUTURE_WORK #220).
 
-**The rule.** `vram::nvidia_smi` runs it through a `BoundedCommand`: at most 10 s (it answers in
-~90 ms; the bound is generous on purpose), then `None` — the "unknown" every caller already handles
+**The rule.** A reading waits at most 10 s (`nvml::READING_TIMEOUT`; `nvidia-smi` answered in
+~90 ms, NVML in microseconds — the bound is generous on purpose), then `None` — the "unknown" every caller already handles
 (admission charges no other program; the broadcast advertises 0 room; the dashboard shows nothing).
-The timed-out process is killed and KEPT: a process blocked in the driver dies only when the driver
-answers, so while it is still alive the next reading is `None` at once instead of a second process
-queued on the same driver, and when it has gone readings resume ("answers again after a stall",
-with the stall's length — which dates the reset in the node's own log). The lock is held for the
-whole run, so two never overlap. Test: `a_reading_that_does_not_answer_is_unknown_and_never_asked_twice_at_once`;
-guard: `nvidia_smi_is_asked_only_through_the_bounded_helper` (green on the tree, red on a planted
-bare spawn). The launcher (`src/bin/launcher.rs`) is exempt: it asks once, before the daemon
-exists.
+A call that outlived the bound is never followed by a second: while it is still in the driver the
+next reading is `None` at once, and when it returns readings resume ("the graphics card answers
+again after a stall", with the stall's length — which dates the reset in the node's own log). Every
+call runs on the session's one thread, so two never overlap, and the session is never shut down
+under a stuck call (NVML has no timeout, and a call stuck in the driver cannot be cancelled). Test:
+`a_reading_that_outlives_its_bound_makes_the_next_unknown_at_once`; guard:
+`the_card_is_read_through_one_nvml_session` (green on the tree, red on a planted `nvidia-smi` or a
+second load of the library). The launcher (`src/bin/launcher.rs`) is exempt: it asks once, before
+the daemon exists. Until #490 this was `vram::nvidia_smi`, a `BoundedCommand` that killed the
+timed-out process and KEPT it (a process blocked in the driver dies only when the driver answers);
+`BoundedCommand` still runs `busctl` and `powershell` that way (test
+`a_reading_that_does_not_answer_is_unknown_and_never_asked_twice_at_once`).
 
 **Placement while the driver is not answering (v0.3.230, FUTURE_WORK #220 (2)).** A worker started
 on the card during a reset blocks in its context creation for as long as the reset takes, so
 `vram::graphics_driver_not_answering` puts new workers on the processor
 (`CpuReason::DriverNotAnswering`; promotion moves them back). It asks
-`BoundedCommand::still_not_answering` with `try_lock` — a placement question never queues behind
-the driver it is asking about — and only once the stuck copy has been stuck for
+`nvml::still_not_answering`, which reads the reader's state and never starts a reading or the
+session — a placement question never queues behind the driver it is asking about — and only once
+the stuck call has been stuck for
 `DRIVER_NOT_ANSWERING_AFTER` (60 s). **One slow answer is not a reset** (gotcha #802): the first
 draft of v0.3.230 acted on the 10 s bound alone, and in its gate (Windows up 151 h) the node's
 `nvidia-smi` outlived it while a 9B worker handed back 5.3 GB; 34 ms later Mistral-7B — which fits
@@ -5009,8 +5031,8 @@ had served it. The driver answered within ~15 s (the safety kit's own readings).
 a hung card after `TdrDelay` (2 s) and gives threads `TdrDdiDelay` (5 s) to leave the driver
 (Microsoft, "TDR registry keys"); a real reset that morning held `nvidia-smi` 4-8 s, while the one
 the rule exists for (2026-10-04) held it 14 minutes — so the threshold separates them, like a
-health probe's failure threshold. Tests: `a_driver_that_has_not_answered_is_reported_without_waiting_for_it`,
-`a_driver_that_answers_late_is_not_reported_as_not_answering` (red with the threshold ignored).
+health probe's failure threshold. Test: `a_reading_that_outlives_its_bound_makes_the_next_unknown_at_once`
+(its minute half: not stuck at 0 s past the bound's start, stuck past 61 s).
 
 **Never on a runtime worker (2026-10-12, FUTURE_WORK #244).** `BoundedCommand::run` waited by
 polling the child with a 5 ms `std::thread::sleep` — on whatever thread called it, and the
@@ -5023,12 +5045,12 @@ unread for 2.5-4 s, and the release gate's 12h row read 13-15 tok/s where it rea
 sampling every thread of the stalled node (`examples/` has no copy; the method is
 `docs/DIAGNOSTICS.md` § "Which thread is a stalled node sitting in") — the node's runtime worker
 was in `clock_nanosleep` with an `nvidia-smi` child alive, not in the HF watcher that the stall's
-timing first pointed at (a coincidence). `run` now waits through
+timing first pointed at (a coincidence). A reading now waits through
 `executor::without_starving_the_runtime` (`block_in_place` on a multi-thread runtime, so the
-worker's other tasks — its LIFO slot among them — move to a fresh thread). A/B inside one binary:
-`SWARMLLM_NVIDIA_SMI_ON_RUNTIME=1` restores the old wait. Test:
+worker's other tasks — its LIFO slot among them — move to a fresh thread); NVML's session keeps the
+rule. Tests: `a_slow_card_reading_does_not_hold_the_runtime_worker`,
 `a_slow_bounded_command_does_not_hold_the_runtime_worker` (a 10 ms ticker on a one-worker runtime;
-largest gap 506 ms without the fix).
+largest gap 506 ms without the fix). Its A/B switch, `SWARMLLM_NVIDIA_SMI_ON_RUNTIME`, went with #490.
 
 ## A card full of our own model is not pressure (2026-10-12, field report #035)
 
@@ -6491,7 +6513,8 @@ Detail the rules file no longer carries, kept here so the evidence stays greppab
 ### A cache is charged to the memory it lives in
 - A 14B's admission evicted 991 MB for a card that got 408 back, then refused (#1105): `bytes_in(SnapshotHome::BesideLive)` sums both memories of a split.
 
-### nvidia-smi is asked through one bounded helper
+### The card is read through one NVML session, bounded
+- Each `nvidia-smi` under WSL2 left ~15 KB of Windows' non-paged pool behind — ~140 MB a day from the node's own readings (#490).
 - A bare `Command::new("nvidia-smi")` waits as long as the driver does — 14 min during one card reset. 2-6 s of `nvidia-smi` parked the network manager in a Tokio worker's unstealable LIFO slot (#244).
 
 ### A conversation that is over gives its room to one that is not

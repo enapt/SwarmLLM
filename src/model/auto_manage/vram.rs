@@ -1251,19 +1251,8 @@ pub fn global_pool_vram_mb(shared: &SharedState) -> u64 {
     total
 }
 
-/// The longest `nvidia-smi` may take before its reading counts as unknown.
-///
-/// It answers in ~90 ms here. It does not answer at all while the graphics
-/// driver is resetting the card (a TDR), and on 2026-10-04 one reset took 14
-/// minutes: a node's re-plan sat in GPU admission (`compute_vram_budget`) for
-/// all of it, and every other caller — the capability broadcast, the dashboard
-/// — would have queued behind the driver the same way (FUTURE_WORK #220). A
-/// bound turns "the driver is busy" into the `None` every caller already
-/// treats as unknown.
-const NVIDIA_SMI_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-
-/// How long an `nvidia-smi` must have been stuck before placement treats the
-/// driver as not answering ([`graphics_driver_not_answering`]). One slow answer
+/// How long a reading of the card must have been stuck before placement
+/// treats the driver as not answering ([`graphics_driver_not_answering`]). One slow answer
 /// is not a reset: in the v0.3.230 gate (Windows up 151 h, gotcha #802) the
 /// node's call outlived its 10 s bound while a 9B model's worker handed back
 /// 5.3 GB, the driver answered again within seconds, and the next model — one
@@ -1274,7 +1263,7 @@ const NVIDIA_SMI_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1
 /// exists for (2026-10-04) 14 minutes. Like a health probe's failure threshold,
 /// the condition must persist before it is acted on: a worker that meets a
 /// short stall waits it out on the card.
-#[cfg(any(all(test, unix), feature = "candle-cuda"))]
+#[cfg(feature = "candle-cuda")]
 const DRIVER_NOT_ANSWERING_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// A program asked for a reading, with a bound on how long the asker waits and
@@ -1283,8 +1272,8 @@ pub(crate) struct BoundedCommand {
     program: &'static str,
     timeout: std::time::Duration,
     /// The copy that outlived `timeout`, and when it started, while it still
-    /// runs. While it does, whatever it asks is still not answering (for
-    /// `nvidia-smi`: the driver is still resetting); starting another would only
+    /// runs. While it does, whatever it asks is still not answering;
+    /// starting another would only
     /// add one more process waiting on it, so the next reading is `None` at
     /// once. The lock is held for the whole run, so calls never overlap.
     unanswered: std::sync::Mutex<Option<(std::process::Child, std::time::Instant)>>,
@@ -1297,30 +1286,6 @@ impl BoundedCommand {
             timeout,
             unanswered: std::sync::Mutex::new(None),
         }
-    }
-
-    /// Is a copy that outlived the bound still running, started at least
-    /// `for_at_least` ago — for `nvidia-smi`, has the graphics driver not
-    /// answered for that long?
-    ///
-    /// `false` when it cannot tell without waiting: [`Self::run`] holds the
-    /// lock for its whole run (up to the bound), and a placement question must
-    /// not queue behind the very driver it is asking about.
-    ///
-    /// Its test spawns `sleep`, so it is `unix`-only — and so is the gate: a
-    /// Windows test build without `candle-cuda` has no caller (Windows CI's
-    /// clippy failed on exactly that).
-    #[cfg(any(all(test, unix), feature = "candle-cuda"))]
-    pub(crate) fn still_not_answering(&self, for_at_least: std::time::Duration) -> bool {
-        let Ok(mut unanswered) = self.unanswered.try_lock() else {
-            return false;
-        };
-        matches!(
-            unanswered
-                .as_mut()
-                .map(|(child, since)| (child.try_wait(), since.elapsed() >= for_at_least)),
-            Some((Ok(None), true))
-        )
     }
 
     /// What the program printed — `None` when it is not installed, fails, does
@@ -1338,12 +1303,9 @@ impl BoundedCommand {
     /// for 2.4-4.1 s, matched to the millisecond by an `nvidia-smi` child's life
     /// and one worker thread's `clock_nanosleep` (2026-10-12,
     /// `thread_sample2.py`). The lock is inside it too: a second caller waits
-    /// for the first's whole run. `SWARMLLM_NVIDIA_SMI_ON_RUNTIME=1` = the old
-    /// behaviour, for an A/B.
+    /// for the first's whole run. (The card is read through `nvml` since
+    /// #490, under the same rule.)
     pub(crate) fn run(&self, args: &[&str]) -> Option<String> {
-        if waits_on_the_runtime_worker() {
-            return self.run_here(args);
-        }
         crate::inference::executor::without_starving_the_runtime(|| self.run_here(args))
     }
 
@@ -1386,8 +1348,7 @@ impl BoundedCommand {
                     tracing::warn!(
                         program = self.program,
                         timeout_secs = self.timeout.as_secs(),
-                        "did not answer — for nvidia-smi, the graphics driver may be resetting \
-                         the card; its readings count as unknown until it answers again"
+                        "did not answer; its readings count as unknown until it answers again"
                     );
                     *unanswered = Some((child, started));
                     return None;
@@ -1398,26 +1359,9 @@ impl BoundedCommand {
     }
 }
 
-/// `SWARMLLM_NVIDIA_SMI_ON_RUNTIME=1`: [`BoundedCommand::run`] waits on the
-/// calling runtime worker, as before #244, for an A/B inside one binary.
-fn waits_on_the_runtime_worker() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("SWARMLLM_NVIDIA_SMI_ON_RUNTIME").as_deref() == Ok("1"))
-}
-
-static NVIDIA_SMI: BoundedCommand = BoundedCommand::new("nvidia-smi", NVIDIA_SMI_TIMEOUT);
-
-/// Run `nvidia-smi` with `args` and return what it printed, or `None` (see
-/// [`BoundedCommand::run`]). **The one way this crate asks `nvidia-smi`
-/// anything**: a bare `Command::new` blocks its thread for as long as the
-/// driver does. Guard: `nvidia_smi_is_asked_only_through_the_bounded_helper`.
-pub(crate) fn nvidia_smi(args: &[&str]) -> Option<String> {
-    NVIDIA_SMI.run(args)
-}
-
-/// Is the graphics driver not answering right now — an `nvidia-smi` that
-/// outlived [`NVIDIA_SMI_TIMEOUT`] still waiting on it, and for at least
-/// [`DRIVER_NOT_ANSWERING_AFTER`]? While it is, a worker started on the card
+/// Is the graphics driver not answering right now — a reading of the card
+/// that outlived its bound (`nvml::READING_TIMEOUT`) still waiting on it, and
+/// for at least [`DRIVER_NOT_ANSWERING_AFTER`]? While it is, a worker started on the card
 /// blocks in its own context creation, for as long as a reset takes (14 minutes
 /// on 2026-10-04, FUTURE_WORK #220), so the pool puts new workers on the
 /// processor (`CpuReason::DriverNotAnswering`). A shorter stall is waited out
@@ -1425,14 +1369,12 @@ pub(crate) fn nvidia_smi(args: &[&str]) -> Option<String> {
 /// never asks.
 #[cfg(feature = "candle-cuda")]
 pub(crate) fn graphics_driver_not_answering() -> bool {
-    fault_driver_not_answering() || NVIDIA_SMI.still_not_answering(DRIVER_NOT_ANSWERING_AFTER)
+    fault_driver_not_answering() || super::nvml::still_not_answering(DRIVER_NOT_ANSWERING_AFTER)
 }
 
 /// `SWARMLLM_FAULT_DRIVER_NOT_ANSWERING=1`: report the graphics driver as not
-/// answering, as it is mid-reset. A reset cannot be caused on demand, and a
-/// stuck `nvidia-smi` cannot be faked: the real one blocked in the driver
-/// survives SIGKILL, which is what [`BoundedCommand`] detects, while any
-/// stand-in dies on the kill. Unset in production; read once.
+/// answering, as it is mid-reset. A reset cannot be caused on demand, nor a
+/// reading stuck in the driver. Unset in production; read once.
 #[cfg(feature = "candle-cuda")]
 fn fault_driver_not_answering() -> bool {
     use std::sync::OnceLock;
@@ -1442,117 +1384,79 @@ fn fault_driver_not_answering() -> bool {
     })
 }
 
-/// Get local VRAM in MB, with nvidia-smi fallback when gpu_info is None.
+/// Local VRAM in MB: the card the daemon described at startup, else the
+/// driver's own reading.
 pub fn local_vram_mb(shared: &SharedState) -> u64 {
     if let Some(ref gpu) = shared.gpu_info {
         return gpu.vram_total_mb;
     }
-    // Fallback: detect via nvidia-smi
-    detect_vram_nvidia_smi().unwrap_or(0)
+    detect_gpu().1.unwrap_or(0)
 }
 
-/// Fallback GPU VRAM detection via nvidia-smi.
-fn detect_vram_nvidia_smi() -> Option<u64> {
-    detect_gpu_nvidia_smi().1
-}
-
-/// Detect GPU name and total VRAM via nvidia-smi.
-///
-/// A view over [`detect_gpu_nvidia_smi_with_used`] that drops the live usage,
-/// for the callers that only need to know what card is present.
-pub(crate) fn detect_gpu_nvidia_smi() -> (Option<String>, Option<u64>) {
-    let (name, total, _used) = detect_gpu_nvidia_smi_with_used();
+/// The first card's name and total memory, for the callers that only need to
+/// know what card is present (a view over [`detect_gpu_with_used`]).
+pub(crate) fn detect_gpu() -> (Option<String>, Option<u64>) {
+    let (name, total, _used) = detect_gpu_with_used();
     (name, total)
 }
 
-/// Name, total VRAM and live used VRAM from **one** `nvidia-smi` invocation.
+/// The first card's name, total and live used memory in MB, from ONE reading
+/// through the NVML session (`nvml`, #490).
 ///
-/// Exists because `/api/admin/stats`'s no-card branch asked for the name and
-/// total with one call and the usage with another — two process spawns per
-/// dashboard poll, on a path that #417 had already cut from 273 ms to 6.1 ms by
-/// removing exactly this kind of waste. It is also more correct: two separate
-/// invocations sample at different instants, which is the same reason
-/// [`query_gpu_vram_free_mb`] combines its pair rather than subtracting two
-/// racing readings.
+/// One reading rather than two: `/api/admin/stats`'s no-card branch once asked
+/// for the name and total with one `nvidia-smi` and the usage with another —
+/// two process spawns per dashboard poll, on a path #417 had cut from 273 ms to
+/// 6.1 ms — and two readings sample different instants, which is why
+/// [`query_gpu_vram_free_mb`] reads its pair together too.
 ///
-/// Only reached on a machine that has a card but is running a build without
-/// CUDA, so `gpu_info` is `None` while `nvidia-smi` still answers. On a machine
-/// with no card at all the spawn fails immediately and costs nothing.
-pub(crate) fn detect_gpu_nvidia_smi_with_used() -> (Option<String>, Option<u64>, Option<u64>) {
-    let output = nvidia_smi(&[
-        "--query-gpu=name,memory.total,memory.used",
-        "--format=csv,noheader,nounits",
-    ]);
-
-    match output {
-        Some(text) => {
-            let mut fields = text.trim().split(',');
-            let name = fields.next().map(|f| f.trim().to_string());
-            let total = fields.next().and_then(|f| f.trim().parse::<u64>().ok());
-            // Missing usage is not a failure of the whole reading: an older
-            // driver that does not report `memory.used` still tells us which
-            // card is present, and the caller treats None as unknown.
-            let used = fields.next().and_then(|f| f.trim().parse::<u64>().ok());
-            match name {
-                Some(n) if !n.is_empty() => (Some(n), total, used),
-                _ => (None, None, None),
-            }
-        }
+/// Only reached on a machine that has a card but runs a build without CUDA,
+/// so `gpu_info` is `None` while the driver still answers. Missing usage is not
+/// a failure of the whole reading: the name still says which card is present,
+/// and the caller treats `None` as unknown.
+pub(crate) fn detect_gpu_with_used() -> (Option<String>, Option<u64>, Option<u64>) {
+    match super::nvml::first_card_name_and_memory() {
+        Some((name, memory)) if !name.is_empty() => (
+            Some(name),
+            memory.map(|m| m.total_mb),
+            memory.map(|m| m.used_mb),
+        ),
         _ => (None, None, None),
     }
 }
 
-/// Detect the GPU's CUDA compute capability via nvidia-smi.
+/// The first card's CUDA compute capability.
 ///
-/// Separate from [`detect_gpu_nvidia_smi`] because it is asked exactly once, at
-/// startup, and only by CUDA builds — folding it into the VRAM query would make
-/// every caller of that pay for a field they do not use.
+/// Asked exactly once, at startup, and only by CUDA builds: a build with no
+/// CUDA kernels has no capability floor to compare against.
 ///
-/// `None` means "could not tell", never "too old": nvidia-smi missing, an NVML
-/// version mismatch, or an unrecognised format all land here, and
+/// `None` means "could not tell", never "too old": no library, an old driver
+/// or a reading that did not answer all land here, and
 /// [`crate::daemon::gpu_support`]'s callers must leave the GPU alone in that
-/// case. A working card sent to the CPU because a subprocess misbehaved would
-/// be a worse bug than the one the probe exists to prevent.
-///
-/// Only compiled for CUDA builds: a build with no CUDA kernels has no
-/// capability floor to compare against, so asking would be meaningless work.
+/// case. A working card sent to the processor because a reading misbehaved
+/// would be a worse bug than the one the probe exists to prevent.
 #[cfg(feature = "candle-cuda")]
 pub(crate) fn detect_gpu_compute_cap() -> Option<(u32, u32)> {
-    let text = nvidia_smi(&["--query-gpu=compute_cap", "--format=csv,noheader"])?;
-    // Multi-GPU hosts print one line per card. We only ever bind device 0.
-    crate::daemon::gpu_support::parse_compute_cap(text.lines().next()?)
+    super::nvml::first_card_compute_capability()
 }
 
-/// Query live GPU VRAM usage in MB via nvidia-smi.
-///
-/// Called on each auto-manage tick (~5 min) for accurate VRAM pressure.
-/// Returns None if nvidia-smi is unavailable or fails.
+/// The first card's memory in use, in MB: `nvidia-smi`'s `memory.used`
+/// (NVML's `_v2` figure). `None` when the driver cannot say.
 pub(crate) fn query_gpu_vram_used() -> Option<u64> {
-    let text = nvidia_smi(&["--query-gpu=memory.used", "--format=csv,noheader,nounits"])?;
-    text.trim().parse::<u64>().ok()
+    super::nvml::first_card_memory().map(|m| m.used_mb)
 }
 
-/// Query live free GPU VRAM in MB via a single `nvidia-smi` call.
+/// The first card's free memory in MB: total less used, from one reading, so
+/// it accounts for everything already resident — other processes, and any
+/// model this daemon already loaded. One reading because two would sample
+/// different instants, and subtracting two racing samples can go negative.
+/// (The driver's own reserve — 174 MB of 8 GB here — is not taken off, as it
+/// was not when `nvidia-smi` gave these figures; FUTURE_WORK #490.)
 ///
-/// `memory.total - memory.used`, so it accounts for everything already
-/// resident — other processes, and any model this daemon already loaded.
-/// One combined query rather than [`detect_gpu_nvidia_smi`] +
-/// [`query_gpu_vram_used`] because the two would be sampled at different
-/// instants, and the subtraction of two racing samples can go negative.
-///
-/// Called once per model load by the split loader to size the KV cache
-/// (`inference::split::kv_budget`). Returns None when nvidia-smi is
-/// unavailable, which the caller must treat as "unknown", never as "zero".
+/// Read by the card budget (`compute_vram_budget`), the capability broadcast
+/// and the split loader. `None` when the driver cannot say, which every caller
+/// must treat as "unknown", never as "zero".
 pub(crate) fn query_gpu_vram_free_mb() -> Option<u64> {
-    let text = nvidia_smi(&[
-        "--query-gpu=memory.total,memory.used",
-        "--format=csv,noheader,nounits",
-    ])?;
-    let line = text.trim().lines().next()?;
-    let (total, used) = line.split_once(',')?;
-    let total = total.trim().parse::<u64>().ok()?;
-    let used = used.trim().parse::<u64>().ok()?;
-    Some(total.saturating_sub(used))
+    super::nvml::first_card_memory().map(|m| m.total_mb.saturating_sub(m.used_mb))
 }
 
 /// Estimate VRAM for a segment (layer range) by scaling the full-model estimate
@@ -2003,73 +1907,6 @@ mod tests {
             largest_gap < Duration::from_millis(250),
             "the ticker waited {largest_gap:?} behind a 0.5 s command"
         );
-    }
-
-    /// "Is the driver still not answering?" is true exactly while a copy that
-    /// outlived its bound still runs — what puts new workers on the processor
-    /// during a card reset (`CpuReason::DriverNotAnswering`, #220) — and never
-    /// waits: while a run holds the lock it answers no rather than queue.
-    #[cfg(unix)]
-    #[test]
-    fn a_driver_that_has_not_answered_is_reported_without_waiting_for_it() {
-        use std::time::{Duration, Instant};
-        let any_age = Duration::ZERO;
-        let sleeper = BoundedCommand::new("sleep", Duration::from_millis(200));
-        assert!(
-            !sleeper.still_not_answering(any_age),
-            "nothing has been asked"
-        );
-
-        let still_running = std::process::Command::new("sleep")
-            .arg("30")
-            .spawn()
-            .unwrap();
-        *sleeper.unanswered.lock().unwrap() = Some((still_running, Instant::now()));
-        assert!(sleeper.still_not_answering(any_age));
-
-        // A run in progress holds the lock: no answer rather than a wait.
-        let held = sleeper.unanswered.lock().unwrap();
-        let asked = Instant::now();
-        assert!(!sleeper.still_not_answering(any_age));
-        assert!(asked.elapsed() < Duration::from_millis(50));
-        drop(held);
-
-        let (mut stuck, _) = sleeper.unanswered.lock().unwrap().take().unwrap();
-        stuck.kill().unwrap();
-        stuck.wait().unwrap();
-        *sleeper.unanswered.lock().unwrap() = Some((stuck, Instant::now()));
-        assert!(!sleeper.still_not_answering(any_age), "it has gone");
-    }
-
-    /// One slow answer is not a reset (the v0.3.230 gate, gotcha #802): a copy
-    /// stuck past its bound counts as the driver not answering — and sends new
-    /// workers to the processor — only once it has been stuck for
-    /// `DRIVER_NOT_ANSWERING_AFTER`. Before that, the next worker waits the
-    /// stall out on the card.
-    #[cfg(unix)]
-    #[test]
-    fn a_driver_that_answers_late_is_not_reported_as_not_answering() {
-        use std::time::{Duration, Instant};
-        let sleeper = BoundedCommand::new("sleep", Duration::from_millis(200));
-        let still_running = std::process::Command::new("sleep")
-            .arg("30")
-            .spawn()
-            .unwrap();
-        *sleeper.unanswered.lock().unwrap() = Some((still_running, Instant::now()));
-        assert!(
-            !sleeper.still_not_answering(DRIVER_NOT_ANSWERING_AFTER),
-            "stuck for a moment is a slow answer, not a reset"
-        );
-
-        let stuck_since = Instant::now()
-            .checked_sub(DRIVER_NOT_ANSWERING_AFTER + Duration::from_secs(1))
-            .expect("the monotonic clock has run longer than a minute");
-        sleeper.unanswered.lock().unwrap().as_mut().unwrap().1 = stuck_since;
-        assert!(sleeper.still_not_answering(DRIVER_NOT_ANSWERING_AFTER));
-
-        let (mut stuck, _) = sleeper.unanswered.lock().unwrap().take().unwrap();
-        stuck.kill().unwrap();
-        stuck.wait().unwrap();
     }
 
     /// A reading that does not come back within its bound is unknown, and the

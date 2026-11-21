@@ -5034,6 +5034,7 @@ dependencies = [
  "image",
  "interprocess",
  "libc",
+ "libloading 0.8.9",
  "libp2p",
  "libp2p-gossipsub",
  "libp2p-stream",

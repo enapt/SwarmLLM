@@ -192,8 +192,8 @@ model-worker: Model loaded ... device=Cuda(...) | device=Cpu  vram_after_load_mb
 
 `reason=` is one of `not_enough_vram`, `configured_cpu_only`,
 `gpu_too_old_for_this_build`, `gpu_stopped_responding` and (v0.3.230+)
-`driver_not_answering` — the graphics driver is resetting the card (an
-`nvidia-smi` blocked for 60 s or more; one slow answer past its 10 s bound is
+`driver_not_answering` — the graphics driver is resetting the card (a
+reading of the card blocked for 60 s or more; one slow answer past its 10 s bound is
 waited out on the card, gotcha #802); it clears when the driver answers and
 the model moves back by itself. (v0.3.236+) `cuda_libraries_missing` — a Linux
 CUDA build found the driver but not NVIDIA's CUDA libraries; the startup line
@@ -687,9 +687,9 @@ The diagnostics report has one line for it:
 heat: card 88 C (target 87 C), driver cooling it  processor 71 C  driver not answering: false  holding back work for peers: card_at_target  own work paused after each step: 100% of the step
 ```
 
-- `card` is the hottest NVIDIA card as `nvidia-smi` last answered (read every 30 s by the health
+- `card` is the hottest NVIDIA card as the driver last answered (NVML, read every 30 s by the health
   tick); `driver cooling it` = `clocks_event_reasons.sw_thermal_slowdown` is active, `hardware
-  protecting it` = `hw_thermal_slowdown`. `unknown` = no CUDA card, or `nvidia-smi` did not answer
+  protecting it` = `hw_thermal_slowdown`. `unknown` = no CUDA card, or the driver did not answer
   within its 10 s bound (a driver stuck a minute shows as `driver not answering: true` instead).
 - `processor` is `inference::thermal`'s package sensor — Linux only for now (#440 stage B).
 - `holding back work for peers` names the cause (`card_at_target`, `card_protecting`,
@@ -1069,8 +1069,9 @@ task queued on that worker waits too, and in tokio 1.53 the task it woke last si
 slot, which idle workers cannot steal. That was #244: `nvidia-smi` (2-6 s on WSL with the card
 busy) polled with `std::thread::sleep`, holding the network manager's replies 2.5-4 s.
 Blocking-pool threads carry the same name, so a sleeping `tokio-rt-worker` is a runtime worker
-only if its tid is among the first `worker_threads` the node started. A/B for that fix:
-`SWARMLLM_NVIDIA_SMI_ON_RUNTIME=1` restores the old wait.
+only if its tid is among the first `worker_threads` the node started. The node starts no
+`nvidia-smi` since #490 (one NVML session reads the card, under the same rule); the fix's A/B
+switch went with it.
 
 ## "Did the graphics card fault?" — read the driver's events by their data (WSL2 / Windows)
 

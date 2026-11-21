@@ -2257,7 +2257,7 @@ pub fn cpu_build_on_gpu_host() -> Option<String> {
     if !build_variant_suffix().is_empty() {
         return None;
     }
-    let (name, _vram) = crate::model::auto_manage::vram::detect_gpu_nvidia_smi();
+    let (name, _vram) = crate::model::auto_manage::vram::detect_gpu();
     name
 }
 

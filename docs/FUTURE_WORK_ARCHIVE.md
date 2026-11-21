@@ -16548,7 +16548,7 @@ Closed by the half KV cache on the card and the card's KV budget kept under a co
 is WRONG: per-thread sampling (`examples/thread_sample.py`) found the runtime worker in
 `clock_nanosleep`, polling an `nvidia-smi` child, for the length of the stall. The timing matched
 because the first capability broadcast's reading also lands ~30 s after start. The fix and its A/B
-are in `docs/invariants/memory.md` § "nvidia-smi is asked through one bounded helper" → "Never on a
+are in `docs/invariants/memory.md` § "The card is read through one NVML session, bounded" → "Never on a
 runtime worker". With the fix, the same call lived 20.9 s and returned "unknown" (→ #256), against
 2.4 s when the stall idled the card.
 

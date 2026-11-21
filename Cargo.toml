@@ -199,6 +199,10 @@ llama-cpp-2 = { version = "=0.1.157", optional = true }
 # Why not `dynamic-linking`? Requires import libs (*.lib / *.so) at link time
 # AND the matching DLLs at runtime — worst of both worlds for distribution.
 cudarc = { version = "0.19", features = ["dynamic-loading"], optional = true }
+# NVIDIA's management library (`libnvidia-ml.so.1` / `nvml.dll`), loaded at
+# runtime by `model::auto_manage::nvml` — a computer without it reads as having
+# no card (#490). Every build: a processor build still names the card it sees.
+libloading = "0.8"
 
 # Split inference (candle-based, layer-range execution)
 candle-core = { version = "0.10", default-features = false }
