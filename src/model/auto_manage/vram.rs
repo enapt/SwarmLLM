@@ -1267,7 +1267,10 @@ pub fn global_pool_vram_mb(shared: &SharedState) -> u64 {
 const DRIVER_NOT_ANSWERING_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// A program asked for a reading, with a bound on how long the asker waits and
-/// never two copies running at once.
+/// never two copies running at once. Its callers are the metered-connection
+/// readings (`daemon::metered`, Linux and Windows); the card is read through
+/// NVML since #490, so a macOS build has none.
+#[cfg(any(target_os = "linux", windows, test))]
 pub(crate) struct BoundedCommand {
     program: &'static str,
     timeout: std::time::Duration,
@@ -1279,6 +1282,7 @@ pub(crate) struct BoundedCommand {
     unanswered: std::sync::Mutex<Option<(std::process::Child, std::time::Instant)>>,
 }
 
+#[cfg(any(target_os = "linux", windows, test))]
 impl BoundedCommand {
     pub(crate) const fn new(program: &'static str, timeout: std::time::Duration) -> Self {
         Self {
