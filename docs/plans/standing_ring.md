@@ -474,7 +474,27 @@ no gain: 16.85-19.38, against 17.61-19.93 for the default.
 (§ 9: ~0.144 ms a token per ms of verdict delay) and with the drafter's misses. Code is already over the bar. The
 next prose lever this pair can test is **a stronger prose drafter**, priced the same way: its ranks on these replies
 (`replaydump.py`) and its card time per level. The open question is whether fewer misses pay for a slower level.
-**Next**: the 1.5B instruct drafter against the 14B.
+
+**Priced the same day: the 1.5B instruct drafter against the 0.5B on the 14B pair's own replies**
+(`gumbeldump_q14-rig-d15`, `drafter5.py`):
+
+- **Ranks, prose**:
+
+  | drafter | top word right | absent from top 8 | m(8, deep) |
+  |---|---|---|---|
+  | 0.5B | 0.600 | 0.103 | 0.241 |
+  | 1.5B | 0.691 | 0.047 | 0.166 |
+
+  On code the top word is right 0.881 → 0.906.
+- **Misses a prose reply in the model**: 18.5 → 7.0.
+- **Speed**: a 1.5B level costs 8.7 ms in the flow against the 0.5B's 5.3 (faster_than_local § 10, item 10's 11-01
+  read). Priced at that ×1.6 a call, with 0-6 of this card's layers handed to the far for its 1.6 GB, the model
+  reads **prose +4..+19% and code −6..+7%**. With only two replies the model swings with timing, and it underprices
+  a slower call (above). So this is a hypothesis the real pair must settle.
+- **History**: the 10-30 real-link arms were run before levels were graphs. The 1.5B then read prose 9.2-9.8 against
+  the 0.5B's 6.6-8.0.
+- **Next, on the real pair** (it needs AU): `real_link.sh` arms `flowhalf` (0.5B) against `flowq:DRAFTER=` the 1.5B,
+  and the 3B, ABBA. The live node holds both.
 
 ## Appendix — every concept raised
 

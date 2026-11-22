@@ -4490,8 +4490,10 @@ read prose m(8, deep) 0.221 (kill line 0.25) and code 0.08. Replayed through the
 match every arm's misses (14B pair prose 18.5 against 18-21, one-card loops 5.8-8 against 5-12). Speed comes within
 −12..+16%, and the tree's growth still caps tokens a forward at short loops (1.62 against 1.86 at 0 ms). Row policies
 priced at the pair's loop move prose by −5..+5%, and the sim underprices the few winners (more levels a call). Checked
-against the 11-15 arms, it has the right direction and a third to a half of the loss. **Next**: a stronger prose drafter
-(the 1.5B instruct) priced the same way — its ranks on these replies, its card time a level.
+against the 11-15 arms, it has the right direction and a third to a half of the loss. A stronger prose drafter priced
+the same way: the 1.5B instruct's prose m(8, deep) is 0.166 against 0.241, misses a reply fall from 18.5 to 7, and at
+its ×1.6 a call the model reads prose +4..+19%. **Next** (needs AU): a real-link A/B, `flowhalf` (0.5B) against `flowq`
+with the 1.5B and the 3B.
 
 Prior art: none taken as the design, by the owner's direction; the debate checked each idea against our own
 measured kills instead (lanes, twins, a drafter guild, verdict taps, scout-and-stitch: the plan's appendix), and
