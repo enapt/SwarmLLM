@@ -4460,7 +4460,7 @@ kill ladder).
 
 #### #492 — The standing ring: one reply faster than the same model run whole, on a short ring of cards
 
-`P1` · speed · **CONCEPT 2026-11-21; kill ladder steps 1 and 4 MEASURED — the verdict delay is the law's; a shorter
+`P1` · speed · **CONCEPT 2026-11-21 (its counters released in v0.3.305); kill ladder steps 1 and 4 MEASURED — the verdict delay is the law's; a shorter
 loop pays (1.54× on one card, 100 → 0 ms) but through rows kept, not fewer misses; step 3 (the schedule model) does not
 calibrate yet** · plan: `docs/plans/standing_ring.md`
 
@@ -8298,7 +8298,7 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-11-21, on main** (#439, #297)
+**Closed 2026-11-21, released in v0.3.305** (#439, #297)
 - #439 — `P3` — **The relay hint said "turn on UPnP" where a router found late refused the ports.** Fixed as the entry
   proposed: vendor/libp2p-upnp emits `Event::GatewayFound` where a search succeeds (upstream 0.5/0.6 emit nothing
   there), and `UpnpWatch::note_gateway_found` makes the earlier misses history and measures the refusal's quiet period
@@ -8338,7 +8338,7 @@ grep `^| N |`).
   `sampling_down_factor`). Evidence: `docs/invariants/inference.md` § "A card between a split's forwards keeps its
   clocks".
 
-**Closed 2026-11-20, on main** (#487, #485)
+**Closed 2026-11-20, released in v0.3.303** (#487, #485)
 - #487 — `P1` — **A card between a split's forwards dropped its clocks, and this side's forward ran 3 times slower.**
   Found profiling the 27B split's ~108 ms a round on this side (plan step 2b, "measure the two stages apart"): the
   worker's five-row forward of layers [0, 21) took 26 ms right after a slow one, then 49, 58, 65, 77, 88, 180 ms —
