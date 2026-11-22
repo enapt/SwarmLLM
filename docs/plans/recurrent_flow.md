@@ -1,7 +1,8 @@
 # A tree that flows through recurrent layers (Qwen 3.5 / 3.6 / 3.8) — plan, 2026-11-22
 
 Status: stages 1-4 BUILT (2026-11-22: the layer on the processor and on a card, the worker and the wire, the
-recurrent drafter's own growth, the coordinator's gates and walk, with tests). Stage 5 — the measurement that
+recurrent drafter's own growth, the coordinator's gates and walk, with tests) and RELEASED in v0.3.306 — every node on it
+reads the walk (feature bit 47); the computer driving a reply flows only with `SWARMLLM_RECURRENT_FLOW=1`. Stage 5 — the measurement that
 decides whether it stays on — is PLAN; until it runs, a recurrent split guesses in a flow only where a node HOLDS a
 flow drafter (nothing fetches or leaves room for one, § Stage 4 as built). Figures are MEASURED (our records), READ (a
 header or source) or DERIVED.
