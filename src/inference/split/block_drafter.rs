@@ -133,6 +133,17 @@ pub(crate) fn block_drafter_on() -> bool {
     *ON.get_or_init(|| std::env::var("SWARMLLM_BLOCK_DRAFTER").as_deref() != Ok("0"))
 }
 
+/// `SWARMLLM_DFLASH2_SELECTOR=0`: a DFlash 2 drafter guesses each row's
+/// likeliest word, as DFlash 1 does, instead of its selector's pick — the A/B
+/// that shows the selector (its codebooks read the right way round) keeps
+/// more guesses than the rows alone. Prior art: llama.cpp has no such switch
+/// (`common/speculative.cpp`: a file with `selector_top_k > 0` always walks
+/// the lattice), so this is our own measuring tool, never a setting.
+fn dflash2_selector_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SWARMLLM_DFLASH2_SELECTOR").as_deref() != Ok("0"))
+}
+
 /// A drafter its card/processor split's card has no room for goes to system
 /// memory ([`drafter_home`], #451) — ON since measured (2026-11-14, Qwen3.5-9B
 /// at 25 of 32 layers on an RTX 3070, 12 runs a prompt: code 30.4 against 20.9
@@ -366,6 +377,18 @@ impl Selector {
         ranked: &[Vec<(u32, f32)>],
         out: &Tensor,
     ) -> Result<Vec<u32>, SwarmError> {
+        // The walk chooses among a row's `top_k` likeliest words only, as
+        // llama.cpp's lattice does, however long the rows it is handed.
+        let trimmed: Vec<Vec<(u32, f32)>>;
+        let ranked = if ranked.iter().any(|r| r.len() > self.top_k) {
+            trimmed = ranked
+                .iter()
+                .map(|r| r[..r.len().min(self.top_k)].to_vec())
+                .collect();
+            &trimmed[..]
+        } else {
+            ranked
+        };
         let gates: Vec<Vec<f32>> = self
             .hidden
             .forward(out)
@@ -427,6 +450,27 @@ fn selector_walk(
         picks.push(before);
     }
     Ok(picks)
+}
+
+/// Each ranked row with the selector's pick moved first, the rest in their
+/// rank order, cut to `k`: what [`BlockDrafter::draft_ranked`] answers for a
+/// DFlash 2 drafter, so a row's first is the guess `draft` makes there and a
+/// tree's trunk (`draft_tree::GrownTree::from_marginals`, `rows[d][0]`) is
+/// the selector's chain. Measured 2026-11-22 before it: the prose trees'
+/// trunks were each row's likeliest word, a chain the selector never chose.
+fn with_picks_first(
+    mut rows: Vec<Vec<(u32, f32)>>,
+    picks: &[u32],
+    k: usize,
+) -> Vec<Vec<(u32, f32)>> {
+    for (row, &pick) in rows.iter_mut().zip(picks) {
+        if let Some(at) = row.iter().position(|w| w.0 == pick) {
+            let word = row.remove(at);
+            row.insert(0, word);
+        }
+        row.truncate(k);
+    }
+    rows
 }
 
 /// A loaded block drafter, attached to the whole model it guesses for.
@@ -1187,7 +1231,18 @@ impl BlockDrafter {
                 kv_reserve,
                 for_the_owner,
             )?;
-            self.ranked(target, &out, over, k)
+            // DFlash 2: a row's first is its selector's pick, as `draft`
+            // guesses, so a tree's trunk is the selector's chain. Prior art:
+            // llama.cpp drafts DFlash 2 as a chain only (`common/speculative.cpp`,
+            // one draft a sequence); the branches here are the marginals'.
+            match self.selector.as_ref().filter(|_| dflash2_selector_on()) {
+                Some(selector) => {
+                    let rows = self.ranked(target, &out, over, k.max(selector.top_k))?;
+                    let picks = selector.pick(anchor, &rows, &out)?;
+                    Ok(with_picks_first(rows, &picks, k))
+                }
+                None => self.ranked(target, &out, over, k),
+            }
         })
     }
 
@@ -1195,9 +1250,9 @@ impl BlockDrafter {
     /// first, with their log-probabilities: over the hot rows and the reply's
     /// own words where `over` names them and the head keeps hot rows (#425
     /// (b)), else every word, ranked on a card where the rows are. What a
-    /// tree is grown from ([`Self::draft_ranked`] — a DFlash 2 drafter's
-    /// marginals too: its selector picks a CHAIN) and what a DFlash 2
-    /// selector chooses among ([`Self::draft`]). A guess with nothing finite
+    /// tree is grown from ([`Self::draft_ranked`], a DFlash 2 drafter's with
+    /// its selector's picks put first: [`with_picks_first`]) and what a
+    /// DFlash 2 selector chooses among ([`Self::draft`]). A guess with nothing finite
     /// stops the drafter for the reply.
     fn ranked(
         &self,
@@ -1269,7 +1324,7 @@ impl BlockDrafter {
         )?;
         // DFlash 2: each guess is chosen among its row's likeliest words by
         // its selector, after the guess before it.
-        if let Some(selector) = &self.selector {
+        if let Some(selector) = self.selector.as_ref().filter(|_| dflash2_selector_on()) {
             let ranked = self.ranked(target, &out, over, selector.top_k)?;
             return selector.pick(anchor, &ranked, &out);
         }
@@ -2187,6 +2242,31 @@ mod tests {
             vec![3]
         );
         Ok(())
+    }
+
+    /// A DFlash 2 tree's trunk is the selector's chain: each row's pick goes
+    /// first, wherever it ranked (past the tree's `k` too), and the rest keep
+    /// their rank order, cut to `k` — so `GrownTree::from_marginals` takes
+    /// the picks whole and offers siblings best first after them.
+    #[test]
+    fn a_dflash2_trees_trunk_is_the_selectors_chain() {
+        let rows = vec![
+            vec![(10, -0.1), (11, -0.5), (12, -1.0), (13, -2.0)],
+            vec![(20, -0.2), (21, -0.3), (22, -0.9), (23, -3.0)],
+            vec![(30, -0.1), (31, -0.4), (32, -0.6), (33, -0.7)],
+        ];
+        let first = with_picks_first(rows.clone(), &[10, 22, 33], 3);
+        assert_eq!(
+            first,
+            vec![
+                vec![(10, -0.1), (11, -0.5), (12, -1.0)],
+                vec![(22, -0.9), (20, -0.2), (21, -0.3)],
+                vec![(33, -0.7), (30, -0.1), (31, -0.4)],
+            ]
+        );
+        let tree = crate::inference::draft_tree::GrownTree::from_marginals(&first, 3, 3);
+        assert_eq!(tree.tokens, vec![10, 22, 33]);
+        assert_eq!(tree.parents, vec![None, Some(0), Some(1)]);
     }
 
     /// A codebook row read on its own is the row the whole table

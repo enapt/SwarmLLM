@@ -5264,7 +5264,15 @@ convolutions over the block's rows, and a selector picks each guess from the dra
 it; both are ported from llama.cpp `4b1a27f`. The two 67.5 MB codebooks stay in system memory. Three tests check it
 against llama.cpp's index arithmetic, and each went red with its piece broken. **Prior art**: z-lab's release and
 llama.cpp's port (`build_dflash2_conv`, the selector's host walk) are the reference. Not checked against a llama.cpp
-run: the 27B is 17.4 GB whole and this machine holds 12 of its 32 parts.
+run: the 27B is 17.4 GB whole and this machine holds 12 of its 32 parts. **Measured on a real link the same day**
+(`real_link27e.sh`; this card [0..8) + [60..64) + head + the drafter; AU's RTX 3060 [8..60), part of it on its
+processor, 128 ms; 160 greedy tokens): the drafter loads and attaches on the card, drafts in 13-21 ms, and a
+whole-block judgement keeps 4.04 of 7 on code and 3.21 on prose (z-lab: 4.1-5.5 incl. the bonus). Selector off
+(`SWARMLLM_DFLASH2_SELECTOR=0`): 3.63 and 2.70. Prose trees took each row's likeliest word as the trunk, not the
+selector's chain, until `with_picks_first` (2.2-2.7 → 3.21). Speed on this route against the file's own guess
+head: code 5.37-5.85 against 5.17-5.38 tok/s, prose 4.83-4.95 against 4.88-5.05, since AU's processor checks
+rows almost linearly (gotcha #1110). **Left**: the all-card chain (here, AU [8..20), the US RTX 5080 [20..60)); US
+was held for heat through both sittings.
 
 **Stage 3 design (2026-11-08).** Prior art (read at vllm `d76fe93`, sglang `cbbc6b6`, llama.cpp `f477f79`):
 vLLM v1 runs DFlash/EAGLE-3 on the LAST pipeline rank (`v1/worker/gpu/pp_utils.py` `broadcast_drafts`); each rank

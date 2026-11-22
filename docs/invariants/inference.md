@@ -9535,6 +9535,29 @@ the 27B is 17.4 GB whole and this machine holds 12 of its 32 parts.
 **Prior art**: z-lab's DFlash 2 release and llama.cpp's port (`build_dflash2_conv`, the selector's host walk) are the
 reference. Nothing past them was needed for a port.
 
+**A tree's trunk is the selector's chain** (`with_picks_first`): `draft_ranked` answers each row with its selector
+pick first, the rest in rank order, as its contract says ("a row's first is the guess `draft` makes there") and
+`GrownTree::from_marginals` takes `rows[d][0]` as the trunk. llama.cpp drafts DFlash 2 as a chain only, so this
+is ours. Before it, a prose reply's tree (#437 (2)) followed each row's likeliest word, a chain the selector
+never chose. Test `a_dflash2_trees_trunk_is_the_selectors_chain` (red without the move).
+
+**Measured on a real link (2026-11-22, `~/swarmllm-gate/deep/fr/real_link27e.sh`, one CUDA binary).** Qwen3.8-27B
+Q4_K_M, "Start and finish on this computer": this RTX card [0..8) + [60..64) + the head + the drafter, AU's RTX 3060
+[8..60) (it holds about half of that on its card), 128 ms; 160 greedy tokens, a story and a CSV function.
+
+| arm (two runs each) | code tok/s | prose tok/s | kept a whole-block judgement, code / prose |
+|---|---|---|---|
+| drafter off (the file's guess head) | 5.38, 5.17 | 5.05, 4.88 | — |
+| DFlash 2, trees on the plain trunk | 5.39, 5.47 | 4.57, 4.75 | 4.07, 4.75 / 2.2, 2.7 |
+| DFlash 2, selector off (`SWARMLLM_DFLASH2_SELECTOR=0`) | 5.27, 5.32 | 4.68, 4.50 | 3.63 / 2.70 (pooled) |
+| DFlash 2 as built | 5.37, 5.85 | 4.83, 4.95 | 4.04 / 3.21 (pooled) |
+
+The drafter attached on the card (`mb=2270 head_mb=994 … attached=true`) and drafted in 13-21 ms. The selector adds
+0.4-0.5 kept tokens a block; read the wrong way round it would take some away. Speed barely moves on this route
+because AU checks a block's rows on its processor almost linearly (gotcha #1110). Replies part only at near ties
+("old sea glass" / "sea glass"), as the two drafter-off arms part from each other. Not measured yet: the all-card
+chain through the US RTX 5080 (parts 10-29), held for heat through both sittings.
+
 
 ## A card between a split's forwards keeps its clocks (2026-11-20, FUTURE_WORK #487)
 
