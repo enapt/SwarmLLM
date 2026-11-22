@@ -246,7 +246,10 @@ fn within_reach(drafter: &DrafterSize, target_size: u64, small_fraction: u64) ->
 
 /// `model` as a drafter for `target`, if it can be one: held WHOLE here, not
 /// the target, no recurrent state (a guess that is refused must be taken back,
-/// and a DeltaNet layer's state cannot be), and the target's vocabulary.
+/// and a DeltaNet layer's state can be only in a tree that flows —
+/// `SplitModel::grow_flow` reads one since 2026-11-22; the coordinator choosing
+/// such a drafter for a flow is `docs/plans/recurrent_flow.md` stage 4), and
+/// the target's vocabulary.
 fn spec_for(state: &SharedState, target: &ModelId, drafter: ModelId) -> Option<DrafterSpec> {
     if !state.has_complete_split_model(&drafter) {
         return None;

@@ -1355,7 +1355,10 @@ impl SplitModel {
     }
 
     /// The rows of a tree that flows not read yet, read in ONE tree forward;
-    /// the followers of the live ones join the queue.
+    /// the followers of the live ones join the queue. The walk's row goes with
+    /// the read: a recurrent drafter (Qwen 3.5) reads rows whose parents an
+    /// earlier read took from its checkpoint there (`qwen35::FlowRows`,
+    /// `docs/plans/recurrent_flow.md` stage 3 (b)); other layers ignore it.
     fn read_flow_rows(
         &mut self,
         kv: &KvCacheStore,
@@ -1372,7 +1375,8 @@ impl SplitModel {
         let from = session.read;
         let started = std::time::Instant::now();
         let input = self.tensor_from_ids(&flow.tokens()[from..])?;
-        let out = self.with_draft_tree(flow.tree().clone(), None, |m| {
+        let walk = Some(flow.at() as u32);
+        let out = self.with_draft_tree(flow.tree().clone(), walk, |m| {
             m.forward_verify_all_positions(&input, base + from, kv, request_id)
         })??;
         let coupled = noise.is_some();

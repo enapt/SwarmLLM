@@ -1,8 +1,8 @@
 # A tree that flows through recurrent layers (Qwen 3.5 / 3.6 / 3.8) — plan, 2026-11-22
 
-Status: stages 1-3 (a) BUILT (2026-11-22: the layer on the processor and on a card, the worker and the wire, with
-tests; no coordinator sends a walk until stage 4). Stage 3 (b) (the recurrent drafter's own growth) and stages 4-5
-are PLAN. Figures are MEASURED (our records), READ (a
+Status: stages 1-3 BUILT (2026-11-22: the layer on the processor and on a card, the worker and the wire, the
+recurrent drafter's own growth, with tests; no coordinator sends a walk or picks a recurrent drafter until stage 4).
+Stages 4-5 are PLAN. Figures are MEASURED (our records), READ (a
 header or source) or DERIVED.
 
 ## Why
@@ -218,6 +218,18 @@ settled:
   `CARD_NEAR_TIE_LOGITS`); the flow's first forward to the plain tree of its width at 1e-3 of the scale; and a
   chain read of a tree row must land past the bound. Measured: all 24 rows within the width's own 0.38, every
   decision alike; the rebase's forward (seven rows, the width of its whole read) 0.0 on every row.
+
+## Stage 3 (b) as built (2026-11-22): the drafter's own flow
+
+`SplitModel::read_flow_rows` — every read of a `FlowGrowth`'s rows — carries the walk (`FlowTree::at`), so a Qwen 3.5
+drafter reads rows whose parents an earlier call read from its checkpoint, as the target's segments do. Nothing
+else changed: the drafter's rebase already cut its cache to the tree's start (which ends the layer's flow,
+`rewind_to` → `state_at`) and read the path as a prompt, and the kept rows start a new flow there. Other families
+ignore the walk; a recurrent drafter's flowing reads are claimed as the segments' are. Test, real file
+`a_recurrent_drafter_grows_a_tree_that_flows` (Qwen3.5-0.8B, processor): four calls — rows following an earlier
+call's, the walk onto a draw no row carried, a rebase — and each of the 30 proposals is among its parent's 8 likeliest
+followers in the same tree read whole; red (checked) without the walk: the second call's forward is refused.
+`engine_drafter::could_draft` still refuses a recurrent drafter: choosing one only for a flow is stage 4.
 
 ## Not in this plan
 

@@ -826,6 +826,144 @@ fn a_tree_that_flows_proposes_what_a_fresh_read_of_each_path_ranks_likeliest() {
     ));
 }
 
+/// A RECURRENT drafter grows a tree that flows (`docs/plans/recurrent_flow.md`
+/// stage 3 (b)): each read carries the walk's row, so a Qwen 3.5 drafter reads
+/// rows whose parents an earlier call read from its checkpoint there. Every
+/// proposal is among the likeliest followers of its parent's row as the SAME
+/// tree read whole in one forward ranks them — over calls whose rows follow
+/// earlier calls' rows, the walk moved onto a draw no row carried, and a
+/// rebase. (Not each path read alone: the processor's attention rounds a
+/// tree row's gapped keys otherwise, gotcha #1160.) Red without the walk: the
+/// second call's forward is refused.
+///
+/// Needs a real file: `SWARMLLM_GUESS_TEST_GGUF=~/swarmllm-ref/qwen35/Qwen3.5-0.8B-Q8_0.gguf
+/// cargo dev-test --lib recurrent_drafter -- --ignored --nocapture`.
+#[test]
+#[ignore = "needs a GGUF in SWARMLLM_GUESS_TEST_GGUF"]
+fn a_recurrent_drafter_grows_a_tree_that_flows() {
+    use super::super::draft::TREE_CHILDREN;
+    use crate::inference::draft_tree::{FlowOp, FlowTree};
+    let Ok(path) = std::env::var("SWARMLLM_GUESS_TEST_GGUF") else {
+        eprintln!("SWARMLLM_GUESS_TEST_GGUF not set — skipped");
+        return;
+    };
+    let mut model =
+        SplitModel::load_from_gguf(std::path::Path::new(&path), 0, 999, true, true, true)
+            .expect("load the file");
+    assert!(model.carries_recurrent_state(), "the file is not recurrent");
+    let ids = model.encode_ids(
+        "fn fibonacci(n: u64) -> u64 {\n    match n {\n        0 => 0,\n        1 => 1,\n",
+    );
+    let mut context: Vec<u32> = ids[..ids.len() - 1].to_vec();
+    let kv = KvCacheStore::new(std::time::Duration::from_secs(600));
+    let mut session = model
+        .start_flow(&kv, "f", 0, &context, ids[ids.len() - 1], 0)
+        .unwrap();
+    // The tree read whole in one forward after `context`, from nothing.
+    let whole = |model: &mut SplitModel, context: &[u32], tree: &FlowTree| -> Vec<Vec<f32>> {
+        assert_eq!(context.len(), tree.base());
+        let kv = KvCacheStore::new(std::time::Duration::from_secs(60));
+        let opening = model.tensor_from_ids(context).unwrap();
+        model.forward(&opening, 0, &kv, "whole").unwrap();
+        let input = model.tensor_from_ids(tree.tokens()).unwrap();
+        model
+            .with_draft_tree(tree.tree().clone(), None, |m| {
+                m.forward_verify_all_positions(&input, tree.base(), &kv, "whole")
+            })
+            .unwrap()
+            .unwrap()
+            .squeeze(0)
+            .unwrap()
+            .to_vec2::<f32>()
+            .unwrap()
+    };
+    let mut checked = 0;
+    let mut check = |want: &[Vec<f32>], proposed: &[(u16, u32)]| {
+        for &(parent, token) in proposed {
+            let row = &want[usize::from(parent)];
+            let mut ranked = row.clone();
+            ranked.sort_by(|a, b| b.total_cmp(a));
+            assert!(
+                row[token as usize] >= ranked[TREE_CHILDREN - 1],
+                "{token} after row {parent} is not among its likeliest followers in the tree read whole"
+            );
+            checked += 1;
+        }
+    };
+    let grow = |model: &mut SplitModel,
+                session: &mut FlowGrowth,
+                ops: &[FlowOp],
+                rows: usize,
+                levels: usize| {
+        model
+            .grow_flow(
+                &kv,
+                "f",
+                session,
+                FlowStep {
+                    ops,
+                    rows,
+                    levels,
+                    live_most: 128,
+                },
+                &greedy(),
+                None,
+                0,
+            )
+            .unwrap()
+    };
+
+    // The root's followers, then theirs: the second call reads rows whose
+    // parent the first read.
+    let first = grow(&mut model, &mut session, &[], 4, 1);
+    let second = grow(&mut model, &mut session, &[], 6, 1);
+    let want = whole(&mut model, &context, session.flow());
+    check(&want, &first);
+    check(&want, &second);
+
+    // The walk takes row 1; its draw no row carried becomes a row and the
+    // walk stands on it, read with the call's first level.
+    let missed = (0..model.embedding_rows().unwrap() as u32)
+        .find(|&t| !session.flow().has_child(1, t))
+        .unwrap();
+    let bonus = session.flow().len() as u16;
+    let ops = [
+        FlowOp::Advance { row: 1 },
+        FlowOp::Push {
+            parent: 1,
+            token: missed,
+        },
+        FlowOp::Advance { row: bonus },
+    ];
+    let third = grow(&mut model, &mut session, &ops, 4, 2);
+    let want = whole(&mut model, &context, session.flow());
+    check(&want, &third);
+    assert!(
+        session.flow().len() <= 32,
+        "the whole read is one tree check"
+    );
+
+    // Rebased onto the bonus row's first follower: the path before it is
+    // context, and the kept rows are read again after it.
+    assert_eq!(third[0].0, bonus, "the first level follows the walk's row");
+    let row = bonus + 1;
+    let mut mine = session.flow().clone();
+    mine.advance(usize::from(row)).unwrap();
+    context.extend(mine.rebase().unwrap().path);
+    let fourth = grow(
+        &mut model,
+        &mut session,
+        &[FlowOp::Advance { row }, FlowOp::Rebase],
+        6,
+        2,
+    );
+    assert_eq!(session.flow().base(), context.len());
+    let want = whole(&mut model, &context, session.flow());
+    check(&want, &fourth);
+    eprintln!("{checked} proposals, each among its parent's likeliest in the tree read whole");
+    assert_eq!(checked, 4 + 6 + 8 + 12);
+}
+
 /// A first segment of one layer, with the token table, and a last of one
 /// layer, with the output head, of a three-layer model whose middle layer
 /// runs on another computer — a chain this node starts and ends.
