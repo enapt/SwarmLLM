@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.3.305-alpha] — 2026-11-22
+
+**Gemma 4 E2B and E4B are no longer treated as needing twice the graphics memory they use.** These models keep a large
+per-layer token table (1.8 GB of the E2B's 3.3 GB at Q4_K_M) in the computer's own memory, never on the card, but the
+node priced a card by the whole file — so a 4 GB card was told the E2B would not fit, and the quantization choice,
+downloads, the wish list and the capacity plan all read it at about twice its size. A card is now charged what it holds
+(the E2B at about 1.7 GB, beside the loader's own 1.9), and a computer with no card still counts the whole file
+against its memory cap (#297).
+
+**A router that answers late and then refuses the ports is reported as refusing, not as missing.** If UPnP's first
+search found no router but a later one did, and the router then refused every port mapping, the dashboard kept the
+first verdict — "no router found", turn UPnP on — when the router has UPnP on and is refusing the ports (often because
+another device holds them). It now says the router answered and refused (#439).
+
+**A split reply's log line says how long its guesses waited for the far computer's check** (`verdict_ms`,
+`miss_verdict_ms`, `voided_levels` on the flow's summary line). Measured with them on Qwen2.5-14B split between this
+computer and one in Australia: a guess waits about 180 ms, and a reply's pace is set more by this computer's own card
+than by the distance — the groundwork for the next speed design (`docs/plans/standing_ring.md`, #492).
+
 ## [0.3.304-alpha] — 2026-11-21
 
 **A split with another computer keeps your graphics card at full speed between its steps — now on by default.** While

@@ -149,23 +149,23 @@ idea, applied to running AI instead of sharing files.)
 
 ## How fast is it?
 
-<!-- speeds:begin, reviewed for 0.3.304-alpha. Refreshed at every release: .claude/rules/completeness.md § "README speeds" -->
+<!-- speeds:begin, reviewed for 0.3.305-alpha. Refreshed at every release: .claude/rules/completeness.md § "README speeds" -->
 Speed is in **tokens a second**: a token is a word or part of one, and most
 people read about 5 a second. The figures are from the project's test laptop,
 with an 8 GB NVIDIA RTX 3070 graphics card and an 8-core AMD Ryzen 7 5800H
 processor, on its own or teamed up with volunteers' computers.
 
 <!-- release-check:begin -->
-<!-- from the v0.3.303 release check, timed on the downloaded release -->
+<!-- from the v0.3.304 release check, timed on the downloaded release -->
 **On one computer.** Each model reads a 1,800-token document and writes 128
 tokens about it.
 
 | Model | Runs on | Writing (tokens a second) | Reading (tokens a second) |
 |---|---|---|---|
-| Qwen2.5 Coder 7B | the graphics card | 67 | 1,780–1,790 |
-| Qwen2.5 14B | card and processor (too big for the card) | 13.2–13.9 | 490–530 |
-| Qwen3 30B-A3B (2-bit) | card and processor (a mixture of experts, too big for the card) | 21.5–24.6 | 230 |
-| Llama 3.2 3B | the processor only | 17.3–17.6 | 80 |
+| Qwen2.5 Coder 7B | the graphics card | 70–72 | 1,900–1,940 |
+| Qwen2.5 14B | card and processor (too big for the card) | 15.2–15.5 | 620–650 |
+| Qwen3 30B-A3B (2-bit) | card and processor (a mixture of experts, too big for the card) | 28.5 | 250 |
+| Llama 3.2 3B | the processor only | 18.4–18.8 | 90 |
 <!-- release-check:end -->
 
 **Across computers.** The same laptop, in Thailand, asking a volunteer's
@@ -178,18 +178,18 @@ several words.
 
 | Model, and how it is shared | Writing code | Writing prose |
 |---|---|---|
-| Qwen2.5 14B, half on this laptop and half in Australia | 24–40 | 8.4–14.5 |
-| The same, set to "Start and finish on this computer" | 20–26 | 10.9–12.0 |
+| Qwen2.5 14B, half on this laptop and half in Australia | 39–48 | 17.3–20.4 |
+| The same, set to "Start and finish on this computer" | 32.7–33.3 | 15.8–16.0 |
 | Qwen2.5 14B, half on this laptop and half in the US | 26.9–27.2 | 11.7–11.8 |
 | Qwen3.8 27B, run whole by the computer in Australia, 29 of its 64 layers on that computer's card | 8.6–8.9 | 5.6–5.8 |
 | Qwen3.6 35B-A3B (a mixture of experts), run whole by the computer in Australia, its experts in that computer's memory | 33.9–36.3 | 37.4 |
 | Llama 3.3 70B across three computers: its first 17–25 layers on this laptop, the rest to layer 59 in Australia, the last 21 in the US | 3.5–4.1 | 2.5–2.6 |
-<!-- measured on: the 14B half-and-half row main as v0.3.303 ships it, the card clock hold off (real_link.sh flowhalf, the far computer aa3d1e66 on v0.3.302, 133-137 ms, 160-token greedy replies, eight runs in three sittings 11-20 20:5xZ-22:58Z: readme303 arms 2 and 5 — code 36.8 / 37.2, prose 10.5 / 13.4; ab302main rounds b and d — code 37.6, 32.4, 37.6, 24.1, prose 11.5, 13.0, 14.5, 8.4; readme303b arms 1 and 3 — code 39.8 / 37.3, prose 11.6, arm 1's prose 5.9 left out: it waited 14.4 s of its 26.9 on the far computer; the published v0.3.302 read the same in the same hour, FUTURE_WORK #411); the laptop-alone 14B figures below v0.3.291 (readme291 locald arms 2, 4, 6; readme303's locald arm 3 read 14.2 / 11.6 on 11-20); the "start and finish" row main as v0.3.303 ships it (readme303b dsdwfit arms 2 and 4, 11-20 22:54-22:58Z, 135-136 ms, the 0.5B helper on the card: code 26.3 / 20.4, prose 12.0 / 10.9) and its processor-helper figures main as v0.3.292 ships it (readme292s, 11-15 19:45-19:55Z, 122-133 ms: dsdw × 3 with the helper on the processor; the far computer's [12, 38) all on its card throughout); every figure the node's own decode_ms (the client's wall clock stepped, gotcha #1112); the US row v0.3.293 (real_link.sh us293, flowhalf arms 1 and 3 against locald arms 2 and 4 — 16.0 / 17.2 code, 13.5 / 13.6 prose — 11-16 17:34-17:41Z, 308 ms least round trip, the far computer a661155f); the 27B row v0.3.299 (tier27_1119, the live node's own route to aa3d1e66, ask_tier.py, 160 tokens, code and prose twice each after a warm-up, thinking off — the earlier code figure timed the model's thinking, 11-18 19:31-19:35Z, 29 card layers: code 8.59 / 8.86, prose 5.64 / 5.84); the 70B row v0.3.300 (tier70_1119, ask_tier.py, the live node's own route here → aa3d1e66 AU → 5bfbd36e US, 11-19 05:38-05:49Z, one ask at a time, code and prose after a warm-up); the 35B-A3B row main as v0.3.302 ships it (tier_1120b, ask_tier.py, the live node's own route handed whole to aa3d1e66, 11-20 05:46-05:48Z, 160 tokens: code 33.9 after its 70.8 s cold load and 36.3, prose 37.4; dropped at v0.3.300 while that computer did not hold it whole) -->
+<!-- measured on: the 14B half-and-half row main as v0.3.305 ships it, the card clock hold on (real_link.sh flowhalf, the far computer aa3d1e66, 160-token greedy replies, the client's decode_tok_s — the node's own decode_ms within 1% — five runs in two sittings: readme305 arms 1 and 3, 11-21 14:28-14:35Z on main 7633b9296's CUDA build, far_least_ms 22-32 — code 46.3 / 48.3, prose 20.4 / 18.7; real_link_ab489c's held arms 2, 4 and 6, main as v0.3.304 ships it, 11-21 03:52-04:03Z, far_least_ms 17-32 — code 44.3, 38.8, 41.1, prose 18.8, 18.5, 17.3; the readme304 sitting, 11-21 09:02-09:13Z, left out: the far computer queued 31-44 s of each prose reply and the published v0.3.303 read the same in that hour); the laptop-alone 14B figures below v0.3.291 (readme291 locald arms 2, 4, 6; readme303's locald arm 3 read 14.2 / 11.6 on 11-20); the "start and finish" row main as v0.3.305 ships it (readme305 dsdwfit arms 2 and 4, 11-21 14:30-14:34Z, one sitting, the 0.5B helper on the card, the client's decode_tok_s: code 33.3 / 32.7, prose 15.8 / 16.0) and its processor-helper figures main as v0.3.292 ships it (readme292s, 11-15 19:45-19:55Z, 122-133 ms: dsdw × 3 with the helper on the processor; the far computer's [12, 38) all on its card throughout); every figure the node's own decode_ms (the client's wall clock stepped, gotcha #1112); the US row v0.3.293 (real_link.sh us293, flowhalf arms 1 and 3 against locald arms 2 and 4 — 16.0 / 17.2 code, 13.5 / 13.6 prose — 11-16 17:34-17:41Z, 308 ms least round trip, the far computer a661155f); the 27B row v0.3.299 (tier27_1119, the live node's own route to aa3d1e66, ask_tier.py, 160 tokens, code and prose twice each after a warm-up, thinking off — the earlier code figure timed the model's thinking, 11-18 19:31-19:35Z, 29 card layers: code 8.59 / 8.86, prose 5.64 / 5.84); the 70B row v0.3.300 (tier70_1119, ask_tier.py, the live node's own route here → aa3d1e66 AU → 5bfbd36e US, 11-19 05:38-05:49Z, one ask at a time, code and prose after a warm-up); the 35B-A3B row main as v0.3.302 ships it (tier_1120b, ask_tier.py, the live node's own route handed whole to aa3d1e66, 11-20 05:46-05:48Z, 160 tokens: code 33.9 after its 70.8 s cold load and 36.3, prose 37.4; dropped at v0.3.300 while that computer did not hold it whole) -->
 
 On its own this laptop writes the 14B's code at 13.2–14.8 tokens a second and
-its prose at 11.6–12.5, so the two continents together write code up to nearly
-three times as fast, and prose no faster. Code is easier to guess, and the
-guesses keep the long link busy ([how](docs/plans/faster_than_local.md)). Over
+its prose at 11.6–12.5, so the two continents together write code about three
+times as fast, and prose about one and a half times as fast. Code is easier to
+guess, and the guesses keep the long link busy ([how](docs/plans/faster_than_local.md)). Over
 the US link, more than twice as long, code still beats this laptop alone (16–17
 in that sitting) and prose does not (13.5): each missed guess costs a longer trip.
 "Start and finish on this computer" is that fast only while its small helper
@@ -411,7 +411,7 @@ SwarmLLM is built by a human developer working with Claude Code, an AI
 programming assistant: the human sets the direction, tests and reviews, and
 Claude writes the code. We say so openly so you can judge the project on its
 merits. Every change is checked by thousands of automated tests
-(4829 lib tests + 80 integration tests) before it ships, and regular
+(4833 lib tests + 80 integration tests) before it ships, and regular
 automated audits are logged in the repository. Scrutiny and contributions are
 welcome.
 
