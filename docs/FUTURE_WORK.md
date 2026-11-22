@@ -2254,9 +2254,18 @@ measurement; it is not calibration data of ours (self-reported results, licence 
 (896 GB/s) and RTX 4050 Laptop (192) both advertised the 300 GB/s default — 37.5 tok/s each, the 5080 ~3x slow and
 the 4050 ~1.6x fast; a laptop part now reads its own row before its desktop namesake's
 (`a_laptop_card_reads_its_own_bandwidth`). The efficiency constant below is still open.
-Next: re-measure with the harness in `estimate_tokens_per_sec_7b`'s doc comment (`prefill_bench`, a `--features cuda`
-release build, live node stopped), keep the constant just under the measurement as before (~0.7), and check the
-processor's 0.75 the same way in the same sitting. A mixture of experts is priced by its ACTIVE bytes
+**Measured again 2026-11-22 (22:54-23:06Z)**: the published v0.3.306 on this card idle (623 MiB before, live node
+stopped, `rebench.sh`), Qwen2.5-Coder-7B Q4_K_M at a ~1,770-token prompt, decodes at **74.12 / 75.31 tok/s** (best of
+two repeats, two runs) — **0.73-0.74** of 448 ÷ 4.4, at a deeper cache than the calibration's 896, so a floor for it.
+**Not changed in v0.3.307, deliberately**: the figure reaches more than the planner's price of an unmeasured peer —
+`coverage::near_chain`'s `Devices::of` prices a machine's card against ITS OWN processor from
+`est_tokens_per_sec_7b` and `processor_tokens_per_sec_7b`, so raising the card constant alone moves which device a
+near chain is planned on and which parts every machine fetches; it ships where that can be watched, not 30 minutes
+before a cut. Next: re-measure with the harness in `estimate_tokens_per_sec_7b`'s doc comment (`prefill_bench`, a
+`--features cuda` release build, live node stopped) at 896, set the constant just under it (~0.7: 71 tok/s for this
+card), check the processor's 0.75 the same way in the same sitting (the Mac mini's and this processor's own figures),
+update `speed_estimation_sanity` and `the_efficiencies_reproduce_the_measurements_they_were_taken_from`, and read
+`near_chain`'s tests that pin `est_tokens_per_sec_7b = 56.0` against a processor for a verdict that flips. A mixture of experts is priced by its ACTIVE bytes
 (`layer_work_from_bytes`) — check that path's error against a measured MoE before trusting it at 1.13.
 
 ### Network and transport
