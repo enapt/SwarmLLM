@@ -44,6 +44,24 @@
 //! Ours differs in one place: the context rows of a long prompt are its last
 //! [`BLOCK_PROMPT_ROWS`] only (the references take every row), so a long
 //! agent prompt costs one bounded catch-up after the first token.
+//!
+//! **DFlash 2** (Qwen3.8-27B's drafter, 2026-11-22; llama.cpp
+//! `build_dflash2_conv` / `build_dflash2_selector` and `common/speculative.cpp`'s
+//! `is_dflash2` walk, read at `4b1a27f`) adds two things, both built here:
+//!
+//! - four dynamic convolutions a layer ([`DynamicConv`], [`convolve`]) over
+//!   the BLOCK's rows only — the attention's normed input and its output after
+//!   `wo`, the feed-forward's normed input and its output after `down` — each
+//!   row's taps the sublayer's `base` plus coefficients projected from that
+//!   row's normed input; the context rows are taken in exactly as DFlash 1's;
+//! - a selector ([`Selector`]): each guess is the candidate among its row's
+//!   `top_k` likeliest that scores best AFTER the guess before it (the
+//!   anchor, for the first) — its own score plus a low-rank pair score
+//!   between the two words, gated by the row. llama.cpp packs the whole
+//!   `k × k` lattice on the device and walks it greedily on the host; the
+//!   walk reads one predecessor a row, so here only that row of the lattice
+//!   is scored, on the host, from the two codebooks (kept as the file stores
+//!   them, in system memory: 135 MB at Q8_0 for a 248K vocabulary).
 
 use std::path::Path;
 
@@ -145,10 +163,270 @@ struct DrafterLayer {
     gate: QMatMul,
     up: QMatMul,
     down: QMatMul,
+    /// DFlash 2's convolutions around the attention and the feed-forward.
+    attn_conv: Option<DynamicConv>,
+    ffn_conv: Option<DynamicConv>,
     /// Reads only the last `window` positions (`sliding_attention`).
     windowed: bool,
     /// A block row sees no later block row.
     one_way: bool,
+}
+
+/// One sublayer's DFlash 2 convolution (`attention_conv` / `mlp_conv`): its
+/// input side (`side` 0) and output side (1) share one projection and one
+/// base, and both read the coefficients projected from the sublayer's
+/// normed input.
+struct DynamicConv {
+    /// `*_conv_proj`: a normed row → `2 · kernel · (hidden / group)`
+    /// coefficients.
+    proj: QMatMul,
+    /// `*_conv_base` `[2, kernel, hidden]` (side, tap, channel), f32.
+    base: Tensor,
+    kernel: usize,
+    group: usize,
+}
+
+impl DynamicConv {
+    fn coefficients(&self, normed: &Tensor) -> candle_core::Result<Tensor> {
+        self.proj.forward(normed)
+    }
+
+    fn apply(&self, x: &Tensor, coefficients: &Tensor, side: usize) -> candle_core::Result<Tensor> {
+        convolve(x, coefficients, &self.base, self.kernel, self.group, side)
+    }
+}
+
+/// DFlash 2's dynamic convolution of a block's rows `x` (`[1, rows, hidden]`),
+/// llama.cpp's `build_dflash2_conv`: row `p`'s channel `c` is
+/// `Σ_tap (coefficients[p][g + G·(tap + kernel·side)] + base[side][tap][c]) ·
+/// x[p − tap][c]`, with `G = hidden / group` and `g = c / group` — causal,
+/// within the block, a row before its first reading zero.
+fn convolve(
+    x: &Tensor,
+    coefficients: &Tensor,
+    base: &Tensor,
+    kernel: usize,
+    group: usize,
+    side: usize,
+) -> candle_core::Result<Tensor> {
+    let (b, rows, hidden) = x.dims3()?;
+    let groups = hidden / group;
+    let per_channel = coefficients
+        .reshape((b, rows, 2, kernel, groups))?
+        .narrow(2, side, 1)?
+        .squeeze(2)?
+        .unsqueeze(4)?
+        .broadcast_as((b, rows, kernel, groups, group))?
+        .contiguous()?
+        .reshape((b, rows, kernel, hidden))?;
+    let taps = per_channel.broadcast_add(&base.get(side)?)?;
+    let mut out: Option<Tensor> = None;
+    for tap in 0..kernel {
+        let earlier = if tap == 0 {
+            x.clone()
+        } else if tap >= rows {
+            x.zeros_like()?
+        } else {
+            Tensor::cat(
+                &[
+                    &Tensor::zeros((b, tap, hidden), x.dtype(), x.device())?,
+                    &x.narrow(1, 0, rows - tap)?,
+                ],
+                1,
+            )?
+        };
+        let term = (taps.narrow(2, tap, 1)?.squeeze(2)? * earlier)?;
+        out = Some(match out {
+            Some(sum) => (sum + term)?,
+            None => term,
+        });
+    }
+    out.ok_or_else(|| candle_core::Error::Msg("a convolution with no taps".into()))
+}
+
+/// Layer `layer`'s `part` (`attn` / `ffn`) convolution off the file:
+/// `blk.N.{part}_conv_base` (no `.weight`, as llama.cpp names it)
+/// `[2, kernel, hidden]` and `blk.N.{part}_conv_proj.weight` from `hidden`
+/// to `2 · kernel · hidden / group`.
+fn dynamic_conv(
+    tensor: &mut impl FnMut(String) -> Result<candle_core::quantized::QTensor, SwarmError>,
+    layer: usize,
+    part: &str,
+    (kernel, group): (usize, usize),
+    hidden: usize,
+    device: &Device,
+) -> Result<DynamicConv, String> {
+    let base_name = format!("blk.{layer}.{part}_conv_base");
+    let base = tensor(base_name.clone())
+        .map_err(|e| e.to_string())?
+        .dequantize(device)
+        .and_then(|t| t.to_dtype(DType::F32))
+        .map_err(|e| format!("{base_name}: {e}"))?;
+    if base.dims() != [2, kernel, hidden] {
+        return Err(format!(
+            "{base_name} is {:?}, not [2, {kernel}, {hidden}]",
+            base.dims()
+        ));
+    }
+    let proj_name = format!("blk.{layer}.{part}_conv_proj.weight");
+    let proj = tensor(proj_name.clone()).map_err(|e| e.to_string())?;
+    let coefficients = 2 * kernel * (hidden / group);
+    if proj.shape().dims() != [coefficients, hidden] {
+        return Err(format!(
+            "{proj_name} is {:?}, not [{coefficients}, {hidden}]",
+            proj.shape().dims()
+        ));
+    }
+    let proj = QMatMul::from_qtensor(proj).map_err(|e| format!("{proj_name}: {e}"))?;
+    Ok(DynamicConv {
+        proj,
+        base,
+        kernel,
+        group,
+    })
+}
+
+/// A selector codebook (`selector_predecessor` / `selector_successor`): one
+/// row of `rank` values a word, kept as the file stores it in system memory
+/// and read a row at a time.
+struct Codebook {
+    table: candle_core::quantized::QTensor,
+    rank: usize,
+    words: usize,
+}
+
+impl Codebook {
+    /// `name` off the file into system memory: `[words, rank]`, its rows
+    /// whole blocks of its type (llama.cpp reads them with `ggml_get_rows`).
+    fn read(
+        ct: &gguf_file::Content,
+        file: &mut std::io::BufReader<std::fs::File>,
+        name: &str,
+        rank: usize,
+    ) -> Result<Self, String> {
+        let table = ct
+            .tensor(file, name, &Device::Cpu)
+            .map_err(|e| format!("{name}: {e}"))?;
+        let (words, width) = table.shape().dims2().map_err(|e| format!("{name}: {e}"))?;
+        if width != rank || !rank.is_multiple_of(table.dtype().block_size()) {
+            return Err(format!(
+                "{name} rows of {width} {:?}, the selector's rank is {rank}",
+                table.dtype()
+            ));
+        }
+        Ok(Self { table, rank, words })
+    }
+
+    /// The row of `word`, as f32.
+    fn row(&self, word: u32) -> Result<Vec<f32>, SwarmError> {
+        let word = word as usize;
+        if word >= self.words {
+            return Err(SwarmError::Internal(format!(
+                "block drafter: word {word} is past the selector's {} rows",
+                self.words
+            )));
+        }
+        let dtype = self.table.dtype();
+        let row_bytes = self.rank / dtype.block_size() * dtype.type_size();
+        let data = self.table.data().map_err(SwarmError::internal)?;
+        let bytes = &data[word * row_bytes..(word + 1) * row_bytes];
+        let row = candle_core::quantized::QTensor::new(
+            candle_core::quantized::QStorage::from_data(
+                std::borrow::Cow::Borrowed(bytes),
+                &Device::Cpu,
+                dtype,
+            )
+            .map_err(SwarmError::internal)?,
+            (self.rank,),
+        )
+        .and_then(|t| t.dequantize(&Device::Cpu))
+        .and_then(|t| t.to_vec1::<f32>())
+        .map_err(SwarmError::internal)?;
+        Ok(row)
+    }
+}
+
+/// DFlash 2's selector: each guess chosen among its row's `top_k` likeliest
+/// words by its own score plus the pair score after the guess before it.
+struct Selector {
+    /// `selector_hidden`: a guess's normed row → `rank` gates.
+    hidden: QMatMul,
+    predecessor: Codebook,
+    successor: Codebook,
+    top_k: usize,
+}
+
+impl Selector {
+    /// The guesses after `anchor`, one a row of `ranked` (each row's
+    /// likeliest words with their log-probabilities, `out` the rows' normed
+    /// states that gate the pair score).
+    fn pick(
+        &self,
+        anchor: u32,
+        ranked: &[Vec<(u32, f32)>],
+        out: &Tensor,
+    ) -> Result<Vec<u32>, SwarmError> {
+        let gates: Vec<Vec<f32>> = self
+            .hidden
+            .forward(out)
+            .and_then(|g| g.squeeze(0))
+            .and_then(|g| g.to_dtype(DType::F32))
+            .and_then(|g| g.to_vec2())
+            .map_err(|e| SwarmError::Internal(format!("block drafter selector gates: {e}")))?;
+        selector_walk(
+            anchor,
+            ranked,
+            &gates,
+            |w| self.predecessor.row(w),
+            |w| self.successor.row(w),
+        )
+    }
+}
+
+/// llama.cpp's DFlash 2 walk (`common/speculative.cpp`, `is_dflash2`): at
+/// each guess, the candidate whose score after the guess before it (the
+/// anchor first) is the greatest — `unary[s] + Σ_r succ[cand_s][r] ·
+/// pred[before][r] · gate[r]`, the first of equal maxima as
+/// `std::max_element` keeps. Its `p_min` cut is off by default there and
+/// not built here: how many guesses a round makes is the caller's.
+/// A row's unary scores may be its log-probabilities instead of its logits:
+/// the two differ by one figure a row, which moves no choice.
+fn selector_walk(
+    anchor: u32,
+    ranked: &[Vec<(u32, f32)>],
+    gates: &[Vec<f32>],
+    predecessor: impl Fn(u32) -> Result<Vec<f32>, SwarmError>,
+    successor: impl Fn(u32) -> Result<Vec<f32>, SwarmError>,
+) -> Result<Vec<u32>, SwarmError> {
+    if gates.len() != ranked.len() {
+        return Err(SwarmError::Internal(format!(
+            "block drafter selector: {} rows of gates for {} guesses",
+            gates.len(),
+            ranked.len()
+        )));
+    }
+    let mut before = anchor;
+    let mut picks = Vec::with_capacity(ranked.len());
+    for (candidates, gate) in ranked.iter().zip(gates) {
+        let gated: Vec<f32> = predecessor(before)?
+            .iter()
+            .zip(gate)
+            .map(|(p, g)| p * g)
+            .collect();
+        let scores: Vec<f32> = candidates
+            .iter()
+            .map(|&(word, unary)| {
+                successor(word)
+                    .map(|s| s.iter().zip(&gated).map(|(a, b)| a * b).sum::<f32>() + unary)
+            })
+            .collect::<Result<_, _>>()?;
+        let best = crate::inference::sampling::argmax(&scores) as usize;
+        before = candidates.get(best).map(|c| c.0).ok_or_else(|| {
+            SwarmError::Internal("block drafter selector: a guess with no candidates".into())
+        })?;
+        picks.push(before);
+    }
+    Ok(picks)
 }
 
 /// A loaded block drafter, attached to the whole model it guesses for.
@@ -169,8 +447,13 @@ pub(crate) struct BlockDrafter {
     sin: Tensor,
     window: Option<usize>,
     rule: AttentionRule,
+    /// DFlash 2's selector; `None` for DFlash 1, whose guess is a row's
+    /// likeliest word.
+    selector: Option<Selector>,
     device: Device,
-    /// Weights and a full cache, charged when attached.
+    /// Weights and a full cache, charged when attached — the selector's
+    /// codebooks included, though they sit in system memory whatever the
+    /// device (an over-count of the card by their size, never an under-count).
     pub(crate) bytes: u64,
 }
 
@@ -327,9 +610,9 @@ impl BlockDrafter {
     }
 
     /// Load `path` for `target`, refusing a file it cannot run as written:
-    /// not a `dflash` file, a part this loader does not build (DFlash 2's
-    /// convolutions and selector, a draft vocabulary, scaled logits, M-RoPE
-    /// sections that are not plain), or one that does not fit the target (its
+    /// not a `dflash` file, a part this loader does not build (a draft
+    /// vocabulary, scaled logits, M-RoPE sections that are not plain, DFlash
+    /// 2's convolutions without its selector), or one that does not fit the target (its
     /// width, its layers, its token table, an embedding scale or soft cap that
     /// is not the target's own — [`DrafterFigures`]). It runs on the
     /// target's own device — the card where the model's first layers are, as
@@ -414,10 +697,39 @@ impl BlockDrafter {
                 return Err(fail(format!("rope sections {s:?} are not plain")));
             }
         }
+        // DFlash 2: convolutions in every layer and a selector, read only
+        // together, as llama.cpp reads them (`selector_hidden.weight` names
+        // the file DFlash 2, its keys required).
+        let dflash2 = ct.tensor_infos.contains_key("selector_hidden.weight");
+        let dflash2_shape = if dflash2 {
+            let need = |key: &str| {
+                num(key)
+                    .map(|v| v as usize)
+                    .filter(|&v| v > 0)
+                    .ok_or_else(|| fail(format!("DFlash 2 without dflash.{key}")))
+            };
+            let (kernel, group) = (need("conv_kernel_size")?, need("conv_group_size")?);
+            let (rank, top_k) = (need("selector_rank")?, need("selector_top_k")?);
+            if !hidden.is_multiple_of(group) {
+                return Err(fail(format!(
+                    "convolution groups of {group} in a width of {hidden}"
+                )));
+            }
+            Some((kernel, group, rank, top_k))
+        } else {
+            if let Some(name) = ct
+                .tensor_infos
+                .keys()
+                .find(|name| name.contains("conv_") || name.contains("selector"))
+            {
+                return Err(fail(format!(
+                    "tensor {name} without selector_hidden.weight is not built"
+                )));
+            }
+            None
+        };
         if let Some(name) = ct.tensor_infos.keys().find(|name| {
             [
-                "conv_",
-                "selector",
                 "d2t",
                 "markov",
                 "conf_proj",
@@ -472,6 +784,27 @@ impl BlockDrafter {
         let device = device.clone();
         // What it is charged: the one figure the rule before the load weighed.
         let bytes = charged(&ct, &shape);
+        // The selector's codebooks stay in system memory: the walk reads a
+        // few rows of them on the host. Every candidate is a word of the
+        // model's head, so each must have a row.
+        let codebooks = match dflash2_shape {
+            Some((_, _, rank, _)) => {
+                let predecessor =
+                    Codebook::read(&ct, &mut file, "selector_predecessor.weight", rank)
+                        .map_err(fail)?;
+                let successor = Codebook::read(&ct, &mut file, "selector_successor.weight", rank)
+                    .map_err(fail)?;
+                let words = target.embedding_rows().unwrap_or(0);
+                if predecessor.words < words || successor.words < words {
+                    return Err(fail(format!(
+                        "selector codebooks of {} and {} words, the model's head has {words}",
+                        predecessor.words, successor.words
+                    )));
+                }
+                Some((predecessor, successor))
+            }
+            None => None,
+        };
         let mut tensor = |name: String| {
             if !ct.tensor_infos.contains_key(&name) {
                 return Err(fail(format!("no {name}")));
@@ -501,6 +834,19 @@ impl BlockDrafter {
         for l in 0..n_layers {
             let p = |what: &str| format!("blk.{l}.{what}.weight");
             let windowed = window.is_some() && pattern.get(l).copied().unwrap_or(false);
+            let (attn_conv, ffn_conv) = match dflash2_shape {
+                Some((kernel, group, _, _)) => (
+                    Some(
+                        dynamic_conv(&mut tensor, l, "attn", (kernel, group), hidden, &device)
+                            .map_err(fail)?,
+                    ),
+                    Some(
+                        dynamic_conv(&mut tensor, l, "ffn", (kernel, group), hidden, &device)
+                            .map_err(fail)?,
+                    ),
+                ),
+                None => (None, None),
+            };
             layers.push(DrafterLayer {
                 attn_norm: norm(tensor(p("attn_norm"))?)?,
                 wq: mm(tensor(p("attn_q"))?)?,
@@ -513,6 +859,8 @@ impl BlockDrafter {
                 gate: mm(tensor(p("ffn_gate"))?)?,
                 up: mm(tensor(p("ffn_up"))?)?,
                 down: mm(tensor(p("ffn_down"))?)?,
+                attn_conv,
+                ffn_conv,
                 windowed,
                 one_way: match rule {
                     AttentionRule::BothWays => false,
@@ -528,6 +876,24 @@ impl BlockDrafter {
             &device,
         )
         .map_err(|e| fail(format!("rope tables: {e}")))?;
+        let selector = match (dflash2_shape, codebooks) {
+            (Some((_, _, rank, top_k)), Some((predecessor, successor))) => {
+                let gates = tensor("selector_hidden.weight".into())?;
+                if gates.shape().dims() != [rank, hidden] {
+                    return Err(fail(format!(
+                        "selector_hidden.weight is {:?}, not [{rank}, {hidden}]",
+                        gates.shape().dims()
+                    )));
+                }
+                Some(Selector {
+                    hidden: mm(gates)?,
+                    predecessor,
+                    successor,
+                    top_k,
+                })
+            }
+            _ => None,
+        };
         Ok(Self {
             fc,
             hidden_norm,
@@ -543,6 +909,7 @@ impl BlockDrafter {
             sin,
             window,
             rule,
+            selector,
             device,
             bytes,
         })
@@ -593,6 +960,16 @@ impl BlockDrafter {
         let (_, rows, _) = x.dims3()?;
         let (h, kh, d) = (self.n_head, self.n_kv_head, self.head_dim);
         let normed = layer.attn_norm.forward(x)?;
+        // DFlash 2: the block's normed rows are convolved before their
+        // queries, keys and values; the coefficients, projected from the
+        // rows before it, serve the output's convolution too.
+        let (normed, attn_coefficients) = match &layer.attn_conv {
+            Some(conv) => {
+                let c = conv.coefficients(&normed)?;
+                (conv.apply(&normed, &c, 0)?, Some(c))
+            }
+            None => (normed, None),
+        };
         // The context rows feed keys and values unnormed by this layer.
         let kv_in = match ctx {
             Some(c) => Tensor::cat(&[c, &normed], 1)?,
@@ -632,12 +1009,28 @@ impl BlockDrafter {
             None,
         )?;
         let y = y.transpose(1, 2)?.reshape((1, rows, h * d))?;
-        let x = (x + layer.wo.forward(&y)?)?;
+        let y = layer.wo.forward(&y)?;
+        let y = match (&layer.attn_conv, &attn_coefficients) {
+            (Some(conv), Some(c)) => conv.apply(&y, c, 1)?,
+            _ => y,
+        };
+        let x = (x + y)?;
         let normed = layer.ffn_norm.forward(&x)?;
+        let (normed, ffn_coefficients) = match &layer.ffn_conv {
+            Some(conv) => {
+                let c = conv.coefficients(&normed)?;
+                (conv.apply(&normed, &c, 0)?, Some(c))
+            }
+            None => (normed, None),
+        };
         let ff = layer.down.forward(&crate::inference::fast_math::silu_mul(
             &layer.gate.forward(&normed)?,
             &layer.up.forward(&normed)?,
         )?)?;
+        let ff = match (&layer.ffn_conv, &ffn_coefficients) {
+            (Some(conv), Some(c)) => conv.apply(&ff, c, 1)?,
+            _ => ff,
+        };
         x + ff
     }
 
@@ -794,19 +1187,37 @@ impl BlockDrafter {
                 kv_reserve,
                 for_the_owner,
             )?;
-            let ranked =
-                if matches!(over, super::GuessOver::HotAnd(_)) && target.mtp_hot_rows().is_some() {
-                    target.mtp_ranked(&out, over, k)?
-                } else {
-                    let logits = self.block_logits(target, &out)?;
-                    let rows = logits
-                        .squeeze(0)
-                        .map_err(|e| SwarmError::Internal(format!("block drafter logits: {e}")))?;
-                    super::draft::likeliest_rows(&rows, k)?
-                };
-            ranked.ok_or_else(|| {
-                SwarmError::Internal("block drafter: a guess's scores are not finite".into())
-            })
+            self.ranked(target, &out, over, k)
+        })
+    }
+
+    /// Each of a block's guess rows' (`out`) `k` likeliest words, likeliest
+    /// first, with their log-probabilities: over the hot rows and the reply's
+    /// own words where `over` names them and the head keeps hot rows (#425
+    /// (b)), else every word, ranked on a card where the rows are. What a
+    /// tree is grown from ([`Self::draft_ranked`] — a DFlash 2 drafter's
+    /// marginals too: its selector picks a CHAIN) and what a DFlash 2
+    /// selector chooses among ([`Self::draft`]). A guess with nothing finite
+    /// stops the drafter for the reply.
+    fn ranked(
+        &self,
+        target: &SplitModel,
+        out: &Tensor,
+        over: super::GuessOver<'_>,
+        k: usize,
+    ) -> Result<super::draft::RankedRows, SwarmError> {
+        let ranked =
+            if matches!(over, super::GuessOver::HotAnd(_)) && target.mtp_hot_rows().is_some() {
+                target.mtp_ranked(out, over, k)?
+            } else {
+                let logits = self.block_logits(target, out)?;
+                let rows = logits
+                    .squeeze(0)
+                    .map_err(|e| SwarmError::Internal(format!("block drafter logits: {e}")))?;
+                super::draft::likeliest_rows(&rows, k)?
+            };
+        ranked.ok_or_else(|| {
+            SwarmError::Internal("block drafter: a guess's scores are not finite".into())
         })
     }
 
@@ -856,6 +1267,12 @@ impl BlockDrafter {
             kv_reserve,
             for_the_owner,
         )?;
+        // DFlash 2: each guess is chosen among its row's likeliest words by
+        // its selector, after the guess before it.
+        if let Some(selector) = &self.selector {
+            let ranked = self.ranked(target, &out, over, selector.top_k)?;
+            return selector.pick(anchor, &ranked, &out);
+        }
         // On the processor the guesses read the hot rows and the
         // conversation's own words (#425 (b), FR-Spec), where the model's
         // head keeps them: there the head read for every row was most of a
@@ -1615,6 +2032,192 @@ mod tests {
             0
         ));
         assert!(fits_beside_one_conversation(None, u64::MAX, u64::MAX));
+    }
+
+    /// Deterministic values in (−1, 1) for a test's tensors.
+    fn values(n: usize, seed: u64) -> Vec<f32> {
+        let mut s = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+        (0..n)
+            .map(|_| {
+                s = s
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                ((s >> 40) as f32 / (1u64 << 24) as f32) * 2.0 - 1.0
+            })
+            .collect()
+    }
+
+    /// The convolution is llama.cpp's `build_dflash2_conv`, read off its
+    /// flat ggml indices: `coeffs` `{G, K, 2, n_tok}` (`g + G·(tap + K·side)`
+    /// a token), repeated over each group's channels (channel `i + gs·g`),
+    /// plus `base` `{C, K, 2}` at `c + C·tap + C·K·side`; tap `t` multiplies
+    /// the row `t` before, zero before the block — for both sides, at several
+    /// kernels, block lengths and group sizes, against our tensor ops.
+    #[test]
+    fn a_dynamic_convolution_is_llama_cpps() -> candle_core::Result<()> {
+        let dev = Device::Cpu;
+        for &(kernel, group, hidden, rows) in &[
+            (2usize, 4usize, 8usize, 5usize),
+            (2, 16, 32, 8),
+            (3, 2, 6, 4),
+            (3, 4, 8, 2),
+            (1, 8, 8, 3),
+        ] {
+            let groups = hidden / group;
+            let x = values(rows * hidden, 1 + kernel as u64);
+            let dynamic = values(rows * 2 * kernel * groups, 7 + hidden as u64);
+            let base = values(2 * kernel * hidden, 13 + rows as u64);
+            let xt = Tensor::from_slice(&x, (1, rows, hidden), &dev)?;
+            let dt = Tensor::from_slice(&dynamic, (1, rows, 2 * kernel * groups), &dev)?;
+            let bt = Tensor::from_slice(&base, (2, kernel, hidden), &dev)?;
+            for side in 0..2 {
+                let got: Vec<f32> = convolve(&xt, &dt, &bt, kernel, group, side)?
+                    .flatten_all()?
+                    .to_vec1()?;
+                for p in 0..rows {
+                    for c in 0..hidden {
+                        let (g, i) = (c / group, c % group);
+                        let mut want = 0f32;
+                        for tap in 0..kernel {
+                            let coeff = dynamic
+                                [p * 2 * kernel * groups + g + groups * (tap + kernel * side)];
+                            let weight = coeff
+                                + base[(i + group * g) + hidden * tap + hidden * kernel * side];
+                            let earlier = if p >= tap {
+                                x[(p - tap) * hidden + c]
+                            } else {
+                                0.0
+                            };
+                            want += weight * earlier;
+                        }
+                        let have = got[p * hidden + c];
+                        assert!(
+                            (have - want).abs() <= 1e-5,
+                            "kernel {kernel} group {group} side {side} row {p} channel {c}: {have} vs {want}"
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The walk is llama.cpp's: the whole `k × k` lattice as
+    /// `build_dflash2_selector` packs it (position 1 against the anchor,
+    /// repeated over every predecessor; the rest against the row before's
+    /// candidates; `score[s][q] = succ[cand_s]·(pred[q] ⊙ gate) + unary[s]`),
+    /// walked as `common/speculative.cpp` does — from predecessor 0, each
+    /// position's best successor (`std::max_element`, the first of equal
+    /// maxima) the next one's predecessor. A tie is planted to show the first
+    /// is kept.
+    #[test]
+    fn the_selectors_walk_is_llama_cpps() -> Result<(), SwarmError> {
+        let (words, rank, k, positions) = (40usize, 8usize, 4usize, 6usize);
+        let prev_book = values(words * rank, 3);
+        let next_book = values(words * rank, 5);
+        let row = |book: &[f32], w: u32| book[w as usize * rank..(w as usize + 1) * rank].to_vec();
+        for seed in 0..20u64 {
+            let picks = values(positions * k, 100 + seed);
+            let ranked: Vec<Vec<(u32, f32)>> = (0..positions)
+                .map(|p| {
+                    (0..k)
+                        .map(|s| {
+                            let w = ((picks[p * k + s] + 1.0) * 0.5 * words as f32) as u32;
+                            (w.min(words as u32 - 1), picks[p * k + s] * 3.0)
+                        })
+                        .collect()
+                })
+                .collect();
+            let gates: Vec<Vec<f32>> = (0..positions)
+                .map(|p| values(rank, 900 + seed * 31 + p as u64))
+                .collect();
+            let anchor = (seed % words as u64) as u32;
+            // llama.cpp's lattice, then its walk.
+            let mut predecessor = 0usize;
+            let mut want = Vec::new();
+            for p in 0..positions {
+                let preds: Vec<u32> = if p == 0 {
+                    vec![anchor]
+                } else {
+                    ranked[p - 1].iter().map(|c| c.0).collect()
+                };
+                let lattice: Vec<Vec<f32>> = (0..k)
+                    .map(|q| {
+                        let pred = row(&prev_book, preds[if preds.len() == 1 { 0 } else { q }]);
+                        (0..k)
+                            .map(|s| {
+                                let succ = row(&next_book, ranked[p][s].0);
+                                (0..rank)
+                                    .map(|r| succ[r] * pred[r] * gates[p][r])
+                                    .sum::<f32>()
+                                    + ranked[p][s].1
+                            })
+                            .collect()
+                    })
+                    .collect();
+                let scores = &lattice[predecessor];
+                let best = scores
+                    .iter()
+                    .enumerate()
+                    .fold((0usize, f32::NEG_INFINITY), |(bi, bv), (i, &v)| {
+                        if v > bv {
+                            (i, v)
+                        } else {
+                            (bi, bv)
+                        }
+                    })
+                    .0;
+                predecessor = best;
+                want.push(ranked[p][best].0);
+            }
+            let got = selector_walk(
+                anchor,
+                &ranked,
+                &gates,
+                |w| Ok(row(&prev_book, w)),
+                |w| Ok(row(&next_book, w)),
+            )?;
+            assert_eq!(got, want, "seed {seed}");
+        }
+        // Two candidates tie: the first is kept, as `std::max_element` keeps it.
+        let ranked = vec![vec![(3u32, 1.0f32), (4, 1.0)]];
+        let flat = |_: u32| Ok(vec![0.0f32; rank]);
+        assert_eq!(
+            selector_walk(0, &ranked, &[vec![1.0; rank]], flat, flat)?,
+            vec![3]
+        );
+        Ok(())
+    }
+
+    /// A codebook row read on its own is the row the whole table
+    /// dequantizes to — at Q8_0 (the published file's type) and f32.
+    #[test]
+    fn a_codebook_row_is_the_tables_row() -> Result<(), Box<dyn std::error::Error>> {
+        use candle_core::quantized::{GgmlDType, QTensor};
+        let (words, rank) = (37usize, 64usize);
+        let table = Tensor::from_slice(&values(words * rank, 11), (words, rank), &Device::Cpu)?;
+        for dtype in [GgmlDType::Q8_0, GgmlDType::F32] {
+            let q = QTensor::quantize(&table, dtype)?;
+            let whole: Vec<Vec<f32>> = q.dequantize(&Device::Cpu)?.to_vec2()?;
+            let dir = tempfile::tempdir()?;
+            let path = dir.path().join("codebook.gguf");
+            let mut out = std::fs::File::create(&path)?;
+            gguf_file::write(&mut out, &[], &[("selector_successor.weight", &q)])?;
+            drop(out);
+            let mut file = std::io::BufReader::new(std::fs::File::open(&path)?);
+            let ct = gguf_file::Content::read(&mut file)?;
+            let book = Codebook::read(&ct, &mut file, "selector_successor.weight", rank)?;
+            assert_eq!(book.words, words);
+            for (w, want) in whole.iter().enumerate() {
+                assert_eq!(&book.row(w as u32)?, want, "{dtype:?} word {w}");
+            }
+            assert!(book.row(words as u32).is_err(), "a word past the table");
+            assert!(
+                Codebook::read(&ct, &mut file, "selector_successor.weight", rank / 2).is_err(),
+                "a table whose rows are not the rank"
+            );
+        }
+        Ok(())
     }
 
     /// z-lab's `_attention_mask`, written out: query `i` of `q_len` at

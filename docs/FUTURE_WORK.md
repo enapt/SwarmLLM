@@ -5258,6 +5258,14 @@ the draft on a processor is about a third the TARGET's head over 15 rows (248,32
 and `gemma-4-31B-it-DFlash` 3.07 GB (stage 4); `gpt-oss-20b/120b-DFlash`; `Qwen3-Coder-30B-A3B-DFlash`. Stage 3 is
 built on the 9B split across two local nodes (`examples/split_rig.sh`, `RIG_RTT_MS`), then on Qwen3.6-35B-A3B.
 
+**Stage 2 — built 2026-11-22** (`split::block_drafter::{DynamicConv, Selector, Codebook}`; `docs/invariants/inference.md`
+§ "DFlash 2"): Qwen3.8-27B's drafter loads, and is pinned (z-lab's own Q8_0, 1.92 GiB). Each layer has four dynamic
+convolutions over the block's rows, and a selector picks each guess from the drafter's top 16 by the guess before
+it; both are ported from llama.cpp `4b1a27f`. The two 67.5 MB codebooks stay in system memory. Three tests check it
+against llama.cpp's index arithmetic, and each went red with its piece broken. **Prior art**: z-lab's release and
+llama.cpp's port (`build_dflash2_conv`, the selector's host walk) are the reference. Not checked against a llama.cpp
+run: the 27B is 17.4 GB whole and this machine holds 12 of its 32 parts.
+
 **Stage 3 design (2026-11-08).** Prior art (read at vllm `d76fe93`, sglang `cbbc6b6`, llama.cpp `f477f79`):
 vLLM v1 runs DFlash/EAGLE-3 on the LAST pipeline rank (`v1/worker/gpu/pp_utils.py` `broadcast_drafts`); each rank
 captures its own target layers and relays them RAW, one full row per layer per position in the model's dtype
@@ -5416,7 +5424,7 @@ head fetches that model's drafter once, from a PINNED table — the target's `ge
 and width name one repo, file, size and SHA-256 (Anbeeld's Q8_0 conversions: Qwen3.6-35B-A3B and -27B, Qwen3.5-4B,
 -9B, -35B-A3B, -122B-A10B, -397B-A17B; 0.42-1.85 GB, every header read 2026-11-08) — into `block_drafter.gguf`
 beside the parts, used from the model's next load. Never past `MOST_DRAFTER_BYTES` (2 GiB: Qwen3.5-27B's Q8_0 is
-2.27 GB and is left out; Qwen3.8-27B's DFlash 2 is refused by the loader, so it is not pinned); it asks
+2.27 GB and is left out; Qwen3.8-27B's DFlash 2 is pinned since stage 2 was built, 2026-11-22); it asks
 `metered_hold` and the disk reserve first, one fetch at a time, a failure waits 6 h; the file goes when NEITHER end
 is held any more (a part being fetched again, or no manifest, keeps it). The 35B-A3B conversion was checked against
 llama.cpp's converter run on z-lab's safetensors here: 69 of 69 tensors identical. **Prior art**: no runtime pairs a

@@ -45,7 +45,10 @@ pub(crate) const MOST_DRAFTER_BYTES: u64 = 2 << 30;
 /// publisher's llama.cpp conversions of z-lab's weights (Anbeeld, read
 /// 2026-11-08: each header checked — width, target layers inside the model,
 /// the mask token, no tensor this loader lacks). Qwen3.8-27B's drafter is
-/// DFlash 2 (dynamic convolutions, a selector), which this loader refuses.
+/// DFlash 2 (dynamic convolutions, a selector; built 2026-11-22), pinned to
+/// z-lab's own Q8_0 conversion (the header read: 5 layers, block 8, kernel 2,
+/// groups of 16, selector rank 256 and top 16, target layers inside the 64,
+/// mask token 248070; 1.92 GiB, under the bound).
 /// Gemma 4's (#428 stage 4, read 2026-11-16, the same checks): the 12B's
 /// states Gemma's embedding scale and cap, which the loader takes only as the
 /// target's own; the 26B-A4B's and 31B's state neither (converted before
@@ -141,6 +144,15 @@ pub(crate) const PINNED: &[PinnedDrafter] = &[
         file: "gemma4-31b-it-dflash-Q8_0.gguf",
         size_bytes: 1_647_944_672,
         sha256: "703529e40dc132fca3992a151c5e78d7644c377da48f433c5360560764d9b957",
+    },
+    PinnedDrafter {
+        target_name: "Qwen3.8 27B",
+        target_architecture: "qwen35",
+        target_width: 5120,
+        repo: "z-lab/Qwen3.8-27B-DFlash2-GGUF",
+        file: "Qwen3.8-27B-DFlash2-Q8_0.gguf",
+        size_bytes: 2_056_414_816,
+        sha256: "c18e800daedc59ca68fd13b6a856d795746af6d399a9279ac6a277d1d422f87e",
     },
 ];
 
@@ -439,7 +451,11 @@ mod tests {
         assert_eq!(pinned_for(Some("Qwen3.6 35B A3B"), "qwen35", 2048), None);
         assert_eq!(pinned_for(Some("Qwen3.5 9B"), "qwen35", 2560), None);
         assert_eq!(pinned_for(None, "qwen35", 4096), None);
-        assert_eq!(pinned_for(Some("Qwen3.8 27B"), "qwen35", 5120), None);
+        // Qwen3.8-27B's DFlash 2, by the name bartowski's upload carries.
+        let q38 = pinned_for(Some("Qwen3.8 27B"), "qwen35", 5120).expect("the 27B's DFlash 2");
+        assert_eq!(q38.repo, "z-lab/Qwen3.8-27B-DFlash2-GGUF");
+        assert_eq!(pinned_for(Some("Qwen3.8-27B"), "qwen35", 5120), Some(q38));
+        assert_eq!(pinned_for(Some("Qwen3.5 27B"), "qwen35", 5120), None);
         // Gemma 4, as bartowski's and Google's uploads name it.
         let g = pinned_for(Some("Gemma 4 12B It"), "gemma4", 3840).expect("the 12B");
         assert_eq!(g.repo, "Anbeeld/gemma4-12B-it-DFlash-GGUF");

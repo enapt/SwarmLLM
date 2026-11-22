@@ -9374,7 +9374,8 @@ alphanumerics, its architecture and its width name one repo, file, size and SHA-
 **What was checked before pinning.** Every pinned file's header was range-fetched and read (2026-11-08): arch
 `dflash`, its width the target's, its target layers inside the target. The Qwen3.6-35B-A3B file was compared with
 llama.cpp's own converter run on z-lab's safetensors here: 69 of 69 tensors byte-identical. Left out: Qwen3.5-27B
-(its Q8_0 is 2.27 GB, past `MOST_DRAFTER_BYTES`), Qwen3.8-27B (DFlash 2, which the loader refuses).
+(its Q8_0 is 2.27 GB, past `MOST_DRAFTER_BYTES`). Qwen3.8-27B's DFlash 2 was pinned once the loader read it
+(2026-11-22, § "DFlash 2" below).
 
 **When it goes.** Only when NEITHER end is held any more (`Ends::Gone`, read from `parts_landed_here`). A first
 version gave it back whenever the ends were not SERVABLE — a part being fetched again, or a manifest not yet loaded,
@@ -9501,6 +9502,38 @@ on the live node; `cut_part.py` rebuilt it from the same upload, BLAKE3 equal to
 own models directory.
 
 **Moved from `arch-inference.md` (trimmed 2026-11-17):** Weights AND cache are charged as one figure: weighed apart, #451's drafter was put on a card that then refused it; loaded first, a 27B's 1.85 GB drafter ran a 12 GB card out of memory on every load - hence one figure, `block_drafter::charged`. `fits_beside_one_conversation` is vLLM's rule (a quarter refused it on a 16 GB machine's first segment). Scales: llama.cpp PR #29802 measured sqrt(hidden) keeping more; an unstated scale is the target's. `target_layers` stores id + 1; llama.cpp reads that layer's INPUT. On the processor the whole head read for every block row was most of a draft (Qwen3.5-4B: 155-172 -> 76-99 ms at 15 guesses); a whole model there attaches no drafter because the head writes faster and the drafter's 0.4-1.85 GB stays free. A drafter's `fc` read paid whole for one row in a round the block sat out, hence context rows are made at the next draft. z-lab's causal rule kept 6.47 against 5.98 a block on code, 1.44 against 1.30 on a story, over one fixed reply. On a card a split's card-held first segment attaches one too (2026-11-08 night: Qwen3.5-9B, first part on an RTX 3070, rest on a processor, 130 ms - code 1.7-1.9x, a class 2.2-2.4x, a story 1.4-1.5x; replies part at near ties as a card's checks do). Count is priced as one computer's: its own step (a one-token round over the split). #451 (ON since 2026-11-14): Qwen3.5-9B at 25/32 card layers, code 30.4 against 20.9 tok/s, prose and a story no slower; the output crosses to the card's head per draft; `drafter_home` needs a KNOWN processor-side budget and no borrowed head. Where no load attaches it, a computer fetches none and gives back one on disk.
+
+### DFlash 2: four convolutions a layer and a selector (stage 2, 2026-11-22)
+
+Qwen3.8-27B's drafter is DFlash 2 (`z-lab/Qwen3.8-27B-DFlash2-GGUF`, z-lab's own Q8_0, 2,056,414,816 bytes; header read
+in full 2026-11-22: arch `dflash`, 5 layers at width 5120, block 8, both-way attention, a 2048 window on every layer,
+target layers 6/20/34/48/62 of 64, `conv_kernel_size` 2, `conv_group_size` 16, `selector_rank` 256, `selector_top_k`
+16). It is DFlash 1 plus two things, ported from llama.cpp's `dflash.cpp` (`4b1a27f`):
+
+- **A dynamic convolution before and after each half of a layer** (`split::block_drafter::DynamicConv`): after the
+  attention norm (side 0) and after `wo` (side 1), after the feed-forward norm (side 0) and after `down` (side 1).
+  The coefficients are `conv_proj(normed input)`, made once and shared by both sides of that half; `out[p][c] =
+  Σ_tap (dyn[p][g + G·(tap + K·side)] + base[c + C·tap + C·K·side]) · x[p−tap][c]`, G = C / group, g = c / group,
+  causal inside the block and zero before its first row. Only the block's rows are convolved; context rows are
+  injected exactly as in DFlash 1. `conv_base` has no `.weight` suffix and is read as f32.
+- **A selector that picks each guess from the drafter's top 16 by its predecessor** (`Selector`, `selector_walk`):
+  `score[s] = succ[cand_s] · (pred[before] ⊙ gate) + logit[cand_s]`, gate = `selector_hidden` × the output-normed row;
+  `before` starts at the anchor and becomes each pick; ties go to the first (`sampling::argmax`). llama.cpp's
+  `p_min` cut defaults to 0, off, and is not ported. The candidates are the drafter's ordinary ranked rows
+  (`BlockDrafter::ranked`, the hot rows on a processor), so the selector costs 17 table rows a guess.
+
+**The two codebooks stay in system memory** (`Codebook`): 248,320 words × 256 at Q8_0 = 67.5 MB each, read one row at
+a time (`QStorage::from_data` over the row's bytes). They are counted in the drafter's charged figure though they
+never reach a card; the 135 MB over-charge is the conservative side of #451's one-figure rule.
+
+**How it was checked.** Three tests reproduce llama.cpp's index arithmetic with naive loops and compare:
+`a_dynamic_convolution_is_llama_cpps` (five shapes, both sides, 1e-5), `the_selectors_walk_is_llama_cpps` (the whole
+k × k lattice over 20 seeds, plus a planted tie that keeps the first) and `a_codebook_row_is_the_tables_row` (Q8_0
+and f32 through a real GGUF; a word past the table and a wrong rank refused). Each went red with its piece broken
+(a convolution reading later rows, a predecessor that never moves, a row one word off). No llama.cpp reference run:
+the 27B is 17.4 GB whole and this machine holds 12 of its 32 parts.
+**Prior art**: z-lab's DFlash 2 release and llama.cpp's port (`build_dflash2_conv`, the selector's host walk) are the
+reference. Nothing past them was needed for a port.
 
 
 ## A card between a split's forwards keeps its clocks (2026-11-20, FUTURE_WORK #487)
