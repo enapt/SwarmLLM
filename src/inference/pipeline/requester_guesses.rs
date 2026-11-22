@@ -199,6 +199,9 @@ pub(super) fn start(
                     ranges: &[],
                     requester,
                 },
+                // The head checks chains of these (the n-gram loop), and takes
+                // a refused one back by cutting its cache.
+                engine_drafter::DrafterUse::Anywhere,
             )
         })
         .flatten();

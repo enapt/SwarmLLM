@@ -244,35 +244,68 @@ fn within_reach(drafter: &DrafterSize, target_size: u64, small_fraction: u64) ->
     drafter.size.saturating_mul(fraction) <= target_size
 }
 
-/// `model` as a drafter for `target`, if it can be one: held WHOLE here, not
-/// the target, no recurrent state (a guess that is refused must be taken back,
-/// and a DeltaNet layer's state can be only in a tree that flows —
-/// `SplitModel::grow_flow` reads one since 2026-11-22; the coordinator choosing
-/// such a drafter for a flow is `docs/plans/recurrent_flow.md` stage 4), and
-/// the target's vocabulary.
-fn spec_for(state: &SharedState, target: &ModelId, drafter: ModelId) -> Option<DrafterSpec> {
+/// What a drafter will be asked to do — REQUIRED wherever one is chosen
+/// ([`engine_drafter_for`]), so no path is handed a drafter it cannot use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DrafterUse {
+    /// Guess chains, trees and flows, and take a refused guess back by cutting
+    /// its cache: no recurrent state.
+    Anywhere,
+    /// Grow a tree that flows and nothing else (`docs/plans/recurrent_flow.md`
+    /// stage 4): a reply of a RECURRENT target guesses only there. A drafter
+    /// with recurrent state may serve it — its tree is held as a flow too,
+    /// taken back only to a start (`SplitModel::grow_flow`, stage 3 (b)) — and
+    /// any other must read a tree (`ModelArch::reads_draft_trees`), or it would
+    /// fail its first flow. Never the planner's room nor the download pass's
+    /// fetch: those keep [`DrafterUse::Anywhere`] until stage 5 measures the
+    /// flow pays.
+    OnlyInAFlow,
+}
+
+/// Can a drafter of `arch` be used as `using` asks ([`DrafterUse`])?
+fn usable_for(arch: &crate::inference::model_arch::ModelArch, using: DrafterUse) -> bool {
+    match using {
+        DrafterUse::Anywhere => !arch.is_hybrid_ssm(),
+        DrafterUse::OnlyInAFlow => arch.is_hybrid_ssm() || arch.reads_draft_trees(),
+    }
+}
+
+/// `model` as a drafter for `target`, if it can be one for `using`: held
+/// WHOLE here and [`could_draft`].
+fn spec_for(
+    state: &SharedState,
+    target: &ModelId,
+    drafter: ModelId,
+    using: DrafterUse,
+) -> Option<DrafterSpec> {
     if !state.has_complete_split_model(&drafter) {
         return None;
     }
-    could_draft(state, target, drafter)
+    could_draft(state, target, drafter, using)
 }
 
 /// [`spec_for`] without asking that the model be held: what its header says —
-/// not the target, no recurrent state, the target's vocabulary. The download
-/// pass asks it of a model it may fetch ([`drafter_to_acquire`]).
-fn could_draft(state: &SharedState, target: &ModelId, drafter: ModelId) -> Option<DrafterSpec> {
+/// not the target, the target's vocabulary, and no recurrent state (a guess
+/// that is refused must be taken back) unless it will only grow a flow
+/// ([`DrafterUse`]). The download pass asks it of a model it may fetch
+/// ([`drafter_to_acquire`]).
+fn could_draft(
+    state: &SharedState,
+    target: &ModelId,
+    drafter: ModelId,
+    using: DrafterUse,
+) -> Option<DrafterSpec> {
     if drafter == *target {
         return None;
     }
-    let (layers, recurrent) = {
+    let (layers, arch) = {
         let meta = state.gguf_meta_for(&drafter)?;
         (
             meta.block_count as u32,
-            crate::inference::model_arch::ModelArch::from_gguf_arch(&meta.architecture)
-                .is_hybrid_ssm(),
+            crate::inference::model_arch::ModelArch::from_gguf_arch(&meta.architecture),
         )
     };
-    if recurrent {
+    if !usable_for(&arch, using) {
         return None;
     }
     let reads = drafter_vocabulary(state, target, &drafter)?;
@@ -301,10 +334,28 @@ pub(crate) fn engine_drafter_for(
     target: &ModelId,
     conversation: u64,
     here: &TargetHere<'_>,
+    using: DrafterUse,
 ) -> Option<DrafterSpec> {
-    chosen(state, target, |s| {
+    chosen(state, target, using, |s| {
         admitted(state, target, s, conversation, here)
     })
+}
+
+/// Would `spec` guess on a card — where [`engine_drafter_for`] weighed it
+/// ([`admitted`]): the one place a tree flows (`dsd_tree::trees_wanted`). Asked
+/// before a recurrent target's prompt pass (`dsd_flow::recurrent_flow_may_start`),
+/// where the drafter is not loaded yet; admission off reads as yes, as the
+/// choice took it.
+pub(crate) fn guesses_on_a_card(
+    state: &SharedState,
+    spec: &DrafterSpec,
+    conversation: u64,
+    here: &TargetHere<'_>,
+) -> bool {
+    matches!(
+        admitted(state, &spec.guesses_for, spec, conversation, here),
+        Some(DrafterPlace::Card | DrafterPlace::Unasked)
+    )
 }
 
 /// The target's layers a plan gives this node — `ranges` — and whose work they
@@ -322,7 +373,9 @@ pub(crate) fn drafter_to_leave_room_for(
     state: &SharedState,
     target: &ModelId,
 ) -> Option<DrafterSpec> {
-    chosen(state, target, |_| Some(DrafterPlace::Unasked))
+    chosen(state, target, DrafterUse::Anywhere, |_| {
+        Some(DrafterPlace::Unasked)
+    })
 }
 
 /// How long a split wants a drafter after it last ran
@@ -523,7 +576,7 @@ fn next_drafter_step(
         small_drafter_fraction(state),
         to_beat,
         |m| size_proxy(state, m),
-        |m| could_draft(state, target, m),
+        |m| could_draft(state, target, m, DrafterUse::Anywhere),
     )
 }
 
@@ -597,10 +650,11 @@ fn acquisition_among(
 fn chosen(
     state: &SharedState,
     target: &ModelId,
+    using: DrafterUse,
     keep: impl Fn(&DrafterSpec) -> Option<DrafterPlace>,
 ) -> Option<DrafterSpec> {
     if let Some(named) = state.cfg().inference.draft_model.clone() {
-        return spec_for(state, target, ModelId(named)).filter(|s| keep(s).is_some());
+        return spec_for(state, target, ModelId(named), using).filter(|s| keep(s).is_some());
     }
     let target_size = size_proxy(state, target)?.size;
     // Collected first: `spec_for` reads the same map, and a read nested inside
@@ -622,7 +676,7 @@ fn chosen(
         target_size,
         small_drafter_fraction(state),
         sized,
-        |m| spec_for(state, target, m).and_then(|s| keep(&s).map(|place| (s, place))),
+        |m| spec_for(state, target, m, using).and_then(|s| keep(&s).map(|place| (s, place))),
     )
 }
 
@@ -1707,6 +1761,29 @@ mod tests {
     /// Australia, only the 0.5B had room on the card beside the layers; size
     /// first chose the 1.5B in system memory, no tree flowed, and prose fell
     /// from 19.0 to 7.2 tok/s.
+    #[test]
+    fn a_recurrent_drafter_is_chosen_only_to_grow_a_flow() {
+        use crate::inference::model_arch::ModelArch;
+        let arch = ModelArch::from_gguf_arch;
+        // Qwen 3.5's DeltaNet takes a refused guess back only to a tree's
+        // start: a flow, never a chain, a stream or tree rounds.
+        for recurrent in ["qwen35", "qwen35moe"] {
+            assert!(
+                !usable_for(&arch(recurrent), DrafterUse::Anywhere),
+                "{recurrent}"
+            );
+            assert!(
+                usable_for(&arch(recurrent), DrafterUse::OnlyInAFlow),
+                "{recurrent}"
+            );
+        }
+        // Any other drafter of a flow must read a tree, or its first fails.
+        assert!(usable_for(&arch("qwen2"), DrafterUse::OnlyInAFlow));
+        assert!(usable_for(&arch("llama"), DrafterUse::OnlyInAFlow));
+        assert!(!usable_for(&arch("gemma2"), DrafterUse::OnlyInAFlow));
+        assert!(usable_for(&arch("gemma2"), DrafterUse::Anywhere));
+    }
+
     #[test]
     fn a_drafter_on_the_card_is_chosen_before_a_larger_one_in_system_memory() {
         let sized = |size| DrafterSize {

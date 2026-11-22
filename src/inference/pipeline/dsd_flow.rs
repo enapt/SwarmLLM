@@ -820,6 +820,21 @@ pub(super) fn flow_requested() -> bool {
     })
 }
 
+/// Whether a reply of a recurrent target may guess ahead in a tree that
+/// flows (`docs/plans/recurrent_flow.md`): ON unless `SWARMLLM_RECURRENT_FLOW=0`
+/// (or `off` / `false`), which keeps such a reply in the n-gram loop and no
+/// recurrent model drafting — the A/B inside one binary. Asked by
+/// `flow_possible` and `engine_drafter::could_draft`.
+pub(crate) fn recurrent_flow_on() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("SWARMLLM_RECURRENT_FLOW").ok().as_deref(),
+            Some("0") | Some("off") | Some("false")
+        )
+    })
+}
+
 /// Whether a run that finishes on this node's own last layers — "start and
 /// finish on this computer", automatic wherever this node holds both ends —
 /// flows too, its rows drawn here (`FlowRun::finish_here`, #369): ON unless
@@ -969,18 +984,79 @@ fn cuts_below(next: &Here, waiting: &Here) -> bool {
 /// (`finish_here_on`), every peer of the run reads a tree that flows
 /// (`features::DRAFT_TREE_FLOW`, beside `DRAFT_TREES` — a peer that does not
 /// draw reads the same tree, as a chain's middle hop does), and the sampler
-/// reads no history — a draw per row reads no path's tokens.
+/// reads no history — a draw per row reads no path's tokens. Where the tree
+/// goes with the walk's row ([`flows_with_the_walk`], REQUIRED: a recurrent
+/// target), every peer reads that too (`features::RECURRENT_FLOW`) and
+/// `SWARMLLM_RECURRENT_FLOW` is not off.
 pub(super) fn flow_possible(
     state: &SharedState,
     shape: &StreamShape,
     sampling: &crate::types::SamplingParams,
+    with_the_walk: bool,
 ) -> bool {
-    use swarmllm_types::node::features::{DRAFT_TREES, DRAFT_TREE_FLOW};
+    use swarmllm_types::node::features::{DRAFT_TREES, DRAFT_TREE_FLOW, RECURRENT_FLOW};
+    let needs = DRAFT_TREE_FLOW | DRAFT_TREES | if with_the_walk { RECURRENT_FLOW } else { 0 };
     (shape.far_walks() || finish_here_on())
+        && (!with_the_walk || recurrent_flow_on())
         && !crate::inference::sampling::sampler_reads_history(sampling)
         && std::iter::once(&shape.far.node_id)
             .chain(shape.chain.iter().map(|h| &h.node_id))
-            .all(|n| state.peer_advertises_feature(n, DRAFT_TREE_FLOW | DRAFT_TREES))
+            .all(|n| state.peer_advertises_feature(n, needs))
+}
+
+/// The walk's row as a forward names it (`LayerForward::flow_walk`): its row
+/// in that forward's tree, whose first `lead` rows are a rebase's path — the
+/// walk is then the rebased tree's first row, right after them.
+fn walk_on_the_forward(lead: usize, at: usize) -> Result<u16, SwarmError> {
+    u16::try_from(lead + at)
+        .map_err(|_| SwarmError::Internal("a tree that flows ran past the walk's numbering".into()))
+}
+
+/// Whether a reply of `model` flows with the walk's row on every forward
+/// (`LayerForward::flow_walk`): a model with recurrent layers (Qwen 3.5's
+/// DeltaNet), which read the tree from a checkpoint at that row
+/// (`docs/plans/recurrent_flow.md`). The one answer `flow_possible`, the entry
+/// gate ([`recurrent_flow_may_start`]) and [`FlowRun`] ask. Never for another
+/// family: a peer older than `features::RECURRENT_FLOW` cannot open a forward
+/// carrying it.
+pub(super) fn flows_with_the_walk(state: &SharedState, model: &crate::types::ModelId) -> bool {
+    !super::distributed::speculation_can_roll_back(
+        state
+            .gguf_meta_for(model)
+            .map(|m| m.architecture.clone())
+            .as_deref(),
+    )
+}
+
+/// May a reply of a RECURRENT target guess ahead with a drafter at all: only
+/// in a tree that flows, where its segments take back to the flow's starts
+/// (`docs/plans/recurrent_flow.md` stage 4) — the flow's own conditions
+/// (`flow_possible` with the walk, trees checked by every segment, the tree
+/// line `dsd_tree::trees_wanted`), asked BEFORE any token by
+/// `try_dsd_distributed`, so a reply refused here still falls through to the
+/// n-gram loop. The drafter is not loaded yet: its place is asked where it
+/// would load (`engine_drafter::guesses_on_a_card`) once it is chosen, and the
+/// line here takes it on a card.
+pub(super) fn recurrent_flow_may_start(exec: &PipelineExecutor) -> bool {
+    use super::dsd_tree::FlowDraws;
+    let state = &exec.shared_state;
+    let segments = &exec.assignment.segments;
+    flow_requested()
+        && super::tree_check_possible(state, segments, swarmllm_types::node::features::DRAFT_TREES)
+        && super::dsd_stream::stream_shape(state, segments, exec.verify_may_chain())
+            .filter(|shape| flow_possible(state, shape, &exec.request.sampling_params, true))
+            .is_some_and(|shape| {
+                super::dsd_tree::trees_wanted(
+                    super::every_segment_runs_on_a_card(state, segments, &exec.request.model_id),
+                    true,
+                    super::farthest_segment_round_trip_ms(state, segments),
+                    Some(if shape.far_walks() {
+                        FlowDraws::AtTheFarEnd
+                    } else {
+                        FlowDraws::Here
+                    }),
+                )
+            })
 }
 
 /// A forward out being read.
@@ -1018,6 +1094,8 @@ struct Here {
     wire: Vec<u16>,
     from: u32,
     truncate: Option<u32>,
+    /// The walk's row the forward named (`LayerForward::flow_walk`).
+    walk: Option<u16>,
 }
 
 /// Answers released in the order their forwards were sent. This node's
@@ -1131,6 +1209,9 @@ struct FlowRun<'a, 'r> {
     drafter: &'a mut EngineDrafter,
     drafting_off: bool,
     drafter_warm: bool,
+    /// Every forward names the walk's row ([`flows_with_the_walk`]: a
+    /// recurrent target).
+    with_the_walk: bool,
     coupling: Option<u64>,
     io: StreamIo<'a>,
     reply: StreamReply<'r>,
@@ -1297,6 +1378,7 @@ impl PipelineExecutor {
             drafter,
             drafting_off: false,
             drafter_warm: false,
+            with_the_walk: flows_with_the_walk(&self.shared_state, &self.request.model_id),
             coupling,
             io,
             reply,
@@ -1822,9 +1904,18 @@ impl FlowRun<'_, '_> {
         // 14B's 7-9 tokens a second as 2.
         let index_pos = rows.index_pos as u32;
         let count = rows.tokens.len();
+        // Through recurrent layers the walk's row goes with every forward,
+        // this node's segments' too (`LayerForward::flow_walk`): its row in
+        // THIS forward's tree — a rebase's path leads it, and the walk is the
+        // rebased tree's first row, after the path (`FlowTree::rebase`).
+        let flow_walk = self
+            .with_the_walk
+            .then(|| walk_on_the_forward(rows.lead, self.flow.at()))
+            .transpose()?;
         let tree = |forward: &mut crate::types::LayerForward| {
             forward.draft_parents = rows.wire.clone();
             forward.draft_tree_from = Some(rows.from as u32);
+            forward.flow_walk = flow_walk;
         };
 
         let mut activations = super::pack_verify_tokens_to_le_bytes(&rows.tokens);
@@ -1873,6 +1964,7 @@ impl FlowRun<'_, '_> {
             wire: rows.wire.clone(),
             from: rows.from as u32,
             truncate: rows.truncate,
+            walk: flow_walk,
         });
         let far = &self.shape.far;
         let mut forward = super::build_spec_verify_forward(
@@ -2209,12 +2301,16 @@ impl FlowRun<'_, '_> {
             }
             return Ok(Taken::Continue);
         };
+        // The last forward's walk: the walk only moves down the tree, so the
+        // joined rows hold every row it stood on, and a recurrent layer keeps
+        // what follows it — what the forwards read one by one would have left.
         let read = Here {
             far_input: Vec::new(),
             index_pos: first.index_pos,
             wire: last.wire.clone(),
             from: first.from,
             truncate: None,
+            walk: last.walk,
         };
         for answer in &due {
             self.note_dead_here(&answer.0);
@@ -2309,6 +2405,7 @@ impl FlowRun<'_, '_> {
             );
             forward.draft_parents = read.wire.clone();
             forward.draft_tree_from = Some(read.from);
+            forward.flow_walk = read.walk;
             let result = self
                 .state
                 .model_process_pool
@@ -3180,6 +3277,112 @@ mod tests {
         assert_eq!(order.peek_due(), None);
     }
 
+    /// A rebase's forward reads the path as a chain and then the rebased
+    /// tree, all numbered from the OLD start (`FlowTree::rebase_forward`);
+    /// a recurrent layer keeps its checkpoint at the row the walk names, so
+    /// that row must be the walk's own token at the end of the path — the
+    /// state the next forward's tree, starting there, reads from
+    /// (`qwen35::FlowRows::rebase_onto`). An ordinary forward names the walk
+    /// as the tree numbers it.
+    #[test]
+    fn a_rebases_forward_names_the_walk_after_the_path() {
+        let mut flow = FlowTree::new(100, 7).unwrap();
+        let a = flow.push(0, 11).unwrap();
+        let b = flow.push(a, 12).unwrap();
+        let side = flow.push(a, 13).unwrap();
+        let c = flow.push(b, 14).unwrap();
+        flow.push(c, 15).unwrap();
+        flow.push(side, 16).unwrap();
+        flow.advance(a).unwrap();
+        flow.advance(b).unwrap();
+        flow.advance(c).unwrap();
+        assert_eq!(walk_on_the_forward(0, flow.at()).unwrap(), c as u16);
+        let walked = flow.tokens()[c];
+        let rebased = flow.rebase().unwrap();
+        let (tokens, wire) = flow.rebase_forward(&rebased);
+        let walk = usize::from(walk_on_the_forward(rebased.path.len(), flow.at()).unwrap());
+        let tree =
+            crate::inference::draft_tree::DraftTree::from_wire(rebased.old_base, &wire).unwrap();
+        assert_eq!(
+            tokens[walk], walked,
+            "the walk's row carries the walk's token"
+        );
+        let mut line = vec![walk];
+        while let Some(p) = tree.parent(*line.last().unwrap()) {
+            line.push(p);
+        }
+        line.reverse();
+        assert_eq!(
+            line,
+            (0..=rebased.path.len()).collect::<Vec<_>>(),
+            "its line is the path, a chain from the old start"
+        );
+        assert_eq!(
+            rebased.old_base + walk,
+            flow.base(),
+            "and it is the new start's row"
+        );
+        assert!(walk_on_the_forward(usize::from(u16::MAX), 1).is_err());
+    }
+
+    /// Through recurrent layers every forward carries the walk's row
+    /// (`flow_walk`), which a peer older than `features::RECURRENT_FLOW`
+    /// cannot open: a recurrent target's tree flows only where EVERY peer of
+    /// the run advertises it, a chain's middle hop too. Another family's flow
+    /// asks no such bit.
+    #[test]
+    fn a_recurrent_targets_tree_flows_only_through_peers_that_read_the_walk() {
+        use crate::types::{ChainHop, NodeId, PipelineSegment, SamplingParams, ShardId};
+        use swarmllm_types::node::features::{DRAFT_TREES, DRAFT_TREE_FLOW, RECURRENT_FLOW};
+        let state = super::super::tests::make_test_state();
+        let (far, hop) = (NodeId([0x31; 32]), NodeId([0x32; 32]));
+        let shape = StreamShape {
+            near: Vec::new(),
+            far: PipelineSegment {
+                node_id: far.clone(),
+                shard_id: ShardId {
+                    model_id: crate::types::ModelId("qwen3.5-9b".into()),
+                    index: 0,
+                },
+                layer_range: (0, 16),
+            },
+            chain: vec![ChainHop {
+                node_id: hop.clone(),
+                layer_range: (16, 32),
+            }],
+            after: Vec::new(),
+        };
+        let greedy = SamplingParams {
+            temperature: 0.0,
+            ..Default::default()
+        };
+        let flows = |far_reads: u64, hop_reads: u64, with_the_walk: bool| {
+            for (node, features) in [(&far, far_reads), (&hop, hop_reads)] {
+                state.peer_registry.insert(
+                    node.clone(),
+                    super::super::tests::peer_advertising(node, features),
+                );
+            }
+            flow_possible(&state, &shape, &greedy, with_the_walk)
+        };
+        let flow = DRAFT_TREES | DRAFT_TREE_FLOW;
+        assert!(flows(flow, flow, false), "another family's flow");
+        assert!(!flows(flow, flow, true), "neither reads the walk");
+        assert!(
+            !flows(flow | RECURRENT_FLOW, flow, true),
+            "the middle hop does not"
+        );
+        assert!(
+            !flows(flow, flow | RECURRENT_FLOW, true),
+            "the first peer does not"
+        );
+        assert!(flows(flow | RECURRENT_FLOW, flow | RECURRENT_FLOW, true));
+        assert!(
+            !flows(RECURRENT_FLOW, RECURRENT_FLOW, true),
+            "and the flow itself"
+        );
+    }
+
     fn here(index_pos: u32, wire_len: usize, from: u32, truncate: Option<u32>) -> Here {
         Here {
             far_input: Vec::new(),
@@ -3187,6 +3390,7 @@ mod tests {
             wire: (0..wire_len).map(|i| i as u16).collect(),
             from,
             truncate,
+            walk: None,
         }
     }
 

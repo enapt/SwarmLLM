@@ -6334,6 +6334,17 @@ round costs one per check.
   2026-10-22, gotcha #932). A peer
   gone silent is the router's to re-plan, never waited on twice. Fault switch:
   `SWARMLLM_FAULT_FLOW_FAIL=<n>`.
+- **A RECURRENT target guesses only in a flow** (Qwen 3.5's DeltaNet, 2026-11-22,
+  `docs/plans/recurrent_flow.md` stage 4): its segments take a refused guess back only to a
+  tree's start, which they keep only while the tree flows. `try_dsd_distributed` asks
+  `dsd_flow::recurrent_flow_may_start` before any token (every peer advertising
+  `RECURRENT_FLOW`, the tree line), chooses a drafter `DrafterUse::OnlyInAFlow` that guesses on a
+  card, and otherwise hands the reply to the n-gram loop untouched. Every flowing forward names
+  the walk's row (`walk_on_the_forward`: a rebase's is the path's length). Outside a flow it
+  goes a token a round: a failed flow's take-over cuts to the settled start, which every
+  recurrent layer keeps, and reads the reply again as a chain. Prior art: vLLM, SGLang and
+  llama.cpp verify a recurrent model's guesses one check at a time; none keeps checks in flight
+  (§ Prior art of the plan). A/B `SWARMLLM_RECURRENT_FLOW=0`.
 - **A run that finishes HERE flows too, its rows drawn by this node's last layers** (#369,
   2026-10-29). "Start and finish on this computer" is automatic wherever this node holds both
   ends, and that shape ran tree rounds — 1.6-2.2x slower than the flow at the same split on TH↔AU.

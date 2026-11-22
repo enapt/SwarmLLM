@@ -1,8 +1,9 @@
 # A tree that flows through recurrent layers (Qwen 3.5 / 3.6 / 3.8) — plan, 2026-11-22
 
-Status: stages 1-3 BUILT (2026-11-22: the layer on the processor and on a card, the worker and the wire, the
-recurrent drafter's own growth, with tests; no coordinator sends a walk or picks a recurrent drafter until stage 4).
-Stages 4-5 are PLAN. Figures are MEASURED (our records), READ (a
+Status: stages 1-4 BUILT (2026-11-22: the layer on the processor and on a card, the worker and the wire, the
+recurrent drafter's own growth, the coordinator's gates and walk, with tests). Stage 5 — the measurement that
+decides whether it stays on — is PLAN; until it runs, a recurrent split guesses in a flow only where a node HOLDS a
+flow drafter (nothing fetches or leaves room for one, § Stage 4 as built). Figures are MEASURED (our records), READ (a
 header or source) or DERIVED.
 
 ## Why
@@ -103,8 +104,8 @@ state a chain read of the reply would reach.
   only where every peer segment advertises `RECURRENT_FLOW`, the drafter's worker reads a flowing tree, and every
   segment and the drafter run on a CARD (the flow's existing rule, `dsd_tree::trees_wanted`).
 - `engine_drafter` admits a recurrent drafter only for the flow.
-- A failed flow finishes in tree rounds today (`rounds_may_finish`); for a recurrent model it finishes in the n-gram
-  loop's rounds (one check at a time), which every segment already takes back.
+- A failed flow finishes in tree rounds today (`rounds_may_finish`); for a recurrent model it finishes one check at a
+  time (as built: a token a round, § Stage 4 as built — the n-gram loop cannot take a reply over part-way).
 
 ## Stages and their kill tests
 
@@ -229,7 +230,36 @@ ignore the walk; a recurrent drafter's flowing reads are claimed as the segments
 `a_recurrent_drafter_grows_a_tree_that_flows` (Qwen3.5-0.8B, processor): four calls — rows following an earlier
 call's, the walk onto a draw no row carried, a rebase — and each of the 30 proposals is among its parent's 8 likeliest
 followers in the same tree read whole; red (checked) without the walk: the second call's forward is refused.
-`engine_drafter::could_draft` still refuses a recurrent drafter: choosing one only for a flow is stage 4.
+
+## Stage 4 as built (2026-11-22): the coordinator
+
+- **The entry** (`distributed.rs`): the drafter's path (`try_dsd_distributed`) runs for a recurrent target too unless
+  `SWARMLLM_RECURRENT_FLOW=0`; the single-segment path stays closed. Before any token it asks
+  `dsd_flow::recurrent_flow_may_start` — the flow switch, `tree_check_possible`, a stream shape whose every peer
+  advertises `RECURRENT_FLOW` beside `DRAFT_TREE_FLOW | DRAFT_TREES` (`flow_possible`'s new `with_the_walk`, from
+  `dsd_flow::flows_with_the_walk`, the one answer), and the tree line (`trees_wanted`, the drafter taken on a card).
+  Refused → `Ok(None)`, and the n-gram loop runs the reply as before. A llama.cpp drafter is refused the same way.
+- **The drafter** (`engine_drafter`): `DrafterUse` is REQUIRED on `engine_drafter_for`. `OnlyInAFlow` (passed only
+  for a recurrent target) admits a recurrent drafter, or one whose family reads trees; `Anywhere` (the requester's
+  chains, the planner's room, the download pass) keeps refusing recurrent drafters. The chosen one must guess on a
+  card where it would load (`guesses_on_a_card`, `admitted`'s place), else `Ok(None)` before the prompt pass. Nothing
+  is fetched or noted for a recurrent target (`note_split_wanting_a_drafter` is skipped): the download pass and the
+  planner's room move to a recurrent drafter only once stage 5 measures the flow pays.
+- **The walk** (`FlowRun::send`, `read_here`, `take_together`): every flowing forward — this node's segments before
+  the run, the far one, this node's after it — carries `flow_walk` = `walk_on_the_forward(rows.lead, flow.at())`: the
+  walk's row in that forward's tree, which for a rebase's forward is the path's length (the rebased tree's row 0 after
+  the path, test `a_rebases_forward_names_the_walk_after_the_path`). A read joining several answers names the last
+  one's walk: the walk only moves down the tree, so the joined rows hold every row it stood on.
+- **After the prompt pass** (`dsd.rs`): a recurrent target's tree flows wherever `flow_possible` still holds — its line
+  was asked before the pass, and outside a flow it guesses nothing. Never tree rounds, never the chain stream. Where it
+  does not flow, or the flow fails, the rest goes a token a round with drafting off: the failure's take-over
+  (`rounds_take_over`) cuts every segment to the flow's settled start — a start each recurrent layer keeps
+  (`FlowRows::state_at`) — and reads the reply past it again as a chain-shaped tree, which the worker runs as an
+  ordinary forward (`handle_forward`). The n-gram loop would guess there, but cannot take a reply over part-way.
+- **Tests** (each red-checked by breaking its rule): `a_rebases_forward_names_the_walk_after_the_path`,
+  `a_recurrent_targets_tree_flows_only_through_peers_that_read_the_walk` (every peer of the run, the middle hop too),
+  `a_recurrent_drafter_is_chosen_only_to_grow_a_flow`. The path end to end — the walk accepted by every segment, the
+  take-over on a recurrent target (`SWARMLLM_FAULT_FLOW_FAIL`) — is stage 5's first run, on a real link.
 
 ## Not in this plan
 

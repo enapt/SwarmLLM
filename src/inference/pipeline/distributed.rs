@@ -60,9 +60,12 @@ impl PipelineExecutor {
         // Every speculative path below takes a rejected draft back by
         // truncating each holder's KV cache. A model with RECURRENT state
         // (Qwen 3.5's DeltaNet) takes back only its last check (FUTURE_WORK
-        // #117, #228 (5)), so the drafter's two paths may not run on it —
-        // asked once, here, ahead of all three; the n-gram loop asks
-        // `checks_can_be_taken_back` of the plan.
+        // #117, #228 (5)), or a tree's start where its tree flows
+        // (`docs/plans/recurrent_flow.md`): the drafter's paths run on it only
+        // for that — `try_dsd_distributed` asks `dsd_flow::
+        // recurrent_flow_may_start` before any token, A/B
+        // `SWARMLLM_RECURRENT_FLOW=0` — asked once, here, ahead of all three;
+        // the n-gram loop asks `checks_can_be_taken_back` of the plan.
         let speculation_allowed = speculation_can_roll_back(
             self.shared_state
                 .gguf_meta_for(&self.request.model_id)
@@ -73,7 +76,7 @@ impl PipelineExecutor {
         // Item 12 Phase 4: DSD multi-segment greedy speculative. Falls through
         // when fewer than 2 segments (Item 2 covers single-segment) or any
         // other precondition fails (TP groups, non-greedy, no draft, etc.).
-        if speculation_allowed {
+        if speculation_allowed || super::dsd_flow::recurrent_flow_on() {
             let outcome = self.try_dsd_distributed(token_tx.clone()).await;
             if let Some(out) = self.keeping_the_partial(outcome, token_tx.as_ref()).await? {
                 return Ok(out);

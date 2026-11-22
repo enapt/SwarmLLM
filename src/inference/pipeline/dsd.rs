@@ -58,7 +58,7 @@ use crate::error::SwarmError;
 use crate::inference::router::StreamingTokenEvent;
 use crate::inference::router::{InferenceOutput, StreamingTokenTx};
 
-use super::engine_drafter::{engine_drafter_for, EngineDrafter, TargetHere};
+use super::engine_drafter::{engine_drafter_for, DrafterUse, EngineDrafter, TargetHere};
 use super::speculative::{
     draft_next_gamma, draft_prefill, draft_sync_after_round, draft_sync_tokens,
     ngram_lookup_drafts, DraftState,
@@ -169,6 +169,22 @@ impl PipelineExecutor {
         }
 
         let request_id = self.request.id;
+        // A model with RECURRENT layers (Qwen 3.5's DeltaNet) takes a refused
+        // guess back only to a tree's start, which its segments keep only in a
+        // tree that flows (`docs/plans/recurrent_flow.md` stage 4): its reply
+        // guesses ahead here only where one may flow, asked before any token —
+        // a reply refused here falls through to the n-gram loop, one check at
+        // a time. Where it flows, the drafter is chosen for that alone
+        // (`DrafterUse::OnlyInAFlow`) and must guess on a card.
+        let recurrent =
+            super::dsd_flow::flows_with_the_walk(&self.shared_state, &self.request.model_id);
+        if recurrent && !super::dsd_flow::recurrent_flow_may_start(self) {
+            tracing::debug!(
+                %request_id,
+                "DSD: a recurrent model's tree cannot flow on this plan — the n-gram loop runs it"
+            );
+            return Ok(None);
+        }
         let max_tokens = self.request.sampling_params.max_tokens;
         let initial_gamma = self.shared_state.cfg().inference.guesses_per_check().max(2);
         // γ is chosen each round from MEASURED costs (Leviathan et al. §3.4):
@@ -252,6 +268,13 @@ impl PipelineExecutor {
         let prompt = self.build_prompt().await;
         let llama_loaded = self.shared_state.cfg().inference.draft_model_path.is_some()
             && self.shared_state.draft_executor.lock().await.is_loaded();
+        if llama_loaded && recurrent {
+            tracing::debug!(
+                %request_id,
+                "DSD: llama.cpp's drafter grows no tree that flows — the n-gram loop runs this recurrent model"
+            );
+            return Ok(None);
+        }
         let engine = if llama_loaded {
             None
         } else {
@@ -289,8 +312,35 @@ impl PipelineExecutor {
                 ranges: &ranges,
                 requester: super::worker_requester(&self.request),
             };
-            let Some(spec) = engine_drafter_for(&self.shared_state, &target, conversation, &here)
-            else {
+            let using = if recurrent {
+                DrafterUse::OnlyInAFlow
+            } else {
+                DrafterUse::Anywhere
+            };
+            let chosen =
+                engine_drafter_for(&self.shared_state, &target, conversation, &here, using);
+            if recurrent
+                && !chosen.as_ref().is_some_and(|spec| {
+                    super::engine_drafter::guesses_on_a_card(
+                        &self.shared_state,
+                        spec,
+                        conversation,
+                        &here,
+                    )
+                })
+            {
+                // Nothing fetched for it (`note_split_wanting_a_drafter` asks
+                // for a drafter of any use, which a recurrent model has none of
+                // until stage 5 measures the flow), and nothing said: the
+                // n-gram loop guesses next.
+                tracing::debug!(
+                    %request_id,
+                    drafter = ?chosen.as_ref().map(|s| &s.model_id),
+                    "DSD: no drafter here grows this recurrent model's tree on a card — the n-gram loop runs it"
+                );
+                return Ok(None);
+            }
+            let Some(spec) = chosen else {
                 // None here: fetch one for the next split (#134).
                 super::engine_drafter::note_split_wanting_a_drafter(
                     &self.shared_state,
@@ -547,25 +597,39 @@ impl PipelineExecutor {
         })
         .flatten()
         .filter(|shape| {
-            super::dsd_flow::flow_possible(&self.shared_state, shape, &self.request.sampling_params)
-        });
-        let trees_for_this_reply = super::dsd_tree::trees_wanted(
-            super::every_segment_runs_on_a_card(
+            super::dsd_flow::flow_possible(
                 &self.shared_state,
-                &self.assignment.segments,
-                &self.request.model_id,
-            ),
-            drafter_on_card,
-            farthest_round_trip_ms,
-            flow_shape_if_trees.as_ref().map(|shape| {
-                if shape.far_walks() {
-                    super::dsd_tree::FlowDraws::AtTheFarEnd
-                } else {
-                    super::dsd_tree::FlowDraws::Here
-                }
-            }),
-        ) && matches!(&drafter, Drafter::Engine(e) if reads_trees(e.model_id()))
-            && reads_trees(&self.request.model_id);
+                shape,
+                &self.request.sampling_params,
+                recurrent,
+            )
+        });
+        // A recurrent target's line was asked before its prompt pass
+        // (`dsd_flow::recurrent_flow_may_start`, with the drafter's place where
+        // it would load): its tree flows wherever it can still, since outside a
+        // flow it guesses nothing at all — and nowhere else, never in tree
+        // rounds (its family reads no tree but a flowing one).
+        let trees_for_this_reply = if recurrent {
+            flow_shape_if_trees.is_some()
+        } else {
+            super::dsd_tree::trees_wanted(
+                super::every_segment_runs_on_a_card(
+                    &self.shared_state,
+                    &self.assignment.segments,
+                    &self.request.model_id,
+                ),
+                drafter_on_card,
+                farthest_round_trip_ms,
+                flow_shape_if_trees.as_ref().map(|shape| {
+                    if shape.far_walks() {
+                        super::dsd_tree::FlowDraws::AtTheFarEnd
+                    } else {
+                        super::dsd_tree::FlowDraws::Here
+                    }
+                }),
+            ) && matches!(&drafter, Drafter::Engine(e) if reads_trees(e.model_id()))
+                && reads_trees(&self.request.model_id)
+        };
         let mut trees = super::dsd_tree::TreeRounds::new();
         let trees_from_the_start = trees_for_this_reply
             && super::tree_check_possible(
@@ -657,17 +721,30 @@ impl PipelineExecutor {
                 }
             }
         }
+        // Outside a flow a recurrent target's segments cannot take a refused
+        // guess back: what is left of its reply — a failed flow's, or one whose
+        // tree could not flow after all — goes a token a round, its kept tokens
+        // read again first as a chain (`dsd_flow::rounds_take_over`; a
+        // chain-shaped tree runs as an ordinary forward,
+        // `model_worker::handle_forward`). The plan's n-gram loop would guess
+        // here; it cannot take a reply over part-way.
+        if recurrent && !streamed {
+            drafting_off = true;
+            trees.refused = true;
+        }
         if let Drafter::Engine(engine) = &mut drafter {
-            let shape =
-                (!streamed && super::dsd_stream::stream_requested() && !trees_from_the_start)
-                    .then(|| {
-                        super::dsd_stream::stream_shape(
-                            &self.shared_state,
-                            &self.assignment.segments,
-                            self.verify_may_chain(),
-                        )
-                    })
-                    .flatten();
+            let shape = (!streamed
+                && !recurrent
+                && super::dsd_stream::stream_requested()
+                && !trees_from_the_start)
+                .then(|| {
+                    super::dsd_stream::stream_shape(
+                        &self.shared_state,
+                        &self.assignment.segments,
+                        self.verify_may_chain(),
+                    )
+                })
+                .flatten();
             if let Some(shape) = shape.filter(|_| finish_reason.is_empty()) {
                 let chained = shape.chained();
                 let streamed_through = self
