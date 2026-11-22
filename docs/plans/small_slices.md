@@ -13,6 +13,10 @@ This plan combines a research run of 2026-11-20 (a speed model calibrated on our
 `pipelined_prompt_pass.md`, `split_prompt_cache.md`, the round logs and FUTURE_WORK) with the same day's
 measurements. Each step ends on a measurement that can kill it.
 
+**Read next: [`standing_ring.md`](standing_ring.md)** (#492, 2026-11-21) — the design the owner asked for past prior
+art, and its first measurements: a guess waits ~180 ms for the far computer's check, and the pace is set by this
+side's card (busy 98-100% at ~39 ms a forward), not by the distance. Its next step, the pacer, is the first build.
+
 ## 1. Where it stands (measured 2026-11-20 unless dated)
 
 Qwen3.8-27B (hybrid: recurrent and attention layers, its file's own guess head), one reply at a time, 160 tokens,
