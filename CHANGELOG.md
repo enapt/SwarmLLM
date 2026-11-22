@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.3.306-alpha] — 2026-11-22
+
+**A split reply now picks a guessing model that runs on the graphics card over a larger one that would run in system
+memory.** A split reply guesses ahead with a small model of the same family, and the node took the largest it held
+wherever it would land. With no room on the card for the larger one, it ran in system memory, where it cannot keep the
+many guesses in flight that make a far split fast. Measured on Qwen2.5-14B split between this computer and one in
+Australia, both guessing models held: code 44.3-44.7 tok/s against 12.9-13.5 before, prose 17.5-17.6 against 6.2-7.4.
+Among the models that fit on the card, the largest is still chosen.
+
+**A long conversation's next turn waits less for the previous one to be saved.** After each turn the node saves the
+conversation's prompt so the next turn starts from it, and that save wrote a whole fresh copy beside the one it was
+replacing. It now reuses the old copy's memory. On a 14B with a 1,800-2,150-token conversation, the save fell from a
+median of about 590 ms to about 157 ms (#367).
+
+**A computer no longer gives back a part of a model on the strength of out-of-date holder records.** Deciding whether
+its copy of a part could go, a computer counted every holder the swarm's shared lookup table named, and those records
+outlive a part by hours, so a needed copy could be given back. Every count of copies now reads only what holders say
+of themselves; the lookup table is still where a missing part is looked for (#177).
+
+**Qwen3.8-27B can guess several words at a time on a split, with its own block drafter.** Computers holding the
+model's first part and its output head can fetch z-lab's DFlash 2 drafter (1.9 GB, pinned by its SHA-256), and its
+prose guesses follow DFlash 2's own selector. Measured between this computer's card and a card in Australia, a block
+of guesses keeps 3.21 words on a story (2.2-2.7 before the selector) and 4.04 on code. On that route part of the far
+computer's share ran on its processor, so the speed barely moved: code 5.4-5.9 tok/s against 5.2-5.4 (#428).
+
+**Every computer can now take part in faster guessing for split Qwen 3.5 / 3.6 / 3.8 models; it is not switched on
+yet.** These models' recurrent layers could take back a refused guess only one check at a time, which kept their splits
+on the slowest kind of guessing. Their segments can now read a tree of guesses that grows across many forwards, on the
+processor and on a card, and the computer driving a reply can grow one with a small model of the same family on its
+card. That computer leaves it off until it has been measured on a real link between computers
+(`SWARMLLM_RECURRENT_FLOW=1` turns it on); everyone else needs only this release (`docs/plans/recurrent_flow.md`).
+Checking it end to end found a fault older than it: a computer serving only a few of a Qwen 3.5 model's layers, none
+of them attention layers, counted itself as holding nothing of the conversation, and refused the reply's next step as
+out of order. It now counts what its recurrent layers hold.
+
+**Dependency update**: `url` 2.5.9 (RUSTSEC-2026-0592, a stack overflow in `Url::origin()` on nested `blob:`
+addresses; SwarmLLM's own code never calls it).
+
 ## [0.3.305-alpha] — 2026-11-22
 
 **Gemma 4 E2B and E4B are no longer treated as needing twice the graphics memory they use.** These models keep a large
