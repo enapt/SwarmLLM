@@ -1028,10 +1028,54 @@ pub fn node_memory_bandwidth_gbps(gpu_name: Option<&str>) -> Option<f32> {
 
 /// Lookup table for GPU memory bandwidth in GB/s.
 /// Used for bandwidth-based speed estimation (tokens/s ≈ bandwidth / model_size * efficiency).
+///
+/// **A laptop card is its own part, not its desktop namesake** (2026-11-22). The
+/// driver names it "NVIDIA GeForce RTX 4050 Laptop GPU", and a laptop chip of the
+/// same number has a narrower bus: an RTX 4090 Laptop reads 576 GB/s against the
+/// desktop's 1008, a 4070 Laptop 256 against 504. Before this the table had no
+/// laptop arm at all and no RTX 50 series or 4050, so the swarm's two laptop cards
+/// that night both fell to the 300 GB/s default: the RTX 5080 Laptop (896) was
+/// priced ~3x slow and the RTX 4050 Laptop (192) ~1.6x FAST, and every peer planned
+/// over them from those figures. The card's own row is matched before its desktop
+/// row, and the more specific name before the less ("5070 TI" before "5070").
+/// Prior art: NVIDIA's laptop pages list each 50-series laptop part's bandwidth
+/// (5090/5080 896, 5070 Ti 672, 5070/5060/5050 384); PNY's linecard the desktop
+/// 50 series (5090 1792, 5080 960, 5070 Ti 896, 5070 672, 5060 Ti 448); the 40-
+/// and 30-series laptop rows are bus width × memory speed (4050: 96-bit × 16 Gbps).
+/// llamaperf.com's calculator keeps the same kind of table. The rows added then
+/// cover only cards our kernels run (`gpu_support::MIN_COMPUTE_CAP`, Ampere and
+/// newer); the older rows below stay for the names they already matched.
 pub fn gpu_memory_bandwidth_gbps(name: &str) -> f32 {
     let name_upper = name.to_uppercase();
+    let laptop = name_upper.contains("LAPTOP")
+        || name_upper.contains("MAX-Q")
+        || name_upper.contains("MOBILE");
     // Match most specific first
     match () {
+        // NVIDIA laptop parts, before the desktop rows that share their number
+        _ if laptop && name_upper.contains("5090") => 896.0,
+        _ if laptop && name_upper.contains("5080") => 896.0,
+        _ if laptop && name_upper.contains("5070") && name_upper.contains("TI") => 672.0,
+        _ if laptop && name_upper.contains("5070") => 384.0,
+        _ if laptop && name_upper.contains("5060") => 384.0,
+        _ if laptop && name_upper.contains("5050") => 384.0,
+        _ if laptop && name_upper.contains("4090") => 576.0,
+        _ if laptop && name_upper.contains("4080") => 432.0,
+        _ if laptop && name_upper.contains("4070") => 256.0,
+        _ if laptop && name_upper.contains("4060") => 256.0,
+        _ if laptop && name_upper.contains("4050") => 192.0,
+        _ if laptop && name_upper.contains("3080") && name_upper.contains("TI") => 512.0,
+        _ if laptop && name_upper.contains("3080") => 384.0,
+        _ if laptop && name_upper.contains("3070") => 448.0,
+        _ if laptop && name_upper.contains("3060") => 336.0,
+        _ if laptop && name_upper.contains("3050") => 192.0,
+        // NVIDIA consumer - RTX 50 series
+        _ if name_upper.contains("5090") => 1792.0,
+        _ if name_upper.contains("5080") => 960.0,
+        _ if name_upper.contains("5070") && name_upper.contains("TI") => 896.0,
+        _ if name_upper.contains("5070") => 672.0,
+        _ if name_upper.contains("5060") => 448.0,
+        _ if name_upper.contains("5050") => 320.0,
         // NVIDIA data center
         _ if name_upper.contains("H100") => 3352.0,
         _ if name_upper.contains("H200") => 4800.0,
@@ -1049,7 +1093,12 @@ pub fn gpu_memory_bandwidth_gbps(name: &str) -> f32 {
         _ if name_upper.contains("4090") => 1008.0,
         _ if name_upper.contains("4080") && name_upper.contains("SUPER") => 736.0,
         _ if name_upper.contains("4080") => 717.0,
-        _ if name_upper.contains("4070") && name_upper.contains("SUPER") => 504.0,
+        _ if name_upper.contains("4070")
+            && name_upper.contains("TI")
+            && name_upper.contains("SUPER") =>
+        {
+            672.0
+        }
         _ if name_upper.contains("4070") => 504.0,
         _ if name_upper.contains("4060") && name_upper.contains("TI") => 288.0,
         _ if name_upper.contains("4060") => 272.0,
@@ -1062,6 +1111,7 @@ pub fn gpu_memory_bandwidth_gbps(name: &str) -> f32 {
         _ if name_upper.contains("3070") => 448.0,
         _ if name_upper.contains("3060") && name_upper.contains("TI") => 448.0,
         _ if name_upper.contains("3060") => 360.0,
+        _ if name_upper.contains("3050") => 224.0,
         // NVIDIA consumer - RTX 20 series
         _ if name_upper.contains("2080") && name_upper.contains("TI") => 616.0,
         _ if name_upper.contains("2080") => 448.0,
@@ -2113,6 +2163,36 @@ mod tests {
         assert_eq!(gpu_memory_bandwidth_gbps("NVIDIA GeForce RTX 3070"), 448.0);
         assert_eq!(gpu_memory_bandwidth_gbps("NVIDIA A100 80GB"), 2039.0);
         assert_eq!(gpu_memory_bandwidth_gbps("Apple M3 Max"), 400.0);
+    }
+
+    /// The names the driver gives the swarm's cards (2026-11-22): a laptop part
+    /// reads its own figure, never its desktop namesake's nor the unknown default
+    /// (the RTX 5080 Laptop and RTX 4050 Laptop both read 300 before).
+    #[test]
+    fn a_laptop_card_reads_its_own_bandwidth() {
+        for (name, gbps) in [
+            ("NVIDIA GeForce RTX 5080 Laptop GPU", 896.0),
+            ("NVIDIA GeForce RTX 4050 Laptop GPU", 192.0),
+            ("NVIDIA GeForce RTX 3070 Laptop GPU", 448.0),
+            ("NVIDIA GeForce RTX 3060 Laptop GPU", 336.0),
+            ("NVIDIA GeForce RTX 4090 Laptop GPU", 576.0),
+            ("NVIDIA GeForce RTX 5070 Ti Laptop GPU", 672.0),
+            ("NVIDIA GeForce RTX 5070 Laptop GPU", 384.0),
+            ("NVIDIA GeForce RTX 3080 Ti Laptop GPU", 512.0),
+            // desktop parts of the same numbers keep theirs
+            ("NVIDIA GeForce RTX 3060", 360.0),
+            ("NVIDIA GeForce RTX 4090", 1008.0),
+            ("NVIDIA GeForce RTX 5080", 960.0),
+            ("NVIDIA GeForce RTX 5070 Ti", 896.0),
+            ("NVIDIA GeForce RTX 5070", 672.0),
+            ("NVIDIA GeForce RTX 5060 Ti", 448.0),
+            ("NVIDIA GeForce RTX 5090", 1792.0),
+            ("NVIDIA GeForce RTX 4070 Ti SUPER", 672.0),
+            ("NVIDIA GeForce RTX 4070 SUPER", 504.0),
+            ("NVIDIA GeForce RTX 3050", 224.0),
+        ] {
+            assert_eq!(gpu_memory_bandwidth_gbps(name), gbps, "{name}");
+        }
     }
 
     #[test]
