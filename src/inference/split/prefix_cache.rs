@@ -1013,7 +1013,7 @@ impl PrefixCache {
             room,
         );
         let copy_started = Instant::now();
-        let snap = match snapshot_at(
+        let (snap, parts) = match snapshot_at(
             &entry.layers,
             &entry.ssm_states,
             available,
@@ -1021,7 +1021,7 @@ impl PrefixCache {
             held.max_seq_len,
             room.home,
         ) {
-            Ok(s) => Arc::new(s),
+            Ok((s, parts)) => (Arc::new(s), parts),
             Err(e) => {
                 // Most likely an allocation failure on a memory-starved
                 // device (observed on a 6 GB card, 2026-08-02). The cache is
@@ -1087,6 +1087,9 @@ impl PrefixCache {
             mb = snap_bytes / (1024 * 1024),
             home = ?snap_home,
             copy_ms = copy_ms,
+            card_ms = parts.card_ms,
+            host_ms = parts.host_ms,
+            minor_faults = ?parts.minor_faults,
             replaced_before_copy = room_made.replaced,
             evicted_before_copy = room_made.evicted,
             "DIAG: prefix-cache inserted snapshot"
@@ -1483,15 +1486,16 @@ impl PrefixCache {
             bytes,
             room,
         );
-        let snap = match snapshot_at(&entry.layers, &[], positions, dim, max_seq_len, room.home) {
-            Ok(s) => Arc::new(s),
-            Err(e) => {
-                tracing::warn!(model_key, positions, replaced = room_made.replaced,
+        let (snap, parts) =
+            match snapshot_at(&entry.layers, &[], positions, dim, max_seq_len, room.home) {
+                Ok((s, parts)) => (Arc::new(s), parts),
+                Err(e) => {
+                    tracing::warn!(model_key, positions, replaced = room_made.replaced,
                     evicted = room_made.evicted, error = %e,
                     "prefix-cache: storing a split prompt failed — the next turn reads it again");
-                return 0;
-            }
-        };
+                    return 0;
+                }
+            };
         drop(entry);
         let Ok(mut inner) = self.inner.write() else {
             return 0;
@@ -1528,6 +1532,9 @@ impl PrefixCache {
             evicted_before_copy = room_made.evicted,
             mb = bytes / (1024 * 1024),
             copy_ms = started.elapsed().as_millis() as u64,
+            card_ms = parts.card_ms,
+            host_ms = parts.host_ms,
+            minor_faults = ?parts.minor_faults,
             "DIAG: prefix-cache stored a split's prompt"
         );
         if kept {
@@ -2183,6 +2190,8 @@ fn serves_from(layers: &[Option<LayerKv>]) -> usize {
 /// A recurrent layer's state (`ssm_states`, by layer) is copied too, and must
 /// describe exactly `pos` positions; such a snapshot serves only its whole
 /// length (`KvSnapshot::serves_from`, #228).
+///
+/// Answers where the copy's time went ([`CopyParts`]) beside the snapshot.
 fn snapshot_at(
     layers: &[Option<LayerKv>],
     ssm_states: &[Option<SsmState>],
@@ -2190,7 +2199,9 @@ fn snapshot_at(
     dim: usize,
     max_seq_len: usize,
     home: SnapshotHome,
-) -> Result<KvSnapshot, SwarmError> {
+) -> Result<(KvSnapshot, CopyParts), SwarmError> {
+    let faults_before = minor_faults_so_far();
+    let mut parts = CopyParts::default();
     let mut serves_from = serves_from(layers);
     if pos < serves_from {
         return Err(SwarmError::Internal(format!(
@@ -2214,6 +2225,7 @@ fn snapshot_at(
         }
     };
     for (i, kv_opt) in layers.iter().enumerate() {
+        let layer_started = Instant::now();
         let Some(kv) = kv_opt else {
             let state = ssm_states.get(i).and_then(Option::as_ref);
             let Some(state) = state else {
@@ -2235,6 +2247,7 @@ fn snapshot_at(
             ssm.resize_with(i, || None);
             ssm.push(Some((conv, rec)));
             out.push(None);
+            parts.note_layer(!slot.conv_state.device().is_cpu(), layer_started);
             restore_to.push(card);
             held_from.push(0);
             serves_from = pos;
@@ -2271,7 +2284,8 @@ fn snapshot_at(
             .and_then(|t| t.force_contiguous())
             .map_err(|e| SwarmError::Internal(format!("snapshot v narrow: {e}")))?;
         let card = k_snap.device().clone();
-        if home == SnapshotHome::HostRam && !card.is_cpu() {
+        let on_card = !card.is_cpu();
+        if home == SnapshotHome::HostRam && on_card {
             let k_host = k_snap
                 .to_device(&Device::Cpu)
                 .map_err(|e| SwarmError::Internal(format!("snapshot k to host: {e}")))?;
@@ -2284,17 +2298,73 @@ fn snapshot_at(
             out.push(Some((k_snap, v_snap)));
             restore_to.push(None);
         }
+        parts.note_layer(on_card, layer_started);
     }
-    Ok(KvSnapshot {
-        token_count: pos,
-        layers: out,
-        dim,
-        max_seq_len,
-        restore_to,
-        held_from,
-        serves_from,
-        ssm,
-    })
+    parts.minor_faults = faults_before
+        .zip(minor_faults_so_far())
+        .map(|(before, after)| after.saturating_sub(before));
+    Ok((
+        KvSnapshot {
+            token_count: pos,
+            layers: out,
+            dim,
+            max_seq_len,
+            restore_to,
+            held_from,
+            serves_from,
+            ssm,
+        },
+        parts,
+    ))
+}
+
+/// Where a snapshot's copy spent its time (#367): the card-held layers
+/// (narrowed on the card and, for a snapshot kept in host RAM, read back to
+/// it) against the processor-held ones (copied in host memory), and the minor
+/// page faults the process took meanwhile. 569 MB copied into memory the
+/// allocator already held took 43 ms and into fresh memory 255-817 ms (146K
+/// first touches, 2026-10-29), so the fault count says which a slow copy was.
+/// Reported on the two inserts' DIAG lines; it decides nothing. (llama.cpp's
+/// server allocates each saved prompt fresh too and times only the whole
+/// update, `server_prompt_cache::alloc`.)
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CopyParts {
+    /// Milliseconds spent on layers whose cache is on a card.
+    pub(crate) card_ms: u64,
+    /// Milliseconds spent on layers whose cache is in host memory.
+    pub(crate) host_ms: u64,
+    /// Minor page faults across the copy, the whole process's (a host copy
+    /// may run on a pool's threads); `None` where the platform does not say.
+    pub(crate) minor_faults: Option<u64>,
+}
+
+impl CopyParts {
+    fn note_layer(&mut self, on_card: bool, started: Instant) {
+        let ms = started.elapsed().as_millis() as u64;
+        if on_card {
+            self.card_ms += ms;
+        } else {
+            self.host_ms += ms;
+        }
+    }
+}
+
+/// The process's minor page faults so far (`getrusage(RUSAGE_SELF)`,
+/// `man 2 getrusage`), as `network::manager::loop_stall` reads a thread's.
+#[cfg(unix)]
+fn minor_faults_so_far() -> Option<u64> {
+    // SAFETY: `usage` is a valid, writable `rusage`; RUSAGE_SELF reads the
+    // calling process's counters and writes nothing else.
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    if unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) } != 0 {
+        return None;
+    }
+    Some(usage.ru_minflt.max(0) as u64)
+}
+
+#[cfg(not(unix))]
+fn minor_faults_so_far() -> Option<u64> {
+    None
 }
 
 // ---- Item 8 Phase 2: KvSnapshot wire serialization -------------------------
@@ -2827,7 +2897,7 @@ mod tests {
         let mut kv = LayerKv::with_capacity(2, 64, 64);
         kv.append(&k, &v).unwrap();
         let mut layers = vec![Some(kv)];
-        let snap = snapshot_at(&layers, &[], 8, 2, 4096, SnapshotHome::BesideLive).unwrap();
+        let (snap, _) = snapshot_at(&layers, &[], 8, 2, 4096, SnapshotHome::BesideLive).unwrap();
 
         // The live cache rewinds and writes other positions where the saved
         // ones were.
@@ -2855,8 +2925,13 @@ mod tests {
         make_fake_kv(&kv_store, "m", "req-a", 2, 10);
         let key = KvCacheStore::cache_key("m", "req-a");
         let entry = kv_store.get_entry(&key).unwrap();
-        let snap = snapshot_at(&entry.layers, &[], 10, 2, 4096, SnapshotHome::HostRam).unwrap();
+        let (snap, parts) =
+            snapshot_at(&entry.layers, &[], 10, 2, 4096, SnapshotHome::HostRam).unwrap();
         assert!(snap.restore_to.iter().all(Option::is_none));
+        // No layer is on a card, so none of the copy's time is the card's
+        // (#367's split of a slow copy); the platform counts its faults.
+        assert_eq!(parts.card_ms, 0);
+        assert_eq!(parts.minor_faults.is_some(), cfg!(unix));
         assert_eq!(snap.home(), SnapshotHome::BesideLive);
         assert_eq!(snap.bytes_in(SnapshotHome::BesideLive), snap.bytes());
         // Charged to the memory its copies are in — the machine's — and to
