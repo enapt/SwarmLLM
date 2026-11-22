@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #491**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #493**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -918,6 +918,25 @@ Only with `inference.persistent_pipeline_stream` on (default off): the coordinat
 frame, then add a receipt ACK or a per-frame read deadline mirroring request-response's
 `FORWARD_ACK`. A prerequisite to ever defaulting the stream on (`docs/plans/faster_than_local.md`
 § 4 item 7); with V1Lazy (#136) request-response is as fast, so there is no speed reason to.
+
+#### #491 — A model with holes is refilled only by a computer someone asks, and only if it has room
+`P2` · reliability · **OPEN** — 2026-11-22 · seen: Qwen3.6-35B-A3B, parts 10-39 held by nobody
+
+A part no computer holds is fetched first (`scoring::fills_a_hole`) — but only where the model is
+asked for (`coverage::asked_for`: requests routed here, or demand gossiped by others). Gossiped demand
+counts only work SERVED for a peer (#389 (a): the owner's own use is never advertised), and a request
+no computer could serve is served by nobody, so it never leaves the computer it was made on. A cooled
+model is never fetched either (`coverage::COOLED_COPIES`: "none fetched"). On 2026-11-22 the 35B's
+only whole copy had gone (likely the DHT miscount closed in #177's second half, `f2d9d0d3d`), and
+the one computer asked for it was past its 10% free-disk floor; its holes stayed until room was
+made by hand (06:14Z, the build cache), when it fetched them from the origin within the minute.
+With copies counted on holders' own word a cooled part keeps two real copies, so holes of this
+kind should not form again; what is open is repairing holes that did. Prior art: HDFS re-replicates
+an under-replicated block on the NameNode's count alone, whoever reads it (after a dead-node
+timeout, so a restart is not a loss); Ceph recovers a placement group to its replica count. Here a
+repair would have to key on what is PUBLIC — a model a connected holder advertises as served within
+the use window (`NodeCapability::models_served`) and now short of a whole copy — never on the
+owner's ask. Weigh it against the use rule's give-back (#389 (d), #452) before building.
 
 ### Routing and placement
 
