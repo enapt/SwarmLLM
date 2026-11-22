@@ -120,6 +120,14 @@ budget; prose profile, the 14B pair's measured prices; `flow_ring` with one far 
   anywhere. The check is offline, on Qwen3.5-9B whole here with its DFlash drafter (#428 stage 1's harness):
   draft block k+1 from block k's predicted end with the features up to the last commit, and score it against the
   greedy reply. Step 5 waits on it.
+  **Answered 2026-11-22 from a measure already taken — step 5 is killed.** #428's 11-18 spares measure
+  (`a_spares_outcome_ranked_by_the_drafters_scores`, FUTURE_WORK #428) ran on the same harness and text. On code
+  the kept counts are bimodal (0-3 or 12-15 a round), and the whole block was kept in 3 rounds of 26. A block
+  drafted from this one's END can therefore be right in at most ~12% of code rounds. Even then its first word is
+  the check's bonus word, which lies past the drafter's rows. Every other round voids it, so even free it reads
+  under 1.13×. That is under the 1.3× kill line before its price, the near side's extra rows and bytes, is counted. The route past it
+  is SSD's: spares for the likeliest outcomes, which #428 priced at S = 16 (44% of code rounds covered, ~+30-40% a
+  round trip, 2 MB a round of extra sends) and ranked after #437's tree.
 
 ### Step 2 — DONE 2026-11-20: a chain that ends on a peer guesses (FUTURE_WORK #485, closed)
 
@@ -184,7 +192,7 @@ budget; prose profile, the 14B pair's measured prices; `flow_ring` with one far 
   14B). Until then, step 1a decides it. Prediction for the 14B in thirds: prose 12-15 (halves: 17.8-20.5); code
   within 10% of the halves, and if code drops more than 20% the window or the uplink binds, not the misses.
 
-### Step 5 — a block's chunks in flight on a recurrent model (code), only if 1b passes
+### Step 5 — a block's chunks in flight on a recurrent model (code) — KILLED 2026-11-22 by 1b (above)
 
 - Send the block drafter's guesses as 2-4 chunks back to back so the far slice computes while the next chunk is
   on the wire (the chain stream's shape). ~1.5-2× on code, nothing on prose.
