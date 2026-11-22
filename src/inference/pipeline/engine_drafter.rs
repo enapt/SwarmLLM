@@ -288,7 +288,9 @@ fn could_draft(state: &SharedState, target: &ModelId, drafter: ModelId) -> Optio
 /// not the guessing, is what a round mostly costs. Either way only one this
 /// node's memory would load ([`admitted`]) for a reply of `conversation`
 /// positions (`model_worker::drafter_cache_positions`, the charge its load
-/// will take) beside the `here` the plan gives this node. `None` when there is
+/// will take) beside the `here` the plan gives this node — and of those, one
+/// that would guess on a card before a larger one in system memory
+/// ([`largest_that_can_draft`]). `None` when there is
 /// none: speculation across computers then drafts with llama.cpp where that is
 /// configured, or not at all.
 pub(crate) fn engine_drafter_for(
@@ -317,7 +319,7 @@ pub(crate) fn drafter_to_leave_room_for(
     state: &SharedState,
     target: &ModelId,
 ) -> Option<DrafterSpec> {
-    chosen(state, target, |_| true)
+    chosen(state, target, |_| Some(DrafterPlace::Unasked))
 }
 
 /// How long a split wants a drafter after it last ran
@@ -556,7 +558,7 @@ fn acquisition_among(
     small_fraction: u64,
     to_beat: Option<HeldDrafter>,
     size: impl Fn(&ModelId) -> Option<DrafterSize>,
-    can_draft: impl FnMut(ModelId) -> Option<DrafterSpec>,
+    mut can_draft: impl FnMut(ModelId) -> Option<DrafterSpec>,
 ) -> DrafterStep {
     let headerless: Vec<ModelId> = likely
         .iter()
@@ -577,21 +579,25 @@ fn acquisition_among(
             to_beat.is_none_or(|held| held.beaten_by(s.size, release_line(m) == target_line))
         })
         .collect();
-    match largest_that_can_draft(target_line, target_size, small_fraction, sized, can_draft) {
+    // A drafter not yet held has no place to be weighed: where it would land
+    // is asked once it is here (`chosen`).
+    let unplaced = |m| can_draft(m).map(|spec| (spec, DrafterPlace::Unasked));
+    match largest_that_can_draft(target_line, target_size, small_fraction, sized, unplaced) {
         Some(spec) => DrafterStep::Fetch(spec.model_id),
         None => DrafterStep::Nothing,
     }
 }
 
 /// The one choice behind both: the named drafter, else the largest that can
-/// draft, of those `keep` accepts.
+/// draft, of those `keep` places — on a card before anywhere else
+/// ([`largest_that_can_draft`]).
 fn chosen(
     state: &SharedState,
     target: &ModelId,
-    keep: impl Fn(&DrafterSpec) -> bool,
+    keep: impl Fn(&DrafterSpec) -> Option<DrafterPlace>,
 ) -> Option<DrafterSpec> {
     if let Some(named) = state.cfg().inference.draft_model.clone() {
-        return spec_for(state, target, ModelId(named)).filter(&keep);
+        return spec_for(state, target, ModelId(named)).filter(|s| keep(s).is_some());
     }
     let target_size = size_proxy(state, target)?.size;
     // Collected first: `spec_for` reads the same map, and a read nested inside
@@ -613,8 +619,45 @@ fn chosen(
         target_size,
         small_drafter_fraction(state),
         sized,
-        |m| spec_for(state, target, m).filter(&keep),
+        |m| spec_for(state, target, m).and_then(|s| keep(&s).map(|place| (s, place))),
     )
+}
+
+/// Where a drafter [`admitted`] would guess — ranked before its size by
+/// [`largest_that_can_draft`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DrafterPlace {
+    /// On a graphics card: a guess takes milliseconds, and a split's tree may
+    /// flow (`dsd_tree::trees_wanted` asks the drafter's worker).
+    Card,
+    /// In system memory: a guess reads its weights through the processor, and
+    /// no tree is grown — the split checks a continuous stream instead.
+    SystemMemory,
+    /// Not asked: the planner's choice of what to leave room for, or admission
+    /// off (`SWARMLLM_DRAFTER_ADMISSION=0`) — taken as found, as before.
+    Unasked,
+}
+
+impl DrafterPlace {
+    /// Where a worker that `fit` admits guesses; `None` where it would get none.
+    fn of(fit: crate::inference::process_pool::GuestFit) -> Option<Self> {
+        use crate::inference::process_pool::GuestFit;
+        match fit {
+            GuestFit::Refused => None,
+            GuestFit::OnCard => Some(Self::Card),
+            GuestFit::InSystemMemory => Some(Self::SystemMemory),
+        }
+    }
+}
+
+/// `SWARMLLM_DRAFTER_PLACE=size` takes the largest drafter wherever it would
+/// guess ([`largest_that_can_draft`]) — the choice before a card drafter came
+/// first, for an A/B inside one binary. Read once.
+fn drafter_place_ranked() -> bool {
+    static RANKED: OnceLock<bool> = OnceLock::new();
+    *RANKED.get_or_init(|| {
+        std::env::var("SWARMLLM_DRAFTER_PLACE").map_or(true, |v| v.trim() != "size")
+    })
 }
 
 /// Would the drafter's worker load once the target's layers `here` are loaded
@@ -629,16 +672,17 @@ fn chosen(
 /// `SWARMLLM_DRAFTER_BESIDE=loaded` weighs it beside what is loaded now.
 ///
 /// Where it would load decides too: a drafter in system memory guesses at the
-/// processor's pace, and is held to [`may_guess_there`].
+/// processor's pace, and is held to [`may_guess_there`]. `None` where it is not
+/// chosen, else WHERE it would guess, which the choice ranks before size.
 fn admitted(
     state: &SharedState,
     target: &ModelId,
     spec: &DrafterSpec,
     conversation: u64,
     here: &TargetHere<'_>,
-) -> bool {
+) -> Option<DrafterPlace> {
     if !drafter_admission_asked() {
-        return true;
+        return Some(DrafterPlace::Unasked);
     }
     let kv = crate::model::auto_manage::vram::KvCharge::Conversation(conversation);
     let pool = &state.model_process_pool;
@@ -661,7 +705,7 @@ fn admitted(
             beside = if beside_the_plan() { "the plan's layers" } else { "the layers loaded now" },
             "this node's memory has no room for the drafter — not choosing it"
         );
-        return false;
+        return None;
     }
     let reads = size_proxy(state, &spec.model_id).map_or(u64::MAX, |s| s.reads);
     if !may_guess_there(fit, reads) {
@@ -671,9 +715,9 @@ fn admitted(
             reads_a_guess = reads,
             "the drafter would guess on this node's processor, where a guess reading that much is too slow — not choosing it"
         );
-        return false;
+        return None;
     }
-    true
+    DrafterPlace::of(fit)
 }
 
 /// The most a drafter may read a guess where it guesses on the PROCESSOR —
@@ -737,12 +781,25 @@ fn beside_the_plan() -> bool {
 /// release line (`target_line`, [`release_line`]); then — copies of one model
 /// at different precisions — the one reading fewer bytes a guess; then the
 /// model id, so the choice does not depend on map order.
+///
+/// **A drafter that would guess on a card is chosen before a larger one in
+/// system memory**: only a drafter whole on a card lets a split's tree flow,
+/// and its guesses take milliseconds where the processor's take tens. Qwen2.5-14B
+/// split this laptop [0,24) + the Australian RTX 3060 [24,48), 0.5B and 1.5B
+/// both held (2026-11-22, `real_link_drafter1122`): size first chose the 1.5B,
+/// which had no room on the card beside the 24 layers, and with it in system
+/// memory no tree flowed — prose 6.8-7.6 and code 13.9-14.3 tok/s against
+/// 18.9-19.2 and 41.1-43.3 with the 0.5B on the card. Where both fit the card
+/// the larger still drafts (16 layers here: the 1.5B 19.0 / 43.2 against the
+/// 0.5B's 16.8 / 35.5). llama.cpp's guidance for a partly offloaded target is
+/// the same: the draft model fully on the GPU (`--gpu-layers-draft`). A/B
+/// `SWARMLLM_DRAFTER_PLACE=size` (the order before: the largest wherever).
 fn largest_that_can_draft(
     target_line: &str,
     target_size: u64,
     small_fraction: u64,
     mut candidates: Vec<(DrafterSize, ModelId)>,
-    mut can_draft: impl FnMut(ModelId) -> Option<DrafterSpec>,
+    mut can_draft: impl FnMut(ModelId) -> Option<(DrafterSpec, DrafterPlace)>,
 ) -> Option<DrafterSpec> {
     candidates.retain(|(d, _)| within_reach(d, target_size, small_fraction));
     candidates.sort_by_cached_key(|(d, m)| {
@@ -753,7 +810,18 @@ fn largest_that_can_draft(
             m.0.clone(),
         )
     });
-    candidates.into_iter().find_map(|(_, m)| can_draft(m))
+    let ranked = drafter_place_ranked();
+    let mut in_system_memory = None;
+    for (_, m) in candidates {
+        match can_draft(m) {
+            Some((spec, DrafterPlace::SystemMemory)) if ranked => {
+                in_system_memory.get_or_insert(spec);
+            }
+            Some((spec, _)) => return Some(spec),
+            None => {}
+        }
+    }
+    in_system_memory
 }
 
 /// The release line a model id names: its base name with the quantisation
@@ -1625,6 +1693,66 @@ mod tests {
         }
     }
 
+    /// A drafter whose place was not asked — the planner's choice — taken as found.
+    fn found(name: &str) -> (DrafterSpec, DrafterPlace) {
+        (spec(name), DrafterPlace::Unasked)
+    }
+
+    /// **A drafter on a card is chosen before a larger one in system memory**
+    /// (2026-11-22). Qwen2.5-14B (1,258 M) with the 0.5B (19 M), 1.5B (66 M) and
+    /// 3B (151 M) held, all within half of it: split [0,24) here + [24,48) in
+    /// Australia, only the 0.5B had room on the card beside the layers; size
+    /// first chose the 1.5B in system memory, no tree flowed, and prose fell
+    /// from 19.0 to 7.2 tok/s.
+    #[test]
+    fn a_drafter_on_the_card_is_chosen_before_a_larger_one_in_system_memory() {
+        let sized = |size| DrafterSize {
+            size,
+            reads: 1_600_000_000,
+        };
+        let held = || {
+            vec![
+                (sized(19), ModelId("q-0.5b".into())),
+                (sized(151), ModelId("q-3b".into())),
+                (sized(66), ModelId("q-1.5b".into())),
+            ]
+        };
+        let chosen = |on_card: &'static [&'static str]| {
+            largest_that_can_draft("", 1258, DRAFTER_MAX_FRACTION, held(), |m: ModelId| {
+                let place = if on_card.contains(&m.0.as_str()) {
+                    DrafterPlace::Card
+                } else {
+                    DrafterPlace::SystemMemory
+                };
+                Some((spec(&m.0), place))
+            })
+            .map(|s| s.model_id.0)
+        };
+        assert_eq!(
+            chosen(&["q-0.5b"]).as_deref(),
+            Some("q-0.5b"),
+            "the field case: only the 0.5B fits on the card beside the layers"
+        );
+        assert_eq!(
+            chosen(&["q-0.5b", "q-1.5b"]).as_deref(),
+            Some("q-1.5b"),
+            "of those on the card, the largest"
+        );
+        assert_eq!(
+            chosen(&["q-0.5b", "q-1.5b", "q-3b"]).as_deref(),
+            Some("q-3b")
+        );
+        assert_eq!(
+            chosen(&[]).as_deref(),
+            Some("q-3b"),
+            "none on a card: the largest in system memory, as before"
+        );
+        let only_the_3b = largest_that_can_draft("", 1258, DRAFTER_MAX_FRACTION, held(), |m| {
+            (m.0 == "q-3b").then(|| (spec(&m.0), DrafterPlace::SystemMemory))
+        });
+        assert_eq!(only_the_3b.unwrap().model_id.0, "q-3b");
+    }
+
     /// For Qwen2.5-Coder-7B (360 M by layers × width²) this node holds the 0.5B
     /// (19 M), 1.5B (66 M) and 3B (151 M), all small: the 3B is within half, so
     /// it drafts (2026-10-24 — a quarter, the rule before, chose the 1.5B, and
@@ -1643,15 +1771,15 @@ mod tests {
                 (sized(66), ModelId("q-1.5b".into())),
             ]
         };
-        let any = |m: ModelId| Some(spec(&m.0));
+        let any = |m: ModelId| Some(found(&m.0));
         let chosen = largest_that_can_draft("", 360, DRAFTER_MAX_FRACTION, held(), any);
         assert_eq!(chosen.unwrap().model_id.0, "q-3b");
         let chosen = largest_that_can_draft("", 360, DRAFTER_MAX_FRACTION, held(), |m| {
-            (m.0 != "q-3b").then(|| spec(&m.0))
+            (m.0 != "q-3b").then(|| found(&m.0))
         });
         assert_eq!(chosen.unwrap().model_id.0, "q-1.5b");
         let chosen = largest_that_can_draft("", 360, DRAFTER_MAX_FRACTION, held(), |m| {
-            (m.0 == "q-0.5b").then(|| spec(&m.0))
+            (m.0 == "q-0.5b").then(|| found(&m.0))
         });
         assert_eq!(chosen.unwrap().model_id.0, "q-0.5b");
         assert!(largest_that_can_draft("", 360, DRAFTER_MAX_FRACTION, held(), |_| None).is_none());
@@ -1705,7 +1833,10 @@ mod tests {
                 .map_or(u64::MAX, |(d, _)| d.reads)
         };
         let landing = |fit: GuestFit| {
-            move |m: ModelId| may_guess_there(fit, reads_of(&m)).then(|| spec(&m.0))
+            move |m: ModelId| {
+                may_guess_there(fit, reads_of(&m))
+                    .then(|| (spec(&m.0), DrafterPlace::of(fit).unwrap()))
+            }
         };
         let chosen = |fit| {
             largest_that_can_draft("", target, DRAFTER_MAX_FRACTION, held(), landing(fit))
@@ -1760,7 +1891,7 @@ mod tests {
                 ),
             ]
         };
-        let any = |m: ModelId| Some(spec(&m.0));
+        let any = |m: ModelId| Some(found(&m.0));
         let chosen = largest_that_can_draft("", 1258, DRAFTER_MAX_FRACTION, held(), any);
         assert_eq!(chosen.unwrap().model_id.0, "q-3b");
         let chosen = largest_that_can_draft("", 1500, DRAFTER_MAX_FRACTION, held(), any);
@@ -1852,7 +1983,7 @@ mod tests {
             ),
         ];
         let chosen =
-            largest_that_can_draft("", 360, DRAFTER_MAX_FRACTION, held, |m| Some(spec(&m.0)));
+            largest_that_can_draft("", 360, DRAFTER_MAX_FRACTION, held, |m| Some(found(&m.0)));
         assert_eq!(chosen.unwrap().model_id.0, "qwen2.5-0.5b-instruct-q8-0");
     }
 
@@ -1896,7 +2027,7 @@ mod tests {
                 (sized(66, 1_600), ModelId(general_1_5b.into())),
             ]
         };
-        let any = |m: ModelId| Some(spec(&m.0));
+        let any = |m: ModelId| Some(found(&m.0));
         let for_target = |target: &str, held| {
             largest_that_can_draft(
                 &release_line(&ModelId(target.into())),

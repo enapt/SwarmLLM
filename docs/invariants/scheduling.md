@@ -6788,6 +6788,36 @@ over 747 of the 70B's own tokens the 8B took its first choice 0.855 against the 
 `a_drafter_on_the_processor_reads_no_more_a_guess_than_a_small_one`,
 `a_guests_admission_says_where_it_would_land`.
 
+**A drafter on a card is chosen before a larger one in system memory** (2026-11-22,
+`engine_drafter::largest_that_can_draft` ← `admitted`'s `DrafterPlace`). Size first took the largest
+drafter admitted ANYWHERE, and #373's bound let a 1.5B (~1.6 GB a guess) into system memory beside a
+0.5B that fit the card. Only a drafter whole on a card lets a tree flow (`dsd_tree::trees_wanted` asks
+the drafter's worker), so the larger one did not guess worse — it turned the flow off. Qwen2.5-14B
+Q4_K_M, this laptop + AU aa3d1e66 (RTX 3060), `real_link.sh` TAG=drafter1122, ten arms in one sitting
+(04:38-04:53Z, Windows up 15.9-16.2 h, 0 driver events), main `295097004`'s CUDA build, 160-token
+greedy replies, the client's decode_tok_s:
+
+| arm | layers here | drafter (where) | code | prose |
+|---|---|---|---|---|
+| flowhalf × 2 | [0,24) | 0.5B (card) | 43.3, 41.1 | 19.2, 18.9 |
+| flowhalf15 × 2 | [0,24) | 1.5B (system memory; 0 flowed trees) | 14.3, 13.9 | 7.6, 6.8 |
+| flowq05 × 2 | [0,16) | 0.5B (card) | 36.3, 34.7 | 17.0, 16.6 |
+| flowq15 × 2 | [0,16) | 1.5B (card) | 45.1, 41.2 | 19.2, 18.8 |
+| flowq3 × 2 | [0,16) | 3B Q4_K_M (card) | 37.6, 37.5 | 19.3, 18.8 |
+
+On the card the larger drafter still pays at a fixed split (the 1.5B +22% code, +13% prose over the
+0.5B at [0,16)) — but no more than keeping 8 more layers here with the 0.5B did (flowhalf ≈ flowq15):
+the far card ran 24 layers instead of 32. The 3B kept as many guesses on prose and cost its calls on
+code. The node's choice: of the drafters that would guess on a card the largest, else the largest in
+system memory (#373's bound still applies). A/B `SWARMLLM_DRAFTER_PLACE=size`. Prior art: llama.cpp's
+guidance for a partly offloaded target is the draft model fully on the GPU (`--gpu-layers-draft`
+apart from `-ngl`); vLLM and SGLang never place a drafter off the GPU. Test
+`a_drafter_on_the_card_is_chosen_before_a_larger_one_in_system_memory` (red under the switch).
+**Verified on the real link** (`real_link.sh` TAG=drafterfix1122, 05:55-06:05Z, the fix's CUDA build
+`317b04b4`, the 0.5B and the 1.5B BOTH held — `DRAFTER2=` — at flowhalf's [0,24), ABBA): the fix chose
+the 0.5B and every reply's tree flowed — code 44.3 / 44.7, prose 17.5 / 17.6; the same binary under
+`SWARMLLM_DRAFTER_PLACE=size` chose the 1.5B, no tree flowed — code 12.9 / 13.5, prose 6.2 / 7.4.
+
 **Guessing the next chunks while the window is full does not pay at 3 guesses** (same run): the
 drafter growing a tree of the oldest chunk's likeliest refusals while the far end checked
 (Speculative Speculative Decoding, arXiv 2603.03251) fired only once the drafter had idle time —

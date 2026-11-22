@@ -495,6 +495,15 @@ next prose lever this pair can test is **a stronger prose drafter**, priced the 
   the 0.5B's 6.6-8.0.
 - **Next, on the real pair** (it needs AU): `real_link.sh` arms `flowhalf` (0.5B) against `flowq:DRAFTER=` the 1.5B,
   and the 3B, ABBA. The live node holds both.
+- **Settled on the real pair 2026-11-22** (`real_link.sh` TAG=drafter1122, ten arms in one sitting, 04:38-04:53Z;
+  table in `docs/invariants/scheduling.md` § "A drafter on a card is chosen before a larger one in system memory"). At
+  the SAME split, [0,16) here, the 1.5B on the card wrote prose 19.0 against the 0.5B's 16.8 (+13%, inside the model's
+  +4..+19%) and code 43.2 against 35.5. But the default half split with the 0.5B, [0,24) here, wrote the same: prose
+  19.05, code 42.2. The far card running 24 layers instead of 32 bought what the stronger drafter bought. The 3B
+  matched the 1.5B on prose (19.0) and lost on code (37.6). **Ruling: no drafter reaches the prose bar on this pair; a
+  bigger drafter is worth exactly the layers it moves.** Found on the way: with the 1.5B held beside the 0.5B and no
+  room for it on the card, the node chose the 1.5B in SYSTEM MEMORY, no tree flowed, and prose fell to 7.2 — fixed
+  (a card drafter first, `engine_drafter::largest_that_can_draft`).
 
 ## Appendix — every concept raised
 
