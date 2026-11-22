@@ -3395,9 +3395,15 @@ that from the host's memory state), 470-924 ms in the first-token arms. Reading 
 ~0.1 s; #258's rig measured 59-169 ms off the card, 662-924 ms right after a build filled the page
 cache. Since the copy waits for the reply (`prompt_saved_when_done`), a request sent straight after
 the last one — an agent's next turn — waits for it: those arms' first token of the long prompt was
-5.0-5.9 s against 3.1-3.6 s. **Next**: time the copy's parts (`SnapshotCost`, the host allocation,
-the card's device-to-host read) at both speeds; whether freed snapshots' host buffers are reused or
-the copy faults fresh pages (an allocation of 569 MB under WSL2 is 146K first touches).
+5.0-5.9 s against 3.1-3.6 s. **Read and narrowed 2026-11-22** (`docs/invariants/inference.md` § "One
+prefix-cache snapshot is sized by bytes", its "A restore takes the snapshot" paragraph): the copy's time is its FRESH pages (`minor_faults` on the DIAG line,
+88-199 ms at 1-42K faults into memory an eviction freed, 277-952 ms at 40-171K otherwise; the card's
+part 18-290 ms), and a growing conversation's save reused nothing of the snapshot it replaced because
+the restoring request still held it — fixed (447-815 → 118-506 ms, faults 65-143K → 5-68K).
+**Residual**: a save with nothing to reuse (the cache filling, the first saves after a start) still
+copies into fresh pages, 450-930 ms; huge pages make each fault slower here (2.2-6 µs against
+1.4-1.7 µs with `MIMALLOC_ALLOW_THP=0`, one arm) — ABBA `MIMALLOC_ALLOW_THP=0` against the default
+before choosing it, and whether a turn sent with no gap still waits.
 
 #### #411 — Where the flow's line ends under 110 ms
 `P3` · perf-split · **OPEN** (narrowed 2026-11-06 and 2026-11-15; (b) closed) · evidence: `docs/invariants/scheduling.md` § "A tree that flows" (the flow's distance line); history: #388 (closed 2026-11-06)

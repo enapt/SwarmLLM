@@ -2925,7 +2925,8 @@ async fn handle_forward(
             }
         }
     }
-    if let Some(snapshot) = &restored {
+    // Taken, so the answer's save can reuse its memory (#367).
+    if let Some(snapshot) = restored {
         let held = prefix_cache
             .hydrate_request_from_snapshot(
                 kv_store,
@@ -10110,7 +10111,8 @@ async fn handle_generate(
         tell_the_room_a_prompt_wanted(writer, request_id, &refused, positions).await;
         return Err(refused.error);
     }
-    let mut prefix_len = match matched.as_ref() {
+    // The match takes the snapshot: it is let go once copied (#367).
+    let mut prefix_len = match matched {
         Some(snap) => prefix_cache
             .hydrate_request_from_snapshot(
                 kv_store,
@@ -11805,7 +11807,8 @@ async fn try_register_generate_slot(
         tell_the_room_a_prompt_wanted(writer, request_id, &refused, positions).await;
         return Err(SlotAdmitError::Fatal(refused.error));
     }
-    let mut prefix_len = match matched.as_ref() {
+    // The match takes the snapshot: it is let go once copied (#367).
+    let mut prefix_len = match matched {
         Some(snap) => prefix_cache
             .hydrate_request_from_snapshot(
                 kv_store,

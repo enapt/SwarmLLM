@@ -1632,7 +1632,7 @@ impl PrefixCache {
         layouts: &[Option<CacheLayout>],
     ) -> Result<usize, SwarmError> {
         let (snap, _tokens) = deserialize_snapshot(bytes, device)?;
-        self.hydrate_request_from_snapshot(kv_store, model_key, request_id, &snap, layouts)
+        self.hydrate_request_from_snapshot(kv_store, model_key, request_id, Arc::new(snap), layouts)
     }
 
     /// Seed a fresh `KvCacheEntry` for `request_id` from `snapshot`. Returns
@@ -1645,14 +1645,24 @@ impl PrefixCache {
     /// such a layer was allocated the whole prompt — memory every estimate of
     /// its cost says it never holds (FUTURE_WORK #281). A layer with no layout
     /// is built as before, and its first forward conforms it.
+    ///
+    /// The snapshot is TAKEN, and let go once copied: a restoring request that
+    /// kept it held it through its own end-of-reply save, so the save that
+    /// replaced it — a growing conversation's every turn — copied into fresh
+    /// pages beside it instead of the memory it freed (#367: 79K-171K page
+    /// faults and 332-952 ms, against 1-42K and 88-199 ms for a copy into
+    /// memory an eviction had just freed, 2026-11-22), and both copies were
+    /// resident at once, past the room the save had planned. llama.cpp's
+    /// `server_prompt_cache::load` keeps no reference to what it restored.
     pub(crate) fn hydrate_request_from_snapshot(
         &self,
         kv_store: &KvCacheStore,
         model_key: &str,
         request_id: &str,
-        snapshot: &KvSnapshot,
+        snapshot: Arc<KvSnapshot>,
         layouts: &[Option<CacheLayout>],
     ) -> Result<usize, SwarmError> {
+        let snapshot: &KvSnapshot = &snapshot;
         let num_layers = snapshot.layers.len();
         let key = KvCacheStore::cache_key(model_key, request_id);
         let mut entry = kv_store.get_or_create_keyed(&key, num_layers);
@@ -2809,7 +2819,7 @@ mod tests {
             "narrowing kept the way back"
         );
         let restored = pc
-            .hydrate_request_from_snapshot(&kv_store, "m", "req-b", &snap, &[])
+            .hydrate_request_from_snapshot(&kv_store, "m", "req-b", Arc::clone(&snap), &[])
             .unwrap();
         assert_eq!(restored, 9);
         let key = KvCacheStore::cache_key("m", "req-b");
@@ -2851,7 +2861,7 @@ mod tests {
         let pc = PrefixCache::new(true, 8, 0, 4, 8192, 0);
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
         assert_eq!(
-            pc.hydrate_request_from_snapshot(&kv_store, "m", "req", &host, &[])
+            pc.hydrate_request_from_snapshot(&kv_store, "m", "req", Arc::new(host), &[])
                 .unwrap(),
             4
         );
@@ -3326,6 +3336,53 @@ mod tests {
         assert!(pc.lookup("m", &[other.as_slice(), &[1]].concat()).is_some());
     }
 
+    /// #367 (2026-11-22): a restore keeps no hold on the snapshot it copied,
+    /// so the turn's own save — which replaces it — frees its memory before
+    /// the copy. The worker kept it through the whole reply, and every
+    /// growing conversation's save copied into ~150K fresh pages (332-952 ms)
+    /// beside it, both resident at once.
+    #[test]
+    fn a_restored_snapshot_is_freed_by_the_save_that_replaces_it() {
+        let pc = PrefixCache::new(true, 16, 4, 4, 8192, 0);
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        make_fake_kv(&kv_store, "m", "turn-1", 2, 8);
+        let turn_1: Vec<u32> = (1..=8).collect();
+        pc.insert_from_kv(
+            "m",
+            "turn-1",
+            &kv_store,
+            &turn_1,
+            ANYWHERE,
+            KeepAsked::Unasked,
+        );
+        let turn_2: Vec<u32> = (1..=16).collect();
+        let hit = pc.lookup("m", &turn_2).expect("turn 1 opens turn 2");
+        let restored_from = Arc::downgrade(&hit);
+        assert_eq!(
+            restored_from.strong_count(),
+            2,
+            "the cached snapshot itself"
+        );
+        pc.hydrate_request_from_snapshot(&kv_store, "m", "turn-2", hit, &[])
+            .unwrap();
+        assert_eq!(restored_from.strong_count(), 1, "the cache alone holds it");
+
+        make_kv_that_fails_the_copy(&kv_store, "m", "turn-2");
+        let manifest = pc.insert_from_kv(
+            "m",
+            "turn-2",
+            &kv_store,
+            &turn_2,
+            ANYWHERE,
+            KeepAsked::Unasked,
+        );
+        assert!(manifest.is_empty(), "the copy failed");
+        assert!(
+            restored_from.upgrade().is_none(),
+            "turn 1's snapshot was freed before the copy"
+        );
+    }
+
     /// #367 (c): the room is planned once the save knows what it replaces —
     /// the planner is handed the previous turn's bytes, in the memory it is
     /// kept in, and never another conversation's — and the plan's own
@@ -3590,7 +3647,7 @@ mod tests {
         let snap = pc.lookup("m", &lookup_tokens).expect("hit");
 
         let seeded = pc
-            .hydrate_request_from_snapshot(&kv_store, "m", "req-b", &snap, &[])
+            .hydrate_request_from_snapshot(&kv_store, "m", "req-b", Arc::clone(&snap), &[])
             .unwrap();
         assert_eq!(seeded, 10);
 
@@ -4108,7 +4165,7 @@ mod tests {
         let snap = pc.lookup("m", &next).unwrap();
         assert_eq!(snap.bytes(), 12 * 4 * 4 * 2 + (6 + 8) * 4);
         let restored = pc
-            .hydrate_request_from_snapshot(&kv_store, "m", "turn2", &snap, &[])
+            .hydrate_request_from_snapshot(&kv_store, "m", "turn2", Arc::clone(&snap), &[])
             .unwrap();
         assert_eq!(restored, 12);
         let key2 = KvCacheStore::cache_key("m", "turn2");
@@ -4124,7 +4181,7 @@ mod tests {
             overwrite(state);
         }
         let again = pc.lookup("m", &next).unwrap();
-        pc.hydrate_request_from_snapshot(&kv_store, "m", "turn3", &again, &[])
+        pc.hydrate_request_from_snapshot(&kv_store, "m", "turn3", Arc::clone(&again), &[])
             .unwrap();
         let entry = kv_store
             .get_entry(&KvCacheStore::cache_key("m", "turn3"))
@@ -4575,7 +4632,7 @@ mod tests {
         assert_eq!(snap.serves_from, from + 3);
         assert!(serialize_snapshot_with_block_size(&snap, &tokens, Some(16)).is_err());
 
-        pc.hydrate_request_from_snapshot(&kv_store, "m", "restored", &snap, &[])
+        pc.hydrate_request_from_snapshot(&kv_store, "m", "restored", Arc::clone(&snap), &[])
             .unwrap();
         assert_eq!(positions_in(&kv_store, "restored", 0), held);
         assert_eq!(
@@ -4662,7 +4719,7 @@ mod tests {
                 window: None,
             }),
         ];
-        pc.hydrate_request_from_snapshot(&kv_store, "m", "restored", &snap, &layouts)
+        pc.hydrate_request_from_snapshot(&kv_store, "m", "restored", Arc::clone(&snap), &layouts)
             .unwrap();
         let keep = positions_kept_for_window(4);
         assert_eq!(
@@ -4688,7 +4745,7 @@ mod tests {
 
         // The control: restored with no layouts, the windowed layer is built
         // to the whole prompt, as every restore was before.
-        pc.hydrate_request_from_snapshot(&kv_store, "m", "unshaped", &snap, &[])
+        pc.hydrate_request_from_snapshot(&kv_store, "m", "unshaped", Arc::clone(&snap), &[])
             .unwrap();
         assert_eq!(
             positions_in(&kv_store, "unshaped", 0),

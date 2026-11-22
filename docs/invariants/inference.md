@@ -3871,6 +3871,31 @@ kept. Tests (red with the old order): `the_room_is_planned_with_what_the_save_re
 `a_prompt_already_saved_asks_for_no_room`, `a_planned_eviction_is_made_in_the_home_the_copy_goes_to`,
 `a_snapshot_the_card_cannot_hold_whole_goes_to_host_memory` (its eviction travels with the home).
 
+**A restore takes the snapshot, so the save that replaces it reuses its memory** (2026-11-22, #367;
+`PrefixCache::hydrate_request_from_snapshot` consumes the `Arc<KvSnapshot>`). Where a slow copy's
+time goes was read off the snapshot DIAG lines' `card_ms` / `host_ms` / `minor_faults` (`CopyParts`,
+`getrusage` minor faults across the copy; `7db271f4b`) in ab367.sh's shape (`~/swarmllm-gate/deep/cg/
+ab367c.sh`: the 14B Q4_K_M, 15 of 48 layers on the card, 562-670 MB snapshots in host RAM, Windows up
+16.3 h). **The copy's time is its fresh pages**: into memory an eviction had just freed, 88-199 ms with
+1-42K faults (one outlier, 806 ms at 108K); with nothing to reuse (the cache still filling), 277-593 ms
+at 40-144K; and a growing conversation's save — which REPLACES the snapshot its turn was restored
+from — 332-952 ms at 79-171K, i.e. it reused nothing of what it let go. The cause: the restoring
+request held that snapshot's `Arc` for the whole reply (`handle_generate`'s `matched`, `handle_forward`'s
+`restored`), so `make_room` dropped only the cache's reference and the memory was freed after the copy —
+both copies resident at once, past the room the plan had counted as given back. The batched path
+(`admit_slot`) let go at admission and never had it; since gotcha #1104 (2026-11-15) a lone request
+takes `handle_generate` ("slot admission refused: solo and speculatable" on every turn here), which is
+consistent with 10-30's 100-258 ms saves and today's 332-952 ms — the 10-30 path was not re-run to
+confirm it. Fixed at the one restore every path calls (llama.cpp's `server_prompt_cache::load` even
+erases what it restores; ours stays cached for other hits). **Measured** (`ab367d.sh`, one boot, the
+old and fixed binaries interleaved old/new/new/old, Windows up 16.8 h): the replacing save 447-815 ms
+(median ~590) at 65-143K faults → 118-506 ms (median ~157) at 5-68K; the cache-filling copies unchanged
+(444-929 → 454-657 ms). The conversation's next-turn first token did not move (median 1.35 → 1.34 s):
+the bench waits 0.5 s between turns, which hid most of the copy — an agent's turn sent at once gains up
+to the difference. Fresh pages cost 2.2-6 µs each with huge pages allowed and 1.4-1.7 µs with
+`MIMALLOC_ALLOW_THP=0` (one arm: its cache-filling copies 291-300 ms against 277-593) — unweighed.
+Test (red with a kept reference): `a_restored_snapshot_is_freed_by_the_save_that_replaces_it`.
+
 **Moved from `arch-inference.md` (trimmed 2026-11-17):** The fixed 8,192-token ceiling it replaced refused most agent prompts outright. A slid snapshot cannot keep an opening short of `serves_from`, so charging every position kept nothing: the charge is `(budget + slid_away) / per_position`. `contiguous()` hands back the live buffer for a one-KV-head view, which a window's in-place slide then rewrites (gotcha #874). `Entry::kept_here` is an empty manifest, so never announced or exported. The end-of-pass snapshot is copied once the reply is done (2026-10-28; llama.cpp saves at slot reuse): copying between the prompt pass and the first token cost 0.5-0.9 s of a 14B split's 1,800-token prompt and the first token gained only 0.12 s at the median, as the next pass ran 0.25 s slower - open. Not where a cache slides (the opening may be gone by then) nor a recurrent model (saved inside the pass). It is taken however the reply ends while the worker survives - an error, a cancel landing inside a step, a failed batched tick (`prompt_outlives`, asked by all three) - and a request arriving back to back waits for the rest of the copy. Making room first (`PrefixCache::make_room`, llama.cpp's `server_prompt_cache::alloc` order): a copy beside the old entries faults fresh pages - 255 ms per 569 MB with memory free, 0.6-0.8 s under a full page cache, 43 ms into held memory. The room planner (`RoomPlan`) is handed the replaced entries' bytes per memory (`LetGo`) and counts them as its own.
 
 ## A blocked GQA attention call is grouped per block, never expanded (2026-09-26)
