@@ -1833,6 +1833,19 @@ impl KvCacheStore {
     /// Why [`Self::every_cache_holds`] says no — the first layer that does not
     /// hold `positions`, in words. Asked only where a step to capture was not
     /// ready, for a DIAG line (`decode_step_with_graph`).
+    /// The first recurrent layer's flow under `key`, in words, for a step to
+    /// `positions` — what a DIAG line says of a flowing level whose capture
+    /// was refused.
+    pub(crate) fn a_flow_in_words(&self, key: &str, positions: usize) -> String {
+        let Some(entry) = self.caches.get(key) else {
+            return "no cache for the request".into();
+        };
+        entry.ssm_states.iter().flatten().next().map_or_else(
+            || "no recurrent state".into(),
+            |s| s.why_no_step_to(positions),
+        )
+    }
+
     pub(crate) fn why_a_cache_does_not_hold(
         &self,
         key: &str,

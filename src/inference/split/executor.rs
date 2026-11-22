@@ -1824,6 +1824,23 @@ impl SplitModel {
             }
             return Ok((out, caught));
         }
+        // A flowing level refused inside its capture: its shape, for the
+        // refusals the TH↔AU link met and the card alone never did
+        // (`q35_deltanet: CUDA_ERROR_INVALID_VALUE`, 2026-11-23).
+        if staged_tree.is_some() && self.flow_walk.is_some() {
+            if let Err(refused) = &captured {
+                tracing::debug!(
+                    index_pos,
+                    positions,
+                    walk = ?self.flow_walk,
+                    tree_rows = self.draft_tree.as_ref().map(|t| t.len()),
+                    flow = %kv_cache_store.a_flow_in_words(&cache_key, index_pos + positions),
+                    kind = refused.kind,
+                    detail = %refused.detail,
+                    "DIAG: a flowing level's capture was refused"
+                );
+            }
+        }
         // The ordinary way below sets the tree's scope itself.
         drop(staged_tree);
         // Refused: nothing the capture recorded will run, but the forward
