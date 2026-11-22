@@ -839,6 +839,7 @@ impl PipelineExecutor {
                 None
             },
             stream_branch: None,
+            flow_walk: None,
         };
         if state.pending_layer_results.len() >= super::MAX_PENDING_LAYER_RESULTS {
             return Err(SwarmError::ServiceUnavailable(

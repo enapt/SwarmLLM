@@ -1601,6 +1601,7 @@ impl PipelineExecutor {
                     block_rows_wanted: self
                         .block_rows_wanted_for(&segment.node_id, super::block_draft::PROMPT_WINDOW),
                     stream_branch: None,
+                    flow_walk: None,
                 };
                 let forward = rebuild_forward();
 
@@ -3047,6 +3048,7 @@ impl PipelineExecutor {
                 stream_lookahead: None,
                 block_rows_wanted: None,
                 stream_branch: None,
+                flow_walk: None,
             };
             let forward = rebuild_forward();
 

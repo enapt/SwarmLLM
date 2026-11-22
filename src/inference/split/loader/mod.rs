@@ -3589,6 +3589,7 @@ impl SplitModel {
             masks: None,
             image_spans: Vec::new(),
             draft_tree: None,
+            flow_walk: None,
             kv_budget_bytes,
             kv_growth,
             host_kv_budget_bytes,

@@ -129,6 +129,7 @@ pub fn encode_layer_forward(forward: &LayerForward) -> Result<Vec<u8>, SwarmErro
     append_stream_branch_trailer(&mut buf, forward);
     block_rows_wanted_fit(forward)?;
     append_block_rows_wanted_trailer(&mut buf, forward);
+    append_flow_walk_trailer(&mut buf, forward);
 
     Ok(buf)
 }
@@ -679,6 +680,52 @@ pub(crate) fn read_block_rows_wanted_trailer(
     Ok(Some(crate::types::BlockRowsWanted { layers, most_rows }))
 }
 
+/// Length of the walk trailer, marker included.
+const FLOW_WALK_TRAILER_LEN: usize = 3;
+
+/// Write the walk trailer: `0x15 | row u16 LE` — the row of a tree that flows
+/// the coordinator's walk stood on when the forward was sent
+/// (`LayerForward::flow_walk`, `docs/plans/recurrent_flow.md`). Last, after
+/// `0x14`, by the ONE function the plaintext frame, the encrypted frame and the
+/// AAD all call; written only beside the tree-flow trailer (`0x11`), as its
+/// reader requires. Set only on a forward to a peer advertising
+/// `features::RECURRENT_FLOW`.
+pub(crate) fn append_flow_walk_trailer(buf: &mut Vec<u8>, forward: &LayerForward) {
+    let Some(walk) = forward.flow_walk else {
+        return;
+    };
+    if forward.draft_tree_from.is_none() || forward.draft_parents.is_empty() {
+        return;
+    }
+    buf.push(0x15);
+    buf.extend_from_slice(&walk.to_le_bytes());
+}
+
+/// Read the walk trailer (`0x15`) at `cursor`. REFUSED — never read as absent —
+/// when truncated or with no tree that flows beside it (`flows`): a walk's row
+/// names a row of that tree and nothing else, and a recurrent segment read
+/// without it would keep the wrong checkpoint.
+pub(crate) fn read_flow_walk_trailer(
+    data: &[u8],
+    cursor: &mut usize,
+    flows: bool,
+) -> Result<Option<u16>, SwarmError> {
+    if data.len() <= *cursor || data[*cursor] != 0x15 {
+        return Ok(None);
+    }
+    if data.len() < *cursor + FLOW_WALK_TRAILER_LEN {
+        return Err(SwarmError::Network("walk trailer truncated".into()));
+    }
+    if !flows {
+        return Err(SwarmError::Network(
+            "walk trailer with no tree that flows beside it refused".into(),
+        ));
+    }
+    let walk = u16::from_le_bytes([data[*cursor + 1], data[*cursor + 2]]);
+    *cursor += FLOW_WALK_TRAILER_LEN;
+    Ok(Some(walk))
+}
+
 /// Write the decoded-so-far trailer: `0x08 | n(2 LE) | n × id(4 LE)`.
 ///
 /// **The field this carries never reached the wire at all until 2026-09-21.**
@@ -1140,6 +1187,7 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
     let stream_lookahead = read_stream_lookahead_trailer(data, &mut cursor)?;
     let stream_branch = read_stream_branch_trailer(data, &mut cursor)?;
     let block_rows_wanted = read_block_rows_wanted_trailer(data, &mut cursor)?;
+    let flow_walk = read_flow_walk_trailer(data, &mut cursor, draft_tree_from.is_some())?;
     let _ = cursor;
 
     Ok(LayerForward {
@@ -1174,6 +1222,7 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
         stream_lookahead,
         stream_branch,
         block_rows_wanted,
+        flow_walk,
     })
 }
 
@@ -1223,6 +1272,7 @@ mod tests {
             stream_lookahead: None,
             block_rows_wanted: None,
             stream_branch: None,
+            flow_walk: None,
         }
     }
 
@@ -2041,6 +2091,58 @@ mod tests {
         assert!(
             decode_layer_forward(&forged).is_err(),
             "a start with no tree beside it"
+        );
+        assert!(
+            decode_layer_forward(&bytes[..bytes.len() - 1]).is_err(),
+            "cut short"
+        );
+    }
+
+    /// The walk's row of a tree that flows (`0x15`,
+    /// `docs/plans/recurrent_flow.md`) goes after every other trailer; a
+    /// forward without one is byte-identical to before; and a row cut short,
+    /// or with no tree that flows beside it, is REFUSED — read as absent, a
+    /// recurrent segment would refuse the tree or keep its checkpoint at the
+    /// wrong row.
+    #[test]
+    fn a_walks_row_survives_the_wire_and_a_malformed_one_is_refused() {
+        let mut f = base_forward();
+        f.spec_logits_requested = true;
+        f.spec_walk_at_tail = true;
+        f.draft_parents = vec![0, 1, 1, 2, 3];
+        f.draft_tree_from = Some(f.index_pos - 3);
+        f.block_rows_wanted = Some(crate::types::BlockRowsWanted {
+            layers: vec![2],
+            most_rows: 4,
+        });
+        f.flow_walk = Some(300);
+        let bytes = encode_layer_forward(&f).unwrap();
+        let back = decode_layer_forward(&bytes).unwrap();
+        assert_eq!(back.flow_walk, Some(300));
+        assert_eq!(back.draft_tree_from, f.draft_tree_from);
+        assert_eq!(
+            back.block_rows_wanted, f.block_rows_wanted,
+            "the trailer before it reads"
+        );
+
+        let mut unwalked = f.clone();
+        unwalked.flow_walk = None;
+        let plain = encode_layer_forward(&unwalked).unwrap();
+        assert_eq!(plain.len(), bytes.len() - FLOW_WALK_TRAILER_LEN);
+        assert_eq!(decode_layer_forward(&plain).unwrap().flow_walk, None);
+
+        // A walk with no tree that flows is never written...
+        let mut no_flow = f.clone();
+        no_flow.draft_tree_from = None;
+        let flowless = encode_layer_forward(&no_flow).unwrap();
+        assert_eq!(decode_layer_forward(&flowless).unwrap().flow_walk, None);
+        // ...and refused where a sender wrote one anyway.
+        let mut forged = flowless.clone();
+        forged.push(0x15);
+        forged.extend_from_slice(&2u16.to_le_bytes());
+        assert!(
+            decode_layer_forward(&forged).is_err(),
+            "a walk with no tree that flows beside it"
         );
         assert!(
             decode_layer_forward(&bytes[..bytes.len() - 1]).is_err(),

@@ -1402,6 +1402,7 @@ mod tests {
             stream_lookahead: None,
             block_rows_wanted: None,
             stream_branch: None,
+            flow_walk: None,
         };
 
         let encoded = encode_layer_forward(&forward).unwrap();
@@ -1454,6 +1455,7 @@ mod tests {
                 stream_lookahead: None,
                 block_rows_wanted: None,
                 stream_branch: None,
+                flow_walk: None,
             };
             let encoded = encode_layer_forward(&forward).unwrap();
             assert_eq!(encoded[25], tag); // tag(1) + uuid(16) + seq(4) + index_pos(4) = 25
@@ -1502,6 +1504,7 @@ mod tests {
             stream_lookahead: None,
             block_rows_wanted: None,
             stream_branch: None,
+            flow_walk: None,
         };
 
         let encoded = encode_layer_forward(&forward).unwrap();
@@ -1544,6 +1547,7 @@ mod tests {
             stream_lookahead: None,
             block_rows_wanted: None,
             stream_branch: None,
+            flow_walk: None,
         };
 
         let encoded = encode_layer_forward(&forward).unwrap();
@@ -1591,6 +1595,7 @@ mod tests {
             stream_lookahead: None,
             block_rows_wanted: None,
             stream_branch: None,
+            flow_walk: None,
         };
         let encoded = encode_layer_forward(&forward).unwrap();
         // Trim to remove the trailer — simulates an old encoder
@@ -1803,6 +1808,7 @@ mod tests {
             stream_lookahead: None,
             block_rows_wanted: None,
             stream_branch: None,
+            flow_walk: None,
         };
         let encoded = encode_layer_forward(&forward).unwrap();
 
@@ -1858,6 +1864,7 @@ mod tests {
             stream_lookahead: None,
             block_rows_wanted: None,
             stream_branch: None,
+            flow_walk: None,
         };
 
         let encoded = encode_layer_forward(&forward).unwrap();
@@ -1906,6 +1913,7 @@ mod tests {
             stream_lookahead: None,
             block_rows_wanted: None,
             stream_branch: None,
+            flow_walk: None,
         };
         let encoded = encode_layer_forward(&forward).unwrap();
         let decoded = decode_layer_forward(&encoded).unwrap();
@@ -1952,6 +1960,7 @@ mod tests {
             stream_lookahead: None,
             block_rows_wanted: None,
             stream_branch: None,
+            flow_walk: None,
         };
         let encoded = encode_layer_forward(&forward).unwrap();
         let decoded = decode_layer_forward(&encoded).unwrap();

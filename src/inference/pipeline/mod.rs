@@ -492,6 +492,7 @@ pub(super) fn build_spec_verify_forward(
         stream_lookahead: None,
         block_rows_wanted: None,
         stream_branch: None,
+        flow_walk: None,
     }
 }
 
@@ -1153,6 +1154,7 @@ pub(super) fn build_kv_truncate_forward(
         stream_lookahead: None,
         block_rows_wanted: None,
         stream_branch: None,
+        flow_walk: None,
     }
 }
 

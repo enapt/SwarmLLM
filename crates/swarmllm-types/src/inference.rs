@@ -707,6 +707,19 @@ pub struct LayerForward {
     /// layer rows on the pipeline hand-off the same way (`aux_hidden_states`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block_rows_wanted: Option<BlockRowsWanted>,
+    /// The row of a tree that FLOWS ([`Self::draft_tree_from`]) the
+    /// coordinator's walk stood on when this forward was sent
+    /// (`docs/plans/recurrent_flow.md`): every row before it on its line is
+    /// the reply's. A segment whose layers keep a recurrent state (Qwen 3.5's
+    /// DeltaNet) keeps one checkpoint there and the inputs of the rows that
+    /// still follow it, so a forward whose rows' parents are rows of earlier
+    /// forwards is read from it; without it such a segment refuses a tree that
+    /// flows. A row number of the tree, which the segment checks against the
+    /// rows it holds. `None` on every other forward. Travels as the `0x15`
+    /// trailer, bound into the AAD, only to a peer advertising
+    /// `features::RECURRENT_FLOW`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_walk: Option<u16>,
 }
 
 /// What a forward asks of a segment for a block drafter
@@ -1752,6 +1765,7 @@ mod chunk_assembly_tests {
             stream_lookahead: None,
             block_rows_wanted: None,
             stream_branch: None,
+            flow_walk: None,
         }
     }
 

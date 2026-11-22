@@ -497,6 +497,16 @@ pub mod features {
     /// rows, and the drafter stops for the reply.
     pub const BLOCK_TREES: u64 = 1 << 46;
 
+    /// Reads a tree that FLOWS through layers that keep a recurrent state
+    /// (Qwen 3.5/3.6/3.8's DeltaNet layers, `docs/plans/recurrent_flow.md`),
+    /// beside [`DRAFT_TREE_FLOW`]: takes the walk's row on each forward
+    /// (`LayerForward::flow_walk`, the `0x15` trailer), keeps a checkpoint
+    /// there and every following row's inputs, and reads each new row from its
+    /// parent's line. A coordinator lets a recurrent model's tree flow only
+    /// where every peer segment advertises it; an older peer refuses a flowing
+    /// tree on those layers.
+    pub const RECURRENT_FLOW: u64 = 1 << 47;
+
     /// The full feature set THIS build implements. Advertised by every node,
     /// with [`KV_HALF_ON_CARD`], [`KV_WINDOW_SLIDES`], [`REQUESTER_GUESSES`],
     /// [`SERVES_SLICES`] and [`PROCESSOR_RUN_FIRST`] beside it where they
@@ -542,7 +552,8 @@ pub mod features {
         | PROMPT_PROGRESS
         | HOW_SERVED
         | HOW_SERVED_WHY
-        | BLOCK_TREES;
+        | BLOCK_TREES
+        | RECURRENT_FLOW;
 
     /// Does `advertised` include every bit in `needed`?
     pub fn supports(advertised: u64, needed: u64) -> bool {

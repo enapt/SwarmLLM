@@ -1229,6 +1229,11 @@ impl FlowRows {
         self.base + self.read
     }
 
+    /// Rows kept with their inputs: the rows following the anchor's.
+    pub(crate) fn rows_kept(&self) -> usize {
+        self.kept.len()
+    }
+
     /// The state at cache position `positions`, where a cut may put it: a
     /// start, or the start of the tree a rebase onto the walk's row would make
     /// (the walk's line a chain from the tree's first row).
@@ -1634,12 +1639,13 @@ fn delta_rule_in_one_pass() -> bool {
 /// bounds it.
 ///
 /// A TREE's rows (`tree`, each row's parent, #437) each start from their
-/// parent's state — one kept a row, in a buffer each pool thread keeps (a
-/// tree is at most `SsmState::MOST_ROWS_KEPT` rows: 2 MB a head at 128 × 128)
-/// — with the same arithmetic a row of a chain gets, so a row whose line is
-/// the rows before it gets the chain's bits. The state returned is the last
-/// row's. Twig (arXiv 2608.01651) solves the same tree in closed form over an
-/// ancestor mask to keep no state per node; at 32 rows the states fit.
+/// parent's state — kept in a buffer each pool thread keeps, a state only
+/// until the row's last child has read it ([`RowSlots`]) — with the same
+/// arithmetic a row of a chain gets, so a row whose line is the rows before
+/// it gets the chain's bits. The state returned is the last row's. Twig
+/// (arXiv 2608.01651) solves the same tree in closed form over an ancestor
+/// mask to keep no state per node; with only the states still to be read
+/// kept, they fit.
 #[allow(clippy::too_many_arguments)]
 fn delta_rule_cpu(
     q: &Tensor,
@@ -1655,6 +1661,7 @@ fn delta_rule_cpu(
     let (_, _, nv, vd) = v.dims4()?;
     let flat = |t: &Tensor| t.contiguous()?.flatten_all()?.to_vec1::<f32>();
     let (q, k, v, g, beta) = (flat(q)?, flat(k)?, flat(v)?, flat(g)?, flat(beta)?);
+    let slots = tree.map(RowSlots::of);
     let mut s = flat(state)?; // [b, nv, vd, kd]
     let mut out = vec![0f32; b * nv * seq * vd]; // [b, nv, seq, vd]: one head's tokens contiguous
     s.par_chunks_mut(vd * kd)
@@ -1681,18 +1688,25 @@ fn delta_rule_cpu(
                 Some(parents) => TREE_ROW_STATES.with(|kept| {
                     let mut kept = kept.borrow_mut();
                     let size = vd * kd;
-                    kept.resize(seq * size, 0.0);
+                    let slots = slots.as_ref().expect("a tree's slots");
+                    kept.resize(slots.count * size, 0.0);
                     for (t, parent) in parents.iter().enumerate() {
-                        let (before, from_here) = kept.split_at_mut(t * size);
-                        let here = &mut from_here[..size];
-                        here.copy_from_slice(match parent {
-                            Some(p) => &before[p * size..(p + 1) * size],
-                            None => &*s,
-                        });
-                        step(here, o, t);
+                        let at = slots.of[t] * size;
+                        match parent.map(|p| slots.of[p] * size) {
+                            // A last child reads on in its parent's slot.
+                            Some(from) if from == at => {}
+                            Some(from) => kept.copy_within(from..from + size, at),
+                            None => kept[at..at + size].copy_from_slice(s),
+                        }
+                        step(&mut kept[at..at + size], o, t);
                     }
-                    if seq > 0 {
-                        s.copy_from_slice(&kept[(seq - 1) * size..seq * size]);
+                    if let Some(&last) = slots.of.last() {
+                        s.copy_from_slice(&kept[last * size..(last + 1) * size]);
+                    }
+                    // A wide tree (a flow's, or another computer's choosing)
+                    // gives its buffer back rather than keep it on the thread.
+                    if kept.capacity() > SsmState::MOST_ROWS_KEPT * size {
+                        *kept = Vec::new();
                     }
                 }),
             }
@@ -1704,11 +1718,56 @@ fn delta_rule_cpu(
 }
 
 thread_local! {
-    /// Each row's state while [`delta_rule_cpu`] reads a tree, kept by the
-    /// pool thread across calls: a tree's check is up to 32 rows × 64 KB a
-    /// head, and fresh pages for it every head of every layer would cost more
-    /// than the rule.
+    /// The states [`delta_rule_cpu`] keeps while it reads a tree
+    /// ([`RowSlots`]), kept by the pool thread across calls: fresh pages
+    /// every head of every layer would cost more than the rule. Up to
+    /// `SsmState::MOST_ROWS_KEPT` states (64 KB a head at 128 × 128) stay;
+    /// more is given back after the call.
     static TREE_ROW_STATES: std::cell::RefCell<Vec<f32>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Where each row of a tree keeps its state while [`delta_rule_cpu`] reads it
+/// (rows in order, a parent before its children). A row's state is needed
+/// only until its last child reads it: that child takes over its slot and
+/// reads on in place, and a row with no child gives its slot up after its own
+/// step (but the last row, whose state the step returns). So a tree keeps the
+/// states still to be read — one for a chain, a few for a flow's lines —
+/// however many rows it has; before, a state a row, so a flowing tree of 512
+/// rows held 32 MB on every pool thread, for good (security review
+/// 2026-11-22). Liveness, as a register allocator frees a value at its last
+/// use.
+struct RowSlots {
+    /// Each row's slot.
+    of: Vec<usize>,
+    /// Slots used.
+    count: usize,
+}
+
+impl RowSlots {
+    fn of(parents: &[Option<usize>]) -> Self {
+        let mut last_child = vec![None; parents.len()];
+        for (t, parent) in parents.iter().enumerate() {
+            if let Some(p) = *parent {
+                last_child[p] = Some(t);
+            }
+        }
+        let (mut of, mut free, mut count) = (vec![0; parents.len()], Vec::new(), 0);
+        for (t, parent) in parents.iter().enumerate() {
+            if let Some(p) = *parent {
+                if last_child[p] == Some(t) {
+                    free.push(of[p]);
+                }
+            }
+            of[t] = free.pop().unwrap_or_else(|| {
+                count += 1;
+                count - 1
+            });
+            if last_child[t].is_none() && t + 1 < parents.len() {
+                free.push(of[t]);
+            }
+        }
+        Self { of, count }
+    }
 }
 
 /// A tree check's rows as a recurrent layer reads them (#437): each row's
@@ -4020,8 +4079,11 @@ mod tests {
             let (positions, visible) = shape.rows_for(index_pos, rows.len()).unwrap();
             let x: Vec<Tensor> = rows.clone().map(|r| row_of(tree.inputs[r])).collect();
             let out = {
-                let _flow =
-                    super::super::RowPositions::for_flowing_tree(positions, visible, walk as u32);
+                let _flow = super::super::RowPositions::for_tree_walked(
+                    positions,
+                    visible,
+                    Some(walk as u32),
+                );
                 w.forward_deltanet(&Tensor::cat(&x, 1).unwrap(), held, index_pos)?
             };
             for &row in live {
@@ -4070,6 +4132,44 @@ mod tests {
         // The walk went 0 → 1 → 2: rows 3, 4, 6 and 8 no longer follow it,
         // and row 12 (under 6) is read from the anchor, never shown.
         send(&mut held, &first, 9..13, 2, &[9, 10, 11], seen).unwrap();
+        {
+            // A forward that fails part-way after this layer kept its rows (a
+            // later layer refused; a card's rerun after a refusal) is put back
+            // where it began, and read again lands where it did.
+            let mut again = held.clone();
+            let h = again.as_mut().unwrap();
+            assert!(h.can_rewind_to(3 + 9) && h.rewind_to(3 + 9).unwrap());
+            assert_eq!(h.positions(), 3 + 9);
+            send(&mut again, &first, 9..13, 2, &[9, 10, 11], seen).unwrap();
+            seen(anchor(&again, first.line(2), "after a forward put back"));
+            // A layer that kept nothing of a failed forward is where it began.
+            let h = again.as_mut().unwrap();
+            assert!(h.can_rewind_to(3 + 13) && h.rewind_to(3 + 13).unwrap());
+            assert_eq!(h.positions(), 3 + 13);
+        }
+        {
+            // What a flowing forward claims for the rows a flow keeps is what
+            // the flow keeps: a row's figure, and the two states besides.
+            let h = held.as_ref().unwrap();
+            let flow = h.flow.as_ref().unwrap();
+            let bytes = |t: &Tensor| (t.elem_count() * t.dtype().size_in_bytes()) as u64;
+            let kept: u64 = flow
+                .inputs
+                .as_ref()
+                .unwrap()
+                .tensors()
+                .iter()
+                .map(|t| bytes(t))
+                .sum();
+            let states = 2 * (bytes(&h.current.conv_state) + bytes(&h.current.recurrent_state));
+            let rows = flow.rows_kept() as u64;
+            assert!(rows > 0);
+            assert_eq!(h.bytes_a_flowing_forward_may_add(0), kept + states);
+            assert_eq!(
+                h.bytes_a_flowing_forward_may_add(4) - h.bytes_a_flowing_forward_may_add(0),
+                4 * kept / rows
+            );
+        }
         seen(anchor(&held, first.line(2), "after the walk reached row 2"));
         {
             let mut back = held.clone();
@@ -4137,6 +4237,12 @@ mod tests {
         };
         // The walk went 13 → 14: row 4 (under 15) is gone; row 5 reads on
         // from row 3 of the same forward.
+        // A forward of the rebased tree at a position the layer does not hold
+        // is refused, and leaves the flow on its old start.
+        let mut wrong = held.clone();
+        assert!(send(&mut wrong, &second, 4..6, 1, &[], seen).is_err());
+        let flow = wrong.as_ref().unwrap().flow.as_ref().unwrap();
+        assert_eq!((flow.base(), flow.positions()), (3, 10));
         send(&mut held, &second, 3..6, 1, &[3, 5], seen).unwrap();
         seen(anchor(
             &held,
@@ -4229,7 +4335,7 @@ mod tests {
                 states += 1;
             }
         });
-        assert_eq!((rows, states), (61, 8), "every row and state shown");
+        assert_eq!((rows, states), (64, 9), "every row and state shown");
     }
 
     /// [`flowing_script`] on a card (`docs/plans/recurrent_flow.md` stage 2)
@@ -4436,6 +4542,64 @@ mod tests {
         let (as_chain, _, _) =
             delta_rule_into(&qk, 2, &v, &gates, &state, Some(&into), None).unwrap();
         assert!(max_abs_diff(&cpu(&as_chain), &on_host) > 1e-2);
+    }
+
+    /// The processor's tree pass keeps a state only while a row still has to
+    /// read it ([`RowSlots`]): played out, every row starts from its parent's
+    /// state (or the step's) and the last row's is there at the end — over
+    /// chains, fans, deep lines and 400 trees of random parents — and a tree
+    /// of 512 rows keeps a few states, not 512. (The arithmetic is the tree
+    /// tests' — `a_tree_checks_rows_are_their_lines_read_alone` and the flow's
+    /// — bit for bit their lines read alone.)
+    #[test]
+    fn a_tree_keeps_only_the_states_still_to_be_read() {
+        // Plays the plan out: which row's state each slot holds.
+        let play = |parents: &[Option<usize>]| -> usize {
+            let slots = RowSlots::of(parents);
+            let mut holds: Vec<Option<usize>> = vec![None; slots.count];
+            for (t, parent) in parents.iter().enumerate() {
+                if let Some(p) = *parent {
+                    assert_eq!(
+                        holds[slots.of[p]],
+                        Some(p),
+                        "row {t} reads row {p}'s state, overwritten: {parents:?}"
+                    );
+                }
+                holds[slots.of[t]] = Some(t);
+            }
+            if let Some(last) = parents.len().checked_sub(1) {
+                assert_eq!(holds[slots.of[last]], Some(last));
+            }
+            slots.count
+        };
+        let chain: Vec<Option<usize>> = (0..512).map(|t: usize| t.checked_sub(1)).collect();
+        assert_eq!(play(&chain), 1, "a chain reads on in place");
+        let fan: Vec<Option<usize>> = (0..512).map(|t| (t > 0).then_some(0)).collect();
+        assert_eq!(play(&fan), 2);
+        // Breadth first, every row two children: the frontier is what is kept.
+        let wide: Vec<Option<usize>> = (0..511)
+            .map(|t: usize| t.checked_sub(1).map(|p| p / 2))
+            .collect();
+        assert!(play(&wide) <= 257);
+        // The flow's shape: lines deep in the tree, siblings under them.
+        let mut deep: Vec<Option<usize>> = vec![None];
+        for t in 1..512usize {
+            deep.push(Some(if t.is_multiple_of(7) { t - 3 } else { t - 1 }));
+        }
+        assert!(play(&deep) <= 4);
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        for _ in 0..400 {
+            let rows = 1 + (seed % 64) as usize;
+            let parents: Vec<Option<usize>> = (0..rows)
+                .map(|t| {
+                    seed = seed
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    (t > 0 && !seed.is_multiple_of(5)).then(|| (seed >> 33) as usize % t)
+                })
+                .collect();
+            play(&parents);
+        }
     }
 
     /// The token-by-token composition (`SWARMLLM_DELTA_RULE=steps`) reads a

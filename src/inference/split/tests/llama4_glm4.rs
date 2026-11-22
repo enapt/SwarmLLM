@@ -481,6 +481,7 @@ fn test_llama4_moe_layer_forward() {
         plain_steps: Default::default(),
         stand_in_prior: None,
         grammar_vocab: Default::default(),
+        flow_walk: None,
     };
 
     let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));

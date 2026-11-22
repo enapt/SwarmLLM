@@ -307,6 +307,7 @@ fn qwen2_forward_with_biases() {
         plain_steps: Default::default(),
         stand_in_prior: None,
         grammar_vocab: Default::default(),
+        flow_walk: None,
     };
 
     let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));

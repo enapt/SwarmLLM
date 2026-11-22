@@ -1508,6 +1508,17 @@ impl KvCacheEntry {
         added
     }
 
+    /// What a flowing forward of `rows` rows may newly hold in `home` across
+    /// the recurrent layers ([`SsmState::bytes_a_flowing_forward_may_add`]).
+    fn bytes_a_flowing_forward_may_add(&self, rows: usize, home: KvHome) -> u64 {
+        self.ssm_states
+            .iter()
+            .flatten()
+            .filter(|ssm| ssm.home() == home)
+            .map(|ssm| ssm.bytes_a_flowing_forward_may_add(rows))
+            .sum()
+    }
+
     /// Truncate every layer's KV cache to exactly `target_len` sequence
     /// positions. No-op for layers whose current length is already ≤ target.
     /// Used by speculative decoding after partial acceptance — the forward
@@ -1873,6 +1884,20 @@ impl KvCacheStore {
         self.caches
             .get(key)
             .and_then(|entry| entry.bytes_a_forward_adds(index_pos, seq_len, home))
+    }
+
+    /// What a flowing forward of `rows` rows may newly hold in `home` in the
+    /// recurrent layers of the caches under `key` (0 with none): the
+    /// head-room claim adds it to the attention cache's growth.
+    pub(crate) fn bytes_a_flowing_forward_may_add(
+        &self,
+        key: &str,
+        rows: usize,
+        home: KvHome,
+    ) -> u64 {
+        self.caches
+            .get(key)
+            .map_or(0, |entry| entry.bytes_a_flowing_forward_may_add(rows, home))
     }
 
     /// Bytes the caches under `key` hold in `home`.

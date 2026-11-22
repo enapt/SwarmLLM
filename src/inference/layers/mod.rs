@@ -3174,6 +3174,20 @@ pub(crate) struct SsmState {
     /// cache's length past it, and `branched` is set — the one take-back is to
     /// the tree's start ([`Self::rewind_to`]).
     flow: Option<qwen35::FlowRows>,
+    /// Where the last flowing forward began ([`Self::flow_from`]): the cache's
+    /// length then and the flow as it stood (`None`: the forward started it).
+    /// A forward that fails part-way after this layer kept its rows is put
+    /// back there (`executor::put_back_where_the_step_began`, a card's rerun
+    /// after a refusal) — without it the conversation was dropped. Kept until
+    /// the next flowing forward begins or the flow ends.
+    flow_begun: Option<FlowBegun>,
+}
+
+/// [`SsmState::flow_begun`].
+#[derive(Debug, Clone)]
+struct FlowBegun {
+    at: usize,
+    flow: Option<Box<qwen35::FlowRows>>,
 }
 
 /// What a step of several positions gave its convolution and delta rule, one
@@ -3251,6 +3265,7 @@ impl SsmState {
             rows_held: 0,
             branched: false,
             flow: None,
+            flow_begun: None,
         }
     }
 
@@ -3345,17 +3360,33 @@ impl SsmState {
     /// new one from this state where the tree starts here. Anything else is a
     /// conversation this layer does not hold, refused.
     pub(crate) fn flow_from(&mut self, base: usize, index_pos: usize) -> CandleResult<()> {
+        let begun = FlowBegun {
+            at: index_pos,
+            flow: self.flow.clone().map(Box::new),
+        };
         match &mut self.flow {
             Some(flow) => {
-                if base > flow.base() {
-                    flow.rebase_onto(base)?;
-                }
-                if base != flow.base() || flow.positions() != index_pos {
-                    candle_core::bail!(
-                        "a flowing tree from {base} at {index_pos}, where this layer's flows from {} and holds {}",
-                        flow.base(),
-                        flow.positions()
-                    );
+                let fits = (if base > flow.base() {
+                    flow.rebase_onto(base)
+                } else {
+                    Ok(())
+                })
+                .and_then(|()| {
+                    if base != flow.base() || flow.positions() != index_pos {
+                        candle_core::bail!(
+                            "a flowing tree from {base} at {index_pos}, where this layer's flows from {} and holds {}",
+                            flow.base(),
+                            flow.positions()
+                        );
+                    }
+                    Ok(())
+                });
+                // A forward refused here leaves the flow as it found it: a
+                // rebase onto its start is undone, so a later forward of the
+                // same conversation reads on (security review 2026-11-22).
+                if let Err(refused) = fits {
+                    self.flow = begun.flow.map(|flow| *flow);
+                    return Err(refused);
                 }
             }
             None => {
@@ -3372,7 +3403,35 @@ impl SsmState {
                 self.rows_held = 0;
             }
         }
+        self.flow_begun = Some(begun);
         Ok(())
+    }
+
+    /// What a flowing forward of `rows` new rows may newly hold on this layer's
+    /// device, at most: the rows the flow keeps gathered again with the new
+    /// ones (`qwen35::FlowRows::keep` joins them whole, `advance_to` gathers
+    /// the rows still following the walk), and the two states the walk's
+    /// checkpoint moves to. A kept row is its convolution's inputs and
+    /// outputs (`channels` each) and its gates (two a value head) — on a
+    /// 27B-class layer ~80 KB, far past its attention cache. An upper bound:
+    /// what the last flowing forward began from (`flow_begun`) and the rows
+    /// the walk leaves are let go during the forward. The forward's head-room
+    /// claim adds it (`executor`, security review 2026-11-22: unclaimed, a
+    /// tree of 512 rows grew a segment's card memory past its budget).
+    pub(crate) fn bytes_a_flowing_forward_may_add(&self, rows: usize) -> u64 {
+        let slot = &self.current;
+        let bytes = |t: &Tensor| t.elem_count() as u64 * t.dtype().size_in_bytes() as u64;
+        let channels = slot.conv_state.dims().get(1).copied().unwrap_or(0);
+        let heads = slot.recurrent_state.dims().get(1).copied().unwrap_or(0);
+        let row =
+            (2 * channels + 2 * heads) as u64 * slot.conv_state.dtype().size_in_bytes() as u64;
+        let kept = self.flow.as_ref().map_or(0, qwen35::FlowRows::rows_kept);
+        (kept + rows) as u64 * row + 2 * (bytes(&slot.conv_state) + bytes(&slot.recurrent_state))
+    }
+
+    /// The memory this layer's state lives in.
+    pub(crate) fn home(&self) -> crate::inference::split::KvHome {
+        crate::inference::split::KvHome::of(self.current.recurrent_state.device())
     }
 
     /// The flow under way ([`Self::flow_from`]).
@@ -3406,7 +3465,9 @@ impl SsmState {
     /// step kept its rows up to it.
     pub(crate) fn can_rewind_to(&self, positions: usize) -> bool {
         if let Some(flow) = &self.flow {
-            return flow.state_at(positions).is_some();
+            return flow.positions() == positions
+                || self.flow_begun.as_ref().is_some_and(|b| b.at == positions)
+                || flow.state_at(positions).is_some();
         }
         (self.at == positions && !self.branched)
             || self.previous_at == Some(positions)
@@ -3433,12 +3494,31 @@ impl SsmState {
         // reply's (`pipeline::dsd_flow`): the one cut a flow asks for is back
         // to a tree's start — a rebase, or a failed flow's rounds — and the
         // flow kept the state there (`qwen35::FlowRows::state_at`).
+        //
+        // A forward that failed part-way is put back where it began: the flow
+        // as it stood then (this layer kept its rows before a later layer
+        // failed), or as it is (this layer kept nothing).
         if let Some(flow) = &self.flow {
+            if let Some(begun) = self.flow_begun.take_if(|b| b.at == positions) {
+                self.at = positions;
+                match begun.flow {
+                    Some(flow) => self.flow = Some(*flow),
+                    None => {
+                        self.flow = None;
+                        self.branched = false;
+                    }
+                }
+                return Ok(true);
+            }
+            if flow.positions() == positions {
+                return Ok(true);
+            }
             let Some(state) = flow.state_at(positions) else {
                 return Ok(false);
             };
             self.current = state.clone();
             self.flow = None;
+            self.flow_begun = None;
             self.at = positions;
             self.branched = false;
             self.previous = None;
@@ -3488,6 +3568,17 @@ impl SsmState {
         }
         if let Some(flow) = &self.flow {
             out.extend(flow.tensors());
+        }
+        // A step's start holds only what the step replaced: what it shares
+        // with the live flow is counted once.
+        if let Some(begun) = self.flow_begun.as_ref().and_then(|b| b.flow.as_deref()) {
+            let live: std::collections::HashSet<_> = out.iter().map(|t| t.id()).collect();
+            let replaced: Vec<&Tensor> = begun
+                .tensors()
+                .into_iter()
+                .filter(|t| !live.contains(&t.id()))
+                .collect();
+            out.extend(replaced);
         }
         out
     }
@@ -4044,7 +4135,9 @@ impl RowPositions {
     }
 
     /// A tree's forward: each row at its position, reading the keys
-    /// `visibility` says (`DraftTree::rows_for`).
+    /// `visibility` says (`DraftTree::rows_for`). The tests' shorthand for
+    /// [`Self::for_tree_walked`] with no walk; a forward builds its scope there.
+    #[cfg(test)]
     pub(crate) fn for_tree(
         positions: Vec<u32>,
         visibility: crate::inference::draft_tree::RowVisibility,
@@ -4056,20 +4149,19 @@ impl RowPositions {
         }))
     }
 
-    /// A forward of a tree that FLOWS ([`TreeScope::flow_walk`]): as
-    /// [`Self::for_tree`], with the tree row the walk stood on when it was sent.
-    /// Only the layer's tests set it until the worker reads the walk's row off
-    /// a forward (`docs/plans/recurrent_flow.md` stage 3).
-    #[cfg(test)]
-    pub(crate) fn for_flowing_tree(
+    /// A tree's forward: each row at its position, reading the keys
+    /// `visibility` says (`DraftTree::rows_for`), with the row the walk stood
+    /// on where the tree FLOWS ([`TreeScope::flow_walk`],
+    /// `SplitModel::with_draft_tree`'s `walk`).
+    pub(crate) fn for_tree_walked(
         positions: Vec<u32>,
         visibility: crate::inference::draft_tree::RowVisibility,
-        walk: u32,
+        walk: Option<u32>,
     ) -> Self {
         Self::carried(Some(TreeScope {
             positions,
             visibility: Some(std::sync::Arc::new(visibility)),
-            flow_walk: Some(walk),
+            flow_walk: walk,
         }))
     }
 

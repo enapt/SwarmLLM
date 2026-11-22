@@ -679,7 +679,7 @@ fn spec_width_sweep(
             };
             let out = match tree {
                 Some(tree) => model
-                    .with_draft_tree(tree, run)
+                    .with_draft_tree(tree, None, run)
                     .map_err(|e| anyhow::anyhow!("tree forward: {e}"))?,
                 None => run(model),
             }

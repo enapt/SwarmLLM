@@ -106,7 +106,7 @@ fn every_row_of_a_tree_reads_what_its_own_path_reads() {
     let input = model.tensor_from_ids(&tokens).unwrap();
     let t = DraftTree::new(PROMPT.len(), parents.clone()).unwrap();
     let out = model
-        .with_draft_tree(t, |m| {
+        .with_draft_tree(t, None, |m| {
             m.forward_verify_all_positions(&input, PROMPT.len(), &kv, "t")
         })
         .unwrap()
@@ -150,7 +150,7 @@ fn a_kept_path_read_again_continues_as_if_read_alone() {
     let input = model.tensor_from_ids(&tokens).unwrap();
     let t = DraftTree::new(PROMPT.len(), parents).unwrap();
     model
-        .with_draft_tree(t, |m| {
+        .with_draft_tree(t, None, |m| {
             m.forward_verify_all_positions(&input, PROMPT.len(), &kv, "k")
         })
         .unwrap()
@@ -217,7 +217,7 @@ fn a_captured_tree_level_reads_as_the_ordinary_one() {
             let tree = DraftTree::new(base, parents.clone()).unwrap();
             let input = model.tensor_from_ids(&tokens).unwrap();
             let out = model
-                .with_draft_tree(tree, |m| {
+                .with_draft_tree(tree, None, |m| {
                     m.forward_verify_all_positions(&input, base + before, &kv, rid)
                 })
                 .unwrap()
@@ -333,13 +333,13 @@ fn one_offs_in_a_reply_after_the_recording(
             let lead = model.tensor_from_ids(&[5, 9]).unwrap();
             let head = DraftTree::new(at, vec![None, Some(0)]).unwrap();
             model
-                .with_draft_tree(head, |m| reply_forward(m, &kv, &lead, at, true))
+                .with_draft_tree(head, None, |m| reply_forward(m, &kv, &lead, at, true))
                 .unwrap();
             let mut parents = vec![None, Some(0)];
             parents.extend((0..w.positions).map(|i| Some((i % 2) as u16)));
             let tree = DraftTree::new(at, parents).unwrap();
             model
-                .with_draft_tree(tree, |m| reply_forward(m, &kv, &input, at + 2, true))
+                .with_draft_tree(tree, None, |m| reply_forward(m, &kv, &input, at + 2, true))
                 .unwrap();
             kv.truncate_request_to(model.kv_model_key(), "reply", at)
                 .unwrap();
@@ -529,7 +529,7 @@ fn a_wide_tree_on_the_card_reads_what_each_path_reads() {
     let t = DraftTree::new(PROMPT.len(), parents.clone()).unwrap();
     let before = crate::inference::decode_attn::tiled_tree_calls();
     let out = model
-        .with_draft_tree(t, |m| {
+        .with_draft_tree(t, None, |m| {
             m.forward_verify_all_positions(&input, PROMPT.len(), &kv, "w")
         })
         .unwrap()
@@ -569,7 +569,7 @@ fn a_tree_grown_a_step_at_a_time_reads_its_earlier_rows() {
     let first = DraftTree::new(PROMPT.len(), parents[..3].to_vec()).unwrap();
     let input = model.tensor_from_ids(&tokens[..3]).unwrap();
     model
-        .with_draft_tree(first, |m| {
+        .with_draft_tree(first, None, |m| {
             m.forward_verify_all_positions(&input, PROMPT.len(), &kv, "g")
         })
         .unwrap()
@@ -577,7 +577,7 @@ fn a_tree_grown_a_step_at_a_time_reads_its_earlier_rows() {
     let whole = DraftTree::new(PROMPT.len(), parents.clone()).unwrap();
     let input = model.tensor_from_ids(&tokens[3..]).unwrap();
     let out = model
-        .with_draft_tree(whole, |m| {
+        .with_draft_tree(whole, None, |m| {
             m.forward_verify_all_positions(&input, PROMPT.len() + 3, &kv, "g")
         })
         .unwrap()
@@ -617,7 +617,7 @@ fn a_tree_read_in_three_forwards_reads_as_one() {
         let shape = DraftTree::new(PROMPT.len(), parents[..rows.end].to_vec()).unwrap();
         let input = model.tensor_from_ids(&tokens[rows.clone()]).unwrap();
         let out = model
-            .with_draft_tree(shape, |m| {
+            .with_draft_tree(shape, None, |m| {
                 m.forward_verify_all_positions(&input, PROMPT.len() + rows.start, &kv, "f")
             })
             .unwrap()
@@ -631,6 +631,7 @@ fn a_tree_read_in_three_forwards_reads_as_one() {
     let once = model
         .with_draft_tree(
             DraftTree::new(PROMPT.len(), parents.clone()).unwrap(),
+            None,
             |m| m.forward_verify_all_positions(&input, PROMPT.len(), &kv, "o"),
         )
         .unwrap()
@@ -679,7 +680,7 @@ fn a_tree_wider_than_the_prompt_chunk_is_read_whole() {
     let input = model.tensor_from_ids(&tokens).unwrap();
     let t = DraftTree::new(PROMPT.len(), parents.clone()).unwrap();
     let out = model
-        .with_draft_tree(t, |m| {
+        .with_draft_tree(t, None, |m| {
             m.forward_prompt_in_chunks(&input, PROMPT.len(), &kv, "w", None, false, 2)
         })
         .unwrap()
@@ -699,7 +700,7 @@ fn a_model_whose_layers_cannot_read_a_tree_refuses_it_before_running() {
     }
     let t = DraftTree::new(3, vec![None, Some(0)]).unwrap();
     let mut ran = false;
-    assert!(model.with_draft_tree(t, |_| ran = true).is_err());
+    assert!(model.with_draft_tree(t, None, |_| ran = true).is_err());
     assert!(!ran);
 }
 
@@ -715,7 +716,7 @@ fn a_tree_that_does_not_fit_the_cache_is_refused_and_the_cache_kept() {
     let t = DraftTree::new(4, vec![None, Some(0)]).unwrap();
     let input = model.tensor_from_ids(&[5, 9]).unwrap();
     let out = model
-        .with_draft_tree(t, |m| {
+        .with_draft_tree(t, None, |m| {
             m.forward_verify_all_positions(&input, PROMPT.len(), &kv, "r")
         })
         .unwrap();

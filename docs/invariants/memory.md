@@ -2261,7 +2261,11 @@ Three invariants a new caller must preserve: the check runs ONLY when
 `kv_budget::positions_to_allocate` is non-zero — zero for almost every decode
 step, read off the buffer the request already holds, reservation included
 (otherwise it walks the whole store per generated token for an answer that is
-almost always "no"); it charges the
+almost always "no") — or the forward is a tree that FLOWS through recurrent
+layers, which grows the cache on every forward by the rows the flow keeps
+(`KvCacheStore::bytes_a_flowing_forward_may_add`, added to the claim since
+2026-11-22: ~80 KB a row a layer on a 27B-class model, which the positions
+figure never saw — security review, `docs/plans/recurrent_flow.md`); it charges the
 POSITIONS claimed, not one quantum, because a prefill jumps many quanta in a
 single forward and charging one under-counted the largest claim a request
 ever makes by 10x; and `kv_budget_bytes: None` means UNKNOWN, never zero — every CPU node

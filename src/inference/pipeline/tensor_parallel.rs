@@ -121,6 +121,7 @@ impl PipelineExecutor {
                     stream_lookahead: None,
                     block_rows_wanted: None,
                     stream_branch: None,
+                    flow_walk: None,
                 };
                 self.shared_state
                     .model_process_pool
@@ -172,6 +173,7 @@ impl PipelineExecutor {
                         stream_lookahead: None,
                         block_rows_wanted: None,
                         stream_branch: None,
+                        flow_walk: None,
                     };
                     let _ = self
                         .network_tx
@@ -220,6 +222,7 @@ impl PipelineExecutor {
                     stream_lookahead: None,
                     block_rows_wanted: None,
                     stream_branch: None,
+                    flow_walk: None,
                 };
                 let attn_partial = self
                     .shared_state
@@ -320,6 +323,7 @@ impl PipelineExecutor {
                         stream_lookahead: None,
                         block_rows_wanted: None,
                         stream_branch: None,
+                        flow_walk: None,
                     };
                     let _ = self
                         .network_tx
@@ -368,6 +372,7 @@ impl PipelineExecutor {
                     stream_lookahead: None,
                     block_rows_wanted: None,
                     stream_branch: None,
+                    flow_walk: None,
                 };
                 let ffn_partial = self
                     .shared_state
@@ -473,6 +478,7 @@ impl PipelineExecutor {
                 stream_lookahead: None,
                 block_rows_wanted: None,
                 stream_branch: None,
+                flow_walk: None,
             };
             let layer_result = self
                 .shared_state

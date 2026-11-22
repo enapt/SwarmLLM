@@ -98,6 +98,11 @@ pub struct SplitModel {
     /// `SplitModel::with_draft_tree`, `None` otherwise. Read by
     /// `forward_inner_body`, which gives each row its tree position and mask.
     pub(super) draft_tree: Option<crate::inference::draft_tree::DraftTree>,
+    /// The row of that tree the coordinator's walk stood on, where the tree
+    /// FLOWS (`LayerForward::flow_walk`, `docs/plans/recurrent_flow.md`):
+    /// recurrent layers keep their checkpoint there. Set with `draft_tree`,
+    /// by the same call.
+    pub(super) flow_walk: Option<u32>,
     /// Layer range this model covers: [start, end) out of total_layers.
     pub layer_start: usize,
     pub layer_end: usize,

@@ -1,7 +1,8 @@
 # A tree that flows through recurrent layers (Qwen 3.5 / 3.6 / 3.8) — plan, 2026-11-22
 
-Status: stages 1 and 2 BUILT (2026-11-22, the layer on the processor and on a card, with tests; nothing sets a
-flowing scope outside the tests until stage 3). Stages 3-5 are PLAN. Figures are MEASURED (our records), READ (a
+Status: stages 1-3 (a) BUILT (2026-11-22: the layer on the processor and on a card, the worker and the wire, with
+tests; no coordinator sends a walk until stage 4). Stage 3 (b) (the recurrent drafter's own growth) and stages 4-5
+are PLAN. Figures are MEASURED (our records), READ (a
 header or source) or DERIVED.
 
 ## Why
@@ -126,7 +127,7 @@ state a chain read of the reply would reach.
 ## Stage 1 as built (2026-11-22)
 
 `layers::qwen35::FlowRows` (on `SsmState::flow`) and `DeltaNetWeights::forward_flowing`, entered where the forward's
-scope carries the walk's row (`TreeScope::flow_walk`, `RowPositions::for_flowing_tree`, `layers::flow_walk_now`);
+scope carries the walk's row (`TreeScope::flow_walk`, `RowPositions::for_tree_walked`, `layers::flow_walk_now`);
 parents across forwards read off the visibility (`RowVisibility::parents_across_forwards`). What the build settled:
 
 - **The extended forward**: the kept rows on the new rows' lines (`FlowLines::earlier`, ascending — a parent is always
@@ -172,6 +173,51 @@ settled:
   each start a cut puts back within 1e-4 × the largest value of the processor's (`head_width_weights`: 4 value
   heads of 128, the 27B's head width). Red (checked, RTX 3070): the walks switched off, row 41 — the 35-deep line —
   0.11 off of 1.38.
+
+## Stage 3 (a) as built (2026-11-22): the worker and the wire
+
+- **The wire**: `LayerForward::flow_walk` (`Option<u16>`), trailer `0x15 | walk u16 LE` after 0x14, written only
+  beside 0x11 (`draft_tree_from`) and a non-empty shape (`append_flow_walk_trailer`); a reader refuses it cut short
+  or with no tree that flows (`read_flow_walk_trailer`), never reads it as absent. Bound into the encrypted frame's
+  AAD after 0x14. Feature bit `RECURRENT_FLOW` (47, in `ALL`); the onward hop hands the walk on with the tree's start
+  (`flow_walk_onward`) only to a next segment advertising it (`onward_refusal`), else refuses the forward.
+- **The worker** checks the walk against the tree before anything runs (`model_worker::flow_walk_to_apply`): a
+  recurrent segment's flowing tree with no walk, a walk with no tree that flows, a walk past the tree's rows — each a
+  400. A segment with no recurrent layer never reads it. **A flowing tree that happens to be a chain still goes
+  through `with_draft_tree` with its walk**: the worker's chain shortcut ran it as a plain forward, which would have
+  left the recurrent layers' flow unread and refused the next forward.
+- **`SplitModel::with_draft_tree(tree, walk, f)`** — the one way a tree reaches a forward now takes the walk; the
+  executor's row scopes are built by `RowPositions::for_tree_walked`. The drafter's own growth passes `None` (3 (b)).
+- **A failed flowing forward is put back where it began** (`SsmState::flow_begun`): `executor::put_back_where_the_
+  step_began` asks every layer to rewind to the step's start, and a layer could rewind a flow only to a tree's start
+  — so a forward refused part-way (and a card's rerun after a refusal, `worth_running_again`) dropped the
+  conversation. Each layer now keeps the flow as a flowing forward found it until the next one begins; a layer that
+  kept nothing is where it began. Counted once in the cache's occupancy (only tensors the live flow no longer shares).
+- **Test, real file** `a_flowing_tree_through_a_recurrent_model_reads_each_rows_path` (Qwen3.5-0.8B Q8_0,
+  `SWARMLLM_GUESS_TEST_GGUF`): the stage 1 script through the whole model — 24 rows over six forwards, the rebase,
+  a refused forward with no walk (the conversation kept), the walked forward after it — every row BIT FOR BIT the
+  same tree read whole in one forward (worst 0.0 on the processor). Not its path read as a chain: the processor's
+  tiled attention puts a tree row's keys in other vector lanes than a chain read's where masked rows sit between
+  them, and Q8 activations turned the last bit into 1% at layer 11 (gotcha #1160) — a property of every processor
+  tree check, not the flow. Layer test: the put-back and a rerun landing where the first run did; red (checked)
+  without the snapshot.
+- **Security review 2026-11-22** (`security-reviewer`, the wire and the layer): the trailer, its seal and every
+  bound on the walk hold — nothing exploitable. Three Low, each fixed with a test that fails without it: (1) a
+  flowing tree is not held to the 32-row bound of a tree check, and the processor's delta rule kept a state a row
+  on every pool thread for good (512 rows: 32 MB a thread) — now a state only until its last child reads it
+  (`qwen35::RowSlots`, `a_tree_keeps_only_the_states_still_to_be_read`) and a buffer past 32 states given back;
+  (2) the rows a flow keeps were in no head-room claim, which ran only when the attention cache crossed a buffer
+  quantum — every flowing forward now claims what it may newly hold in the recurrent layers
+  (`SsmState::bytes_a_flowing_forward_may_add`: its kept rows gathered again with the new ones and the two moved
+  states; ~80 KB a row a layer on a 27B-class model, checked against what the flow keeps on both devices);
+  (3) `flow_from` rebased before its checks and a refused forward left the layer rebased — now put back as it was.
+- **On a card** (RTX 3070, `SWARMLLM_GUESS_TEST_ON_CARD=1`) a forward's kernels differ with its WIDTH, so the whole
+  read is no bit-for-bit reference there: the first five rows read as a plain tree of five sit 0.38 (of 20-28) from
+  the same rows read in the tree of sixteen, flow or no flow. The test measures that figure and holds every flowing
+  row to twice it and to the whole read's decision (each row's likeliest token the same, or within
+  `CARD_NEAR_TIE_LOGITS`); the flow's first forward to the plain tree of its width at 1e-3 of the scale; and a
+  chain read of a tree row must land past the bound. Measured: all 24 rows within the width's own 0.38, every
+  decision alike; the rebase's forward (seven rows, the width of its whole read) 0.0 on every row.
 
 ## Not in this plan
 

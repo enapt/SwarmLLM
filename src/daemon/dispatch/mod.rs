@@ -4398,6 +4398,7 @@ mod inbound_forward_slot_tests {
             stream_lookahead: None,
             block_rows_wanted: None,
             stream_branch: None,
+            flow_walk: None,
         }
     }
 

@@ -488,6 +488,7 @@ impl PipelineExecutor {
             stream_lookahead: None,
             block_rows_wanted,
             stream_branch: None,
+            flow_walk: None,
         };
         // Watched against the request's cancel flag: a client that leaves
         // during a minutes-long prompt pass on this node's processor ends this
@@ -1989,6 +1990,7 @@ mod segment_budget_tests {
             stream_lookahead: None,
             block_rows_wanted: None,
             stream_branch: None,
+            flow_walk: None,
         }
     }
 

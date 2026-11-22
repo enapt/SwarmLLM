@@ -439,5 +439,6 @@ fn make_bench_forward(activations: Vec<u8>) -> LayerForward {
         stream_lookahead: None,
         block_rows_wanted: None,
         stream_branch: None,
+        flow_walk: None,
     }
 }

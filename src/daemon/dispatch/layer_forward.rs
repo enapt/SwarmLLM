@@ -304,6 +304,11 @@ pub(super) async fn handle_layer_forward(
     // starts, so the start goes on with it — dropped, the next hop would read
     // this forward's rows as a tree of their own and refuse them.
     let draft_tree_from_onward = draft_tree_from_onward(&chain, &forward);
+    // And the walk's row with it (`docs/plans/recurrent_flow.md`): a
+    // recurrent segment past this one keeps its checkpoint there.
+    let flow_walk_onward = forward
+        .flow_walk
+        .filter(|_| draft_tree_from_onward.is_some());
     let sequence_num = forward.sequence_num;
     // A streamed check's number, handed on with it so the next hop runs the
     // stream in its order too (`features::CHAINED_STREAM`, #318).
@@ -348,6 +353,7 @@ pub(super) async fn handle_layer_forward(
             stream_seq.is_some(),
             !draft_parents_onward.is_empty(),
             draft_tree_from_onward.is_some(),
+            flow_walk_onward.is_some(),
         ) {
             if reason == ONWARD_UNREACHABLE {
                 dial_next_hop(
@@ -552,6 +558,7 @@ pub(super) async fn handle_layer_forward(
                 stream_seq.is_some(),
                 !draft_parents_onward.is_empty(),
                 draft_tree_from_onward.is_some(),
+                flow_walk_onward.is_some(),
             )
             .filter(|&r| r != ONWARD_UNREACHABLE)
             {
@@ -658,6 +665,7 @@ pub(super) async fn handle_layer_forward(
                         stream_lookahead: None,
                         block_rows_wanted: None,
                         stream_branch: None,
+                        flow_walk: flow_walk_onward,
                     };
                     tracing::info!(
                         request_id = %request_id,
@@ -1045,9 +1053,11 @@ fn dial_next_hop(
 /// hop without `CHAINED_STREAM` would lose its number, run out of order and
 /// write its rows into the wrong positions; a tree of guesses handed to a hop
 /// without `DRAFT_TREES` would have its rows attend their siblings and come
-/// back walked wrong. The coordinator chains only through hops that can
-/// (`plan_chain`, `dsd_stream::stream_shape`, the tree's own check); one that
-/// changed build since, or that this node has not met, is told so.
+/// back walked wrong; a flowing tree's walk handed to a hop without
+/// `RECURRENT_FLOW` would reach recurrent layers that refuse it. The
+/// coordinator chains only through hops that can (`plan_chain`,
+/// `dsd_stream::stream_shape`, the tree's own check); one that changed build
+/// since, or that this node has not met, is told so.
 fn onward_refusal(
     state: &SharedState,
     next: &crate::types::ChainHop,
@@ -1055,9 +1065,10 @@ fn onward_refusal(
     streamed: bool,
     tree: bool,
     flow: bool,
+    walk: bool,
 ) -> Option<&'static str> {
     use swarmllm_types::node::features::{
-        CHAINED_STREAM, CHAINED_VERIFY, DRAFT_TREES, DRAFT_TREE_FLOW,
+        CHAINED_STREAM, CHAINED_VERIFY, DRAFT_TREES, DRAFT_TREE_FLOW, RECURRENT_FLOW,
     };
     // First: a next hop this node has not met is in no list here, so its
     // features are unknown too — that is "dial it", not "it cannot carry it"
@@ -1080,6 +1091,9 @@ fn onward_refusal(
     }
     if flow && !state.peer_advertises_feature(&next.node_id, DRAFT_TREE_FLOW) {
         return Some("tree that flows: the next segment cannot carry it");
+    }
+    if walk && !state.peer_advertises_feature(&next.node_id, RECURRENT_FLOW) {
+        return Some("tree that flows through recurrent layers: the next segment cannot carry it");
     }
     None
 }
@@ -1687,6 +1701,7 @@ mod chaining_tests {
             stream_lookahead: None,
             block_rows_wanted: None,
             stream_branch: None,
+            flow_walk: None,
         };
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
         super::handle_layer_forward(state, tx, forward).await;
@@ -1824,6 +1839,7 @@ mod chaining_tests {
             stream_lookahead: None,
             block_rows_wanted: None,
             stream_branch: None,
+            flow_walk: None,
         };
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
         tokio::time::timeout(
@@ -2191,6 +2207,7 @@ mod tests {
             stream_lookahead: None,
             block_rows_wanted: None,
             stream_branch: None,
+            flow_walk: None,
         };
         let (tx, mut rx) = mpsc::channel(4);
         refuse_forward(
@@ -2347,6 +2364,7 @@ mod tests {
             stream_lookahead: Some(4),
             block_rows_wanted: None,
             stream_branch: None,
+            flow_walk: None,
         };
         let mut answer = crate::types::LayerResult::error(uuid::Uuid::nil(), String::new());
         answer.finish_reason = None;
@@ -2405,6 +2423,7 @@ mod tests {
                 kept: 1,
                 token: 5,
             }),
+            flow_walk: None,
         };
         assert_eq!(
             stream_turn_kind(&spare, 3),
@@ -2570,6 +2589,7 @@ mod forward_positions_tests {
             stream_lookahead: None,
             block_rows_wanted: None,
             stream_branch: None,
+            flow_walk: None,
         };
         let piece = turn_wait(&f);
         assert_eq!(

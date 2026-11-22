@@ -969,6 +969,7 @@ mod tests {
             stream_lookahead: None,
             block_rows_wanted: None,
             stream_branch: None,
+            flow_walk: None,
         }
     }
 

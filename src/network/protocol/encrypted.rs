@@ -175,6 +175,9 @@ pub fn build_layer_forward_aad(forward: &LayerForward) -> Vec<u8> {
     // The block-rows trailer (0x14): which layers' rows the segment answers
     // with, for the coordinator's block drafter (#428).
     super::layer_forward::append_block_rows_wanted_trailer(&mut aad, forward);
+    // The walk trailer (0x15): the row a recurrent segment keeps its
+    // checkpoint at, in a tree that flows (`docs/plans/recurrent_flow.md`).
+    super::layer_forward::append_flow_walk_trailer(&mut aad, forward);
 
     aad
 }
@@ -294,6 +297,7 @@ pub fn encode_layer_forward_encrypted(
     super::layer_forward::append_stream_branch_trailer(&mut buf, forward);
     super::layer_forward::block_rows_wanted_fit(forward)?;
     super::layer_forward::append_block_rows_wanted_trailer(&mut buf, forward);
+    super::layer_forward::append_flow_walk_trailer(&mut buf, forward);
 
     Ok(buf)
 }
@@ -532,6 +536,8 @@ pub fn decode_layer_forward_encrypted(
     let stream_branch = super::layer_forward::read_stream_branch_trailer(data, &mut cursor)?;
     let block_rows_wanted =
         super::layer_forward::read_block_rows_wanted_trailer(data, &mut cursor)?;
+    let flow_walk =
+        super::layer_forward::read_flow_walk_trailer(data, &mut cursor, draft_tree_from.is_some())?;
     let _ = cursor;
 
     let mut forward = LayerForward {
@@ -566,6 +572,7 @@ pub fn decode_layer_forward_encrypted(
         stream_lookahead,
         stream_branch,
         block_rows_wanted,
+        flow_walk,
     };
 
     // Reconstruct AAD from the parsed forward via the helper. This MUST
@@ -620,6 +627,7 @@ mod tests {
             stream_lookahead: None,
             block_rows_wanted: None,
             stream_branch: None,
+            flow_walk: None,
         }
     }
 
@@ -925,6 +933,33 @@ mod tests {
             "a relay must not move the tree's start"
         );
         other.draft_tree_from = None;
+        assert_ne!(build_layer_forward_aad(&other), aad, "nor drop it");
+    }
+
+    /// The walk's row of a tree that flows (`docs/plans/recurrent_flow.md`)
+    /// decides where every recurrent segment keeps its checkpoint, so it is
+    /// sealed with the tree: moved or dropped on the way, the frame no longer
+    /// opens.
+    #[test]
+    fn a_walks_row_is_sealed_and_survives_the_encrypted_frame() {
+        let mut orig = base_forward();
+        orig.spec_logits_requested = true;
+        orig.spec_walk_at_tail = true;
+        orig.draft_parents = vec![0, 1, 1, 2, 3, 3];
+        orig.draft_tree_from = Some(orig.index_pos - 4);
+        orig.flow_walk = Some(2);
+        let bytes = encode_layer_forward_encrypted(&orig, vec![0u8; 32]).unwrap();
+        let (decoded, _sealed, aad) = decode_layer_forward_encrypted(&bytes).unwrap();
+        assert_eq!(decoded.flow_walk, Some(2));
+        assert_eq!(aad, build_layer_forward_aad(&orig));
+        let mut other = orig.clone();
+        other.flow_walk = Some(1);
+        assert_ne!(
+            build_layer_forward_aad(&other),
+            aad,
+            "a relay must not move the walk"
+        );
+        other.flow_walk = None;
         assert_ne!(build_layer_forward_aad(&other), aad, "nor drop it");
     }
 

@@ -1089,7 +1089,7 @@ impl SplitModel {
             }
             if seeded > 0 && seeded < rows {
                 let input = self.tensor_from_ids(&tokens)?;
-                let out = self.with_draft_tree(tree.clone(), |m| {
+                let out = self.with_draft_tree(tree.clone(), None, |m| {
                     m.forward_verify_all_positions(&input, base, kv, request_id)
                 })??;
                 let read = out
@@ -1126,7 +1126,7 @@ impl SplitModel {
                     break;
                 }
                 let input = self.tensor_from_ids(&tokens[added[0]..])?;
-                let out = self.with_draft_tree(tree.clone(), |m| {
+                let out = self.with_draft_tree(tree.clone(), None, |m| {
                     m.forward_verify_all_positions(&input, base + added[0], kv, request_id)
                 })??;
                 let read = out
@@ -1372,7 +1372,7 @@ impl SplitModel {
         let from = session.read;
         let started = std::time::Instant::now();
         let input = self.tensor_from_ids(&flow.tokens()[from..])?;
-        let out = self.with_draft_tree(flow.tree().clone(), |m| {
+        let out = self.with_draft_tree(flow.tree().clone(), None, |m| {
             m.forward_verify_all_positions(&input, base + from, kv, request_id)
         })??;
         let coupled = noise.is_some();

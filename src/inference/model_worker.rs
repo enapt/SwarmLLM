@@ -2157,6 +2157,37 @@ fn draft_tree_to_apply(
     Ok(Some(tree))
 }
 
+/// The row a tree that FLOWS was walked to when its forward was sent
+/// (`LayerForward::flow_walk`, `docs/plans/recurrent_flow.md`), checked
+/// against the tree [`draft_tree_to_apply`] read: a segment whose layers keep a
+/// recurrent state (`recurrent`, `SplitModel::carries_recurrent_state`) reads
+/// a flowing tree only from the checkpoint it keeps at that row, so such a
+/// tree without one is refused, as is a walk with no tree that flows or one
+/// past the tree's rows — the coordinator's mistake, a 400, before anything
+/// runs. Elsewhere the walk is not read: `None`.
+fn flow_walk_to_apply(
+    walk: Option<u16>,
+    tree: Option<&crate::inference::draft_tree::DraftTree>,
+    tree_from: Option<u32>,
+    recurrent: bool,
+) -> Result<Option<u32>, SwarmError> {
+    match (walk, tree_from, tree) {
+        (Some(_), None, _) | (Some(_), Some(_), None) => Err(SwarmError::Validation(
+            "a walk's row was sent with no tree that flows".into(),
+        )),
+        (Some(row), Some(_), Some(tree)) if usize::from(row) >= tree.len() => {
+            Err(SwarmError::Validation(format!(
+                "a walk on row {row} of a tree of {} rows",
+                tree.len()
+            )))
+        }
+        (None, Some(_), _) if recurrent => Err(SwarmError::Validation(
+            "a tree that flows through recurrent layers was sent with no walk's row".into(),
+        )),
+        _ => Ok(walk.map(u32::from).filter(|_| recurrent)),
+    }
+}
+
 /// A tree that flows is answered with one draw per row (#134 (b),
 /// `sampling::draw_each_row`), and a draw there reads no path's tokens — so a
 /// request whose sampling penalises its own history is refused, a 400: its
@@ -2843,6 +2874,12 @@ async fn handle_forward(
         is_last && !fwd.spec_walk_at_tail,
         model.draft_tree_refusal(),
     )?;
+    let flow_walk = flow_walk_to_apply(
+        fwd.flow_walk,
+        draft_tree.as_ref(),
+        fwd.draft_tree_from,
+        model.carries_recurrent_state(),
+    )?;
     // A tree that flows is answered with one draw per row (#134 (b)), which
     // reads no path's tokens: a request whose sampling penalises its own
     // history cannot be drawn so, and its requester keeps it on rounds.
@@ -3375,10 +3412,12 @@ async fn handle_forward(
     };
     // A chain-shaped tree — a check of no guesses after kept tokens read again
     // — reads what an ordinary forward does, and runs as one (captured, flash);
-    // its walk still starts where its guesses would have.
+    // its walk still starts where its guesses would have. Not a tree that
+    // flows through recurrent layers: those keep their checkpoint at the walk
+    // whatever its shape (`docs/plans/recurrent_flow.md`).
     let compute_result = tokio::task::block_in_place(|| match draft_tree.clone() {
-        Some(tree) if !tree.is_chain() => model
-            .with_draft_tree(tree, compute)
+        Some(tree) if !tree.is_chain() || flow_walk.is_some() => model
+            .with_draft_tree(tree, flow_walk, compute)
             .map_err(|e| e.to_string())
             .and_then(|r| r),
         _ => compute(model),
@@ -6777,7 +6816,7 @@ pub(crate) fn record_check_widths(
                         vec![None; shape.positions],
                     )
                     .map_err(SwarmError::Internal)?;
-                    model.with_draft_tree(tree, |m| step(m, &input, at, true))??;
+                    model.with_draft_tree(tree, None, |m| step(m, &input, at, true))??;
                     kv_store.truncate_request_to(&key, &request, at)?;
                 } else {
                     step(model, &input, at, shape.positions > 1)?;
@@ -13152,7 +13191,9 @@ mod served_context_tests {
 
 #[cfg(test)]
 mod image_span_check_tests {
-    use super::{draft_tree_to_apply, image_spans_to_apply, spec_rows_fit_the_answer};
+    use super::{
+        draft_tree_to_apply, flow_walk_to_apply, image_spans_to_apply, spec_rows_fit_the_answer,
+    };
     use crate::types::PromptSpan;
 
     fn span(start: u32, end: u32) -> PromptSpan {
@@ -13282,6 +13323,62 @@ mod image_span_check_tests {
             assert!(
                 matches!(err, crate::error::SwarmError::Validation(_)),
                 "{wire:?} {from:?} {index_pos} {positions}: {err}"
+            );
+        }
+    }
+
+    /// The walk's row of a tree that flows (`docs/plans/recurrent_flow.md`)
+    /// reaches a recurrent segment's layers checked: a flowing tree there
+    /// without one, a walk with no tree that flows, or a row past the tree's,
+    /// is the coordinator's mistake (a 400) before anything runs. A segment
+    /// with no recurrent layer never reads it.
+    #[test]
+    fn a_walks_row_is_applied_only_to_a_tree_that_flows_through_recurrent_layers() {
+        let tree = draft_tree_to_apply(&[0u16, 1, 1, 2], Some(10), 12, 2, 3, false, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            flow_walk_to_apply(Some(3), Some(&tree), Some(10), true).unwrap(),
+            Some(3)
+        );
+        assert_eq!(
+            flow_walk_to_apply(Some(3), Some(&tree), Some(10), false).unwrap(),
+            None,
+            "attention layers read a flowing tree without it"
+        );
+        assert_eq!(
+            flow_walk_to_apply(None, Some(&tree), Some(10), false).unwrap(),
+            None
+        );
+        assert_eq!(flow_walk_to_apply(None, None, None, true).unwrap(), None);
+        for (walk, tree, from, recurrent, what) in [
+            (
+                None,
+                Some(&tree),
+                Some(10),
+                true,
+                "a recurrent flow with no walk",
+            ),
+            (
+                Some(4),
+                Some(&tree),
+                Some(10),
+                true,
+                "a walk past the tree's rows",
+            ),
+            (
+                Some(0),
+                Some(&tree),
+                None,
+                true,
+                "a walk on a tree that does not flow",
+            ),
+            (Some(0), None, None, false, "a walk with no tree"),
+        ] {
+            let err = flow_walk_to_apply(walk, tree, from, recurrent).unwrap_err();
+            assert!(
+                matches!(err, crate::error::SwarmError::Validation(_)),
+                "{what}: {err}"
             );
         }
     }
@@ -15287,6 +15384,275 @@ mod local_speculation_tests {
             model.attach_block_drafter(std::path::Path::new(&dir));
         }
         Some(model)
+    }
+
+    /// A tree that FLOWS through a whole Qwen 3.5 model
+    /// (`docs/plans/recurrent_flow.md` stage 3): rows over several forwards
+    /// as `dsd_flow` sends them — each forward's parents in earlier ones, the
+    /// walk's row with each (`SplitModel::with_draft_tree`'s `walk`), onto a
+    /// row of its own forward too — then a rebase (the cache cut to the tree's
+    /// start, the walk's path read again as a chain with the rows still
+    /// following it) and a forward of the rebased tree. Every row the walk can
+    /// still reach answers BIT FOR BIT what the same tree read whole in one
+    /// forward answers: the attention layers read the same keys at the same
+    /// cache positions, the recurrent ones rebuild its line from the
+    /// checkpoint at the walk. (A tree read whole is its rows' paths read
+    /// alone only to the processor attention's rounding where a row's
+    /// ancestors are not side by side in the cache, gotcha #1160 — so the
+    /// paths are not the reference.) Without the walk the late forward is
+    /// refused; read as a chain, the rows answer otherwise.
+    ///
+    /// Needs a real file: `SWARMLLM_GUESS_TEST_GGUF=~/swarmllm-ref/qwen35/Qwen3.5-0.8B-Q8_0.gguf
+    /// cargo dev-test --lib flowing_tree_through -- --ignored --nocapture`
+    /// (`SWARMLLM_GUESS_TEST_ON_CARD=1` on a card build, where the kernels
+    /// differ by forward width: the first forward is held to a plain tree of
+    /// its width to 1e-3 of the scale, every row to twice what the width alone
+    /// moves a row and to the whole read's decision, and a chain read of a
+    /// tree row must land past that bound).
+    #[test]
+    #[ignore = "needs a GGUF in SWARMLLM_GUESS_TEST_GGUF"]
+    fn a_flowing_tree_through_a_recurrent_model_reads_each_rows_path() {
+        use crate::inference::draft_tree::DraftTree;
+        use crate::inference::split::KvCacheStore;
+        let Some(mut model) = guess_test_model() else {
+            return;
+        };
+        assert!(model.carries_recurrent_state(), "the file is not recurrent");
+        let on_card = !model.device().is_cpu();
+        let ids = model.encode_ids(GUESS_TEST_CODE);
+        let context: Vec<u32> = ids[..16].to_vec();
+        let p = context.len();
+        let token = |i: usize| ids[(16 + i) % ids.len()];
+        let logits_of = |out: &candle_core::Tensor| -> Vec<Vec<f32>> {
+            out.squeeze(0).unwrap().to_vec2::<f32>().unwrap()
+        };
+        // A tree: its start, the tokens before it past the context, each
+        // row's parent and token.
+        struct Epoch {
+            base: usize,
+            prefix: Vec<u32>,
+            parents: Vec<Option<u16>>,
+            tokens: Vec<u32>,
+        }
+        // Every row of `tree` read in ONE tree forward, after the context and
+        // its prefix read as a prompt — from nothing.
+        let whole = |model: &mut SplitModel, tree: &Epoch| -> Vec<Vec<f32>> {
+            let kv = KvCacheStore::new(std::time::Duration::from_secs(60));
+            let mut opening = context.clone();
+            opening.extend(&tree.prefix);
+            let input = model.tensor_from_ids(&opening).unwrap();
+            model.forward(&input, 0, &kv, "whole").unwrap();
+            let shape = DraftTree::new(tree.base, tree.parents.clone()).unwrap();
+            let input = model.tensor_from_ids(&tree.tokens).unwrap();
+            let out = model
+                .with_draft_tree(shape, None, |m| {
+                    m.forward_verify_all_positions(&input, tree.base, &kv, "whole")
+                })
+                .unwrap()
+                .unwrap();
+            logits_of(&out)
+        };
+        let kv = KvCacheStore::new(std::time::Duration::from_secs(600));
+        let send = |model: &mut SplitModel,
+                    tree: &Epoch,
+                    rows: std::ops::Range<usize>,
+                    walk: Option<u32>|
+         -> Result<Vec<Vec<f32>>, String> {
+            let shape = DraftTree::new(tree.base, tree.parents[..rows.end].to_vec())?;
+            let input = model.tensor_from_ids(&tree.tokens[rows.clone()]).unwrap();
+            let at = tree.base + rows.start;
+            model
+                .with_draft_tree(shape, walk, |m| {
+                    m.forward_verify_all_positions(&input, at, &kv, "flow")
+                })
+                .map_err(|e| e.to_string())?
+                .map(|out| logits_of(&out))
+                .map_err(|e| e.to_string())
+        };
+        // How far one row's logits are from another's, and their largest
+        // value; a NaN is infinitely far, any unequal pair at least the least
+        // normal float.
+        let gap_of = |got: &[f32], want: &[f32]| {
+            let gap = got
+                .iter()
+                .zip(want)
+                .fold(0f32, |m, (a, b)| match (a - b).abs() {
+                    _ if a == b => m,
+                    d if d.is_nan() => f32::INFINITY,
+                    d => m.max(d.max(f32::MIN_POSITIVE)),
+                });
+            (gap, want.iter().fold(0f32, |m, v| m.max(v.abs())))
+        };
+        let likeliest = |row: &[f32]| {
+            (0..row.len())
+                .max_by(|&a, &b| row[a].total_cmp(&row[b]))
+                .unwrap()
+        };
+        // Each live row: where it was read, its gap to the tree read whole,
+        // that read's scale, and whether its likeliest token is the whole
+        // read's or within a near tie of it there.
+        let mut seen: Vec<(String, f32, f32, bool)> = Vec::new();
+        let mut check = |want: &[Vec<f32>],
+                         tree: &Epoch,
+                         rows: std::ops::Range<usize>,
+                         out: &[Vec<f32>],
+                         live: &[usize]| {
+            for &row in live {
+                let (got, want) = (&out[row - rows.start], &want[row]);
+                let (gap, scale) = gap_of(got, want);
+                let what = format!("row {row} of the tree from {}", tree.base);
+                assert!(
+                    on_card || gap == 0.0,
+                    "{what}: {gap} off the tree read whole (up to {scale})"
+                );
+                let (mine, theirs) = (likeliest(got), likeliest(want));
+                let decided = mine == theirs || want[theirs] - want[mine] < CARD_NEAR_TIE_LOGITS;
+                seen.push((what, gap, scale, decided));
+            }
+        };
+
+        let first = Epoch {
+            base: p,
+            prefix: Vec::new(),
+            parents: [
+                None,
+                Some(0),
+                Some(1),
+                Some(0),
+                Some(3),
+                Some(2),
+                Some(4),
+                Some(5),
+                Some(1),
+                Some(7),
+                Some(9),
+                Some(5),
+                Some(6),
+                Some(5),
+                Some(13),
+                Some(13),
+            ]
+            .to_vec(),
+            tokens: (0..16).map(token).collect(),
+        };
+        let want = whole(&mut model, &first);
+        // On a card a forward's kernels differ with its width
+        // (`CARD_NEAR_TIE_LOGITS`'s note): a row read in a forward of five is
+        // not the tree read whole's to the bit, flow or no flow. The card's
+        // own figure for it: the first five rows, whose parents are all
+        // among them, read as a tree of five against the same rows read
+        // whole. (0 on the processor.)
+        let five = whole(
+            &mut model,
+            &Epoch {
+                base: p,
+                prefix: Vec::new(),
+                parents: first.parents[..5].to_vec(),
+                tokens: first.tokens[..5].to_vec(),
+            },
+        );
+        let width_noise = (0..5).fold(0f32, |m, r| m.max(gap_of(&five[r], &want[r]).0));
+        let opening = model.tensor_from_ids(&context).unwrap();
+        model.forward(&opening, 0, &kv, "flow").unwrap();
+        let out = send(&mut model, &first, 0..5, Some(0)).unwrap();
+        // The same width is the same arithmetic but for the delta rule's
+        // kernel (the flow's against the tree's, 1e-4 apart a layer).
+        for r in 0..5 {
+            let (gap, scale) = gap_of(&out[r], &five[r]);
+            assert!(
+                gap <= if on_card { 1e-3 * scale.max(1.0) } else { 0.0 },
+                "row {r}: the flow's forward of five {gap} off the tree of five (up to {scale})"
+            );
+        }
+        check(&want, &first, 0..5, &out, &[0, 1, 2, 3, 4]);
+        let out = send(&mut model, &first, 5..9, Some(0)).unwrap();
+        check(&want, &first, 5..9, &out, &[5, 6, 7, 8]);
+        // The walk went 0 → 1 → 2: rows 3, 4, 6, 8 and 12 no longer follow it.
+        let out = send(&mut model, &first, 9..13, Some(2)).unwrap();
+        check(&want, &first, 9..13, &out, &[9, 10, 11]);
+        // Row 2's draw kept 5, whose draw no row carries: the walk is on the
+        // missed draw's row, 13, sent in the forward that carries it.
+        let out = send(&mut model, &first, 13..16, Some(13)).unwrap();
+        check(&want, &first, 13..16, &out, &[13, 14, 15]);
+
+        // The rebase: the cache cut to the tree's start, the walk's path
+        // 0 1 2 5 read again as a chain, row 13 — the walk's — and its two
+        // followers after it.
+        kv.truncate_request_to(model.kv_model_key(), "flow", p)
+            .unwrap();
+        let path: Vec<u32> = [0, 1, 2, 5].iter().map(|&r| first.tokens[r]).collect();
+        let rebase = Epoch {
+            base: p,
+            prefix: Vec::new(),
+            parents: [None, Some(0), Some(1), Some(2), Some(3), Some(4), Some(4)].to_vec(),
+            tokens: path
+                .iter()
+                .copied()
+                .chain([13, 14, 15].map(|r| first.tokens[r]))
+                .collect(),
+        };
+        let want = whole(&mut model, &rebase);
+        let out = send(&mut model, &rebase, 0..7, Some(4)).unwrap();
+        check(&want, &rebase, 0..7, &out, &[0, 1, 2, 3, 4, 5, 6]);
+        let second = Epoch {
+            base: p + 4,
+            prefix: path.clone(),
+            parents: [None, Some(0), Some(0), Some(1), Some(2), Some(3)].to_vec(),
+            tokens: [
+                first.tokens[13],
+                first.tokens[14],
+                first.tokens[15],
+                token(16),
+                token(17),
+                token(18),
+            ]
+            .to_vec(),
+        };
+        // Without the walk, a forward whose rows' parents are earlier rows is
+        // refused by the recurrent layers — never read from the wrong state.
+        assert!(
+            send(&mut model, &second, 3..6, None).is_err(),
+            "a flowing forward with no walk read on"
+        );
+        let want = whole(&mut model, &second);
+        let out = send(&mut model, &second, 3..6, Some(1)).unwrap();
+        check(&want, &second, 3..6, &out, &[3, 5]);
+        // On a card every row is held to twice the width's own figure (at
+        // least 1e-3 of its scale) and to the whole read's decision.
+        let worst = seen.iter().fold(0f32, |m, s| m.max(s.1));
+        let card_bound = |scale: f32| (2.0 * width_noise).max(1e-3 * scale.max(1.0));
+        for (what, gap, scale, decided) in &seen {
+            eprintln!("{what}: {gap} off (scale {scale}), decided alike: {decided}");
+            assert!(
+                *gap <= card_bound(*scale) && *decided,
+                "{what}: {gap} off the tree read whole (up to {scale}; the card's width moves a row \
+                 {width_noise}), decided alike: {decided}"
+            );
+        }
+        eprintln!(
+            "{} rows, the worst {worst} off the tree read whole (the width alone: {width_noise})",
+            seen.len()
+        );
+        assert_eq!(seen.len(), 24);
+
+        // The control: the first forwards' rows read as a chain see their
+        // siblings, and answer otherwise — the shape is what kept them apart.
+        let chain_kv = KvCacheStore::new(std::time::Duration::from_secs(60));
+        let mut seq = context.clone();
+        seq.extend(&first.tokens[..9]);
+        let input = model.tensor_from_ids(&seq).unwrap();
+        let chain = logits_of(
+            &model
+                .forward_verify_all_positions(&input, 0, &chain_kv, "chain")
+                .unwrap(),
+        );
+        let tree_rows = whole(&mut model, &first);
+        let (gap, scale) = gap_of(&chain[p + 8], &tree_rows[8]);
+        let bound = if on_card { card_bound(scale) } else { 1e-2 };
+        assert!(
+            gap > bound,
+            "row 8 read as a chain is {gap} from the tree's row (the bound {bound}) — the check proves nothing"
+        );
     }
 
     /// A row of a check reads nothing after it: the same opening checked with

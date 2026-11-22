@@ -407,9 +407,15 @@ impl SplitModel {
     /// a forward; the worker wraps a check that carries one, the drafter each
     /// step of the tree it grows. Refused, before `f` runs, by a model whose
     /// layers cannot read one ([`Self::draft_tree_refusal`]).
+    ///
+    /// `walk`: the row the walk stood on, for a tree that FLOWS
+    /// (`LayerForward::flow_walk`) — REQUIRED, so no caller forgets it: a
+    /// recurrent layer reads a flowing tree only from the checkpoint it keeps
+    /// there (`docs/plans/recurrent_flow.md`), and refuses one without it.
     pub fn with_draft_tree<R>(
         &mut self,
         tree: crate::inference::draft_tree::DraftTree,
+        walk: Option<u32>,
         f: impl FnOnce(&mut Self) -> R,
     ) -> Result<R, SwarmError> {
         if let Some(why) = self.draft_tree_refusal() {
@@ -417,9 +423,10 @@ impl SplitModel {
                 "this model cannot check a tree of guesses: {why}"
             )));
         }
-        let before = self.draft_tree.replace(tree);
+        let before = (self.draft_tree.replace(tree), self.flow_walk);
+        self.flow_walk = walk;
         let out = f(self);
-        self.draft_tree = before;
+        (self.draft_tree, self.flow_walk) = before;
         Ok(out)
     }
 
@@ -1584,7 +1591,11 @@ impl SplitModel {
                 let (rows, seen) = tree
                     .rows_for(index_pos, positions)
                     .map_err(|e| SwarmError::Inference(format!("a tree of guesses: {e}")))?;
-                let scope = crate::inference::layers::RowPositions::for_tree(rows, seen);
+                let scope = crate::inference::layers::RowPositions::for_tree_walked(
+                    rows,
+                    seen,
+                    self.flow_walk,
+                );
                 let tables: Vec<(&Tensor, &Tensor)> = self
                     .layers
                     .iter()
@@ -1908,7 +1919,10 @@ impl SplitModel {
         // Only runs on the forwards that actually grow the cache — a
         // conversation claims memory when it crosses a quantum boundary and at
         // no other time — so the store walk below costs nothing on the
-        // per-token path.
+        // per-token path. A tree that FLOWS through recurrent layers grows it
+        // on every forward (the rows the flow keeps,
+        // `SsmState::bytes_a_flowing_forward_may_add`), so each of those
+        // claims too.
         //
         // `ServiceUnavailable`, not `Validation`: the request is well-formed
         // and THIS server cannot serve it right now. That is a 503, which is
@@ -1930,16 +1944,23 @@ impl SplitModel {
             let claiming = *claiming_once.get_or_insert_with(|| {
                 self.kv_positions_a_forward_adds(kv_cache_store, &cache_key, kv_reserve, total_seq)
             });
-            if claiming > 0 {
+            let flowing = if self.flow_walk.is_some() {
+                kv_cache_store.bytes_a_flowing_forward_may_add(&cache_key, seq_len, home)
+            } else {
+                0
+            };
+            if claiming > 0 || flowing > 0 {
                 // What this forward's caches newly allocate here.
-                let claim = self.kv_bytes_a_forward_adds(
-                    kv_cache_store,
-                    &cache_key,
-                    index_pos,
-                    seq_len,
-                    claiming,
-                    home,
-                );
+                let claim = self
+                    .kv_bytes_a_forward_adds(
+                        kv_cache_store,
+                        &cache_key,
+                        index_pos,
+                        seq_len,
+                        claiming,
+                        home,
+                    )
+                    .saturating_add(flowing);
                 // A forward that allocates nothing here needs no room — a
                 // windowed cache reaching the end of its buffer slides in
                 // place — so it is never refused, nor its conversation cleared,
@@ -1979,6 +2000,7 @@ impl SplitModel {
                         request_id,
                         total_seq,
                         claiming_positions = claiming,
+                        flowing_rows_mb = flowing / (1024 * 1024),
                         in_use_mb = in_use / (1024 * 1024),
                         live_caches_mb = refused.live_bytes / (1024 * 1024),
                         snapshots_mb = refused.external_bytes / (1024 * 1024),
@@ -2152,7 +2174,7 @@ impl SplitModel {
         };
         // Set here, on the thread that runs the layers, like the guard above.
         let _row_positions = tree_rows.filter(|_| !tree_staged).map(|(positions, seen)| {
-            crate::inference::layers::RowPositions::for_tree(positions, seen)
+            crate::inference::layers::RowPositions::for_tree_walked(positions, seen, self.flow_walk)
         });
 
         let max_seq_len = self.max_seq_len;

@@ -617,6 +617,11 @@ pub struct IpcForward {
     /// segment answers one draw per row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draft_tree_from: Option<u32>,
+    /// The row of that tree the coordinator's walk stood on
+    /// (`LayerForward::flow_walk`): where a recurrent layer keeps its
+    /// checkpoint (`docs/plans/recurrent_flow.md`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_walk: Option<u16>,
     /// This forward belongs to a request THIS machine's owner sent — the
     /// segment of it this node runs inside a pipeline it coordinates — so its
     /// prompt pass may read on the owner's width (`process_pool::Requester`).
@@ -1825,6 +1830,7 @@ mod tests {
             image_spans: Vec::new(),
             draft_parents: Vec::new(),
             draft_tree_from: None,
+            flow_walk: None,
         };
         let json = serde_json::to_string(&fwd).unwrap();
         // When no vision payload, the field is elided to match pre-fix wire
@@ -1872,6 +1878,7 @@ mod tests {
             image_spans: Vec::new(),
             draft_parents: Vec::new(),
             draft_tree_from: None,
+            flow_walk: None,
         };
         let owners = serde_json::to_string(&fwd(true)).unwrap();
         let back: IpcForward = serde_json::from_str(&owners).unwrap();
@@ -1921,6 +1928,7 @@ mod tests {
             image_spans: Vec::new(),
             draft_parents: Vec::new(),
             draft_tree_from: None,
+            flow_walk: None,
         };
         let json = serde_json::to_string(&fwd).unwrap();
         assert!(json.contains("\"vision_embeddings_len\":12345"));

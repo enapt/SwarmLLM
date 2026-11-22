@@ -4079,6 +4079,14 @@ and `finish_row`.
   element's operations — `the_vector_kernels_are_the_portable_arithmetic_exactly` compares
   them bit for bit.
 
+**What it does NOT cover: a tree row against its path read as a chain** (2026-11-22, gotcha
+#1160). The invariance is for a key SET at the same cache positions. A tree row whose ancestors
+have masked rows between them in the cache reads a range with gaps, so `exp` and `lane_sum` put
+its keys in other lanes than the chain read's contiguous keys — a last-bit difference that a Q8
+activation can turn into ~1% at the logits (Qwen3.5-0.8B, layer 11 of 24). The same tree read
+whole in one forward, or across forwards that FLOW (`docs/plans/recurrent_flow.md`), is the
+same bits; compare a tree row with that, never with its path.
+
 `a_row_s_attention_does_not_depend_on_the_forward_it_is_in` compares bits for a row read in a
 whole prompt, a later piece, a shorter prompt and alone, with GQA, MHA, soft-cap and two windowed
 geometries cut as production cuts them. It fails on the old prompt kernel (position 1 alone), and
@@ -6162,9 +6170,12 @@ width keeps +36% (the 11-18 processor measure). Now the layer reads the whole tr
 - **The convolution** reads up each row's own line, then the window before the step
   (`DeltaNetWeights::causal_conv_along`: one `index_select` a tap over `[window | rows]`, summed
   in the chain's tap order, so an in-place row's taps are the chain's bits).
-- **The delta rule** starts each row from its parent's state: on the processor a state a row in a
-  buffer each pool thread keeps (`TREE_ROW_STATES`, 32 × 64 KB a head at 128 × 128), the same
-  per-row arithmetic as a chain's; the composition (`SWARMLLM_DELTA_RULE=steps`) the same. On a
+- **The delta rule** starts each row from its parent's state: on the processor in a buffer each
+  pool thread keeps (`TREE_ROW_STATES`), a state only until the row's last child has read it
+  (`qwen35::RowSlots`: the last child reads on in its parent's slot; a chain keeps one, a flow's
+  lines a few — before 2026-11-22 a state a row, and a flowing tree, which the 32-row bound does
+  not reach, held 512 × 64 KB on every pool thread for good; security review), a buffer grown past
+  32 states given back after the call; the same per-row arithmetic as a chain's; the composition (`SWARMLLM_DELTA_RULE=steps`) the same. On a
   card ONE launch (`delta_rule_tree_f32_d*`): a warp keeps its state row in registers, so a row
   whose parent is not the row just read starts again from the state read and walks down its own
   line, root first — the same updates in the same order as the line read alone. A row following

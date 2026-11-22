@@ -198,6 +198,7 @@ impl SplitModel {
             masks: None,
             image_spans: Vec::new(),
             draft_tree: None,
+            flow_walk: None,
             layer_start: start,
             layer_end: end,
             total_layers: self.total_layers,

@@ -13448,6 +13448,7 @@ impl ModelProcessPool {
             stream_lookahead: _,
             block_rows_wanted,
             stream_branch: _,
+            flow_walk,
         } = forward;
         let pass_parties = PassParties::of(sender_peer_bytes.as_deref(), requester_node_id);
 
@@ -13495,6 +13496,7 @@ impl ModelProcessPool {
             image_spans,
             draft_parents,
             draft_tree_from,
+            flow_walk,
             for_the_owner: requester == Requester::Owner,
             far_run: self.far_runs.get(&request_id).map(|r| *r.value()),
             block_rows_wanted,
@@ -14049,6 +14051,7 @@ impl ModelProcessPool {
                 // Nor a tree of guesses.
                 draft_parents: _,
                 draft_tree_from: _,
+                flow_walk: _,
                 stream_lookahead: _,
                 // Nor one asking for a block drafter's rows.
                 block_rows_wanted: _,
@@ -14092,6 +14095,7 @@ impl ModelProcessPool {
                 image_spans: Vec::new(),
                 draft_parents: Vec::new(),
                 draft_tree_from: None,
+                flow_walk: None,
             });
         }
 
@@ -15701,6 +15705,7 @@ mod tests {
             stream_lookahead: None,
             block_rows_wanted: None,
             stream_branch: None,
+            flow_walk: None,
         }
     }
 
@@ -19293,6 +19298,7 @@ mod tests {
             stream_lookahead: None,
             block_rows_wanted: None,
             stream_branch: None,
+            flow_walk: None,
         };
         assert!(starts_a_pass(&f), "a whole pass from 0");
         f.prompt_span = Some(swarmllm_types::PromptSpan { start: 0, end: 40 });
