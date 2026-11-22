@@ -16,7 +16,8 @@ from our own measurements first and prior art second. It sits beside `small_slic
 that delay are under half of a prose token's time and none of a code token's, and the law's mechanism is wrong in
 part: on one card a shorter loop bought 1.54× (100 → 0 ms, 21.6 → 33.2 tok/s) at the SAME miss count, through more
 of each forward's rows landing on the reply. The head stays busy 98-100% at every loop, so past a short loop the
-pacer is the lever — unmeasured.
+pacer is the lever — unmeasured, and **not measurable on today's computers (§ 10)**: it needs a card that holds no
+slice.
 
 ## Summary
 
@@ -363,6 +364,36 @@ an arm (the first carries the load and is left out). Flow figures are the node's
   lever; step 5 (its A/B) is the first build, after the release.
 - The chain stream beat the flow on this rig at 100, 40 and 20 ms (as on 11-15: two processes on one card favour
   the stream); at 0 ms its two arms disagreed (18-19 against 36-40 tok/s) and are not read.
+
+## 10. Kill ladder step 5 — the pacer cannot be A/B'd on today's computers (2026-11-22, not built)
+
+Step 5 asked for a free-running pacer behind an env switch, A/B in one binary on the Thailand ↔ Australia 14B pair.
+A pacer is worth something only on a device that is not busy with a slice, and today's pair has none:
+
+1. **This card, beside the head's layers** — the cheapest form: start the next drafter call while this forward's
+   layers run (the daemon awaits them in series, `FlowRun::run_with`: `grow().await`, then `send().await`). Already
+   MEASURED as a loss on 2026-10-22: the drafter and the head's layers are two processes, and two processes
+   time-slice one card — drafting 31 → 46-49 s and the near half 10-11 → 19-21 s a 400-token reply (gotcha #759);
+   `arch-scheduling.md` forbids it. Prior art agrees: AMUSD (arXiv 2410.17375), SwiftSpec (2506.11309), PipeSpec
+   (2505.01572) and Speculative Speculative Decoding (2603.03251, ~30% over tuned speculation on average) all put the
+   drafter on hardware of its own.
+2. **This computer's processor**: the 0.5B drafts a call of three levels of eight in ~123 ms there (§ 9's left-out
+   arm) against ~39 ms a forward on the card. That pacer would be three times slower than the head it frees.
+3. **The far card**: a peer's computer runs only published releases. A pacer there needs an additive wire message
+   for level ids and a feature bit, shipped first, and it would again share a card with a slice (#759) unless it ran
+   inside the slice's own process.
+4. **A third card a few ms from the tail**: none in today's swarm.
+
+The single-card levers on the head's ~39 ms forward are spent too. The drafter's tree levels are already captured as
+graphs (−26%, `docs/invariants/inference.md` § "A tree level on a card"). Fewer layers on the head (`flow23`/`flow20`,
+2026-11-16) gained nothing (FUTURE_WORK #411: at a ~130 ms link the flow runs at its tokens a round trip, not its
+slowest stage's forward).
+
+**What it means.** The plan's own step-5 prediction for today's pair was prose flat and code ~51 tok/s, against the
+46-48 measured since (§ 7). That is under +10%, on the reply kind already over the 20-30 bar. The pacer's case is a
+ring with a spare card beside the tail (step 7's shape), not this pair. On this pair, prose moves only through fewer
+misses or more of each forward's rows kept (§ 9). Step 2's real ranks against the 14B are what step 3 needs to price
+those (§ 8: its ranks were drawn from fixed shares). **Next: step 2, then step 3 recalibrated on its ranks.**
 
 ## Appendix — every concept raised
 

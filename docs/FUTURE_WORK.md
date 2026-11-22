@@ -4462,7 +4462,7 @@ kill ladder).
 
 `P1` · speed · **CONCEPT 2026-11-21 (its counters released in v0.3.305); kill ladder steps 1 and 4 MEASURED — the verdict delay is the law's; a shorter
 loop pays (1.54× on one card, 100 → 0 ms) but through rows kept, not fewer misses; step 3 (the schedule model) does not
-calibrate yet** · plan: `docs/plans/standing_ring.md`
+calibrate yet; step 5 (the pacer) cannot run on today's computers (2026-11-22)** · plan: `docs/plans/standing_ring.md`
 
 The owner's ask (2026-11-21): past prior art, our own design, faster than local, for thousands of cards. Six agents
 in turn produced it: the fewest cards that hold a model, chosen close together, a drafter that never stops guessing
@@ -4479,8 +4479,12 @@ head's pace binds, and the pacer (the drafter off the head) is the lever. A deri
 queue (commit `5c62eac9a`): withdrawn by the measurement. **Step 3 (§ 8)**: the schedule model, re-grown as `grow_flow`
 grows the tree, reproduces the 14B pair (prose/code within 1% as fitted, the verdict delay 176 ms unfitted) but not
 step 4's rise in tokens a forward below 40 ms (−17% at 0 ms), so its pacer figures (indicative: ~1.05× prose,
-~1.5× code at a 20 ms loop) do not rule yet. **Next**: the pacer A/B (step 5, the first build — after the release), and step 2
-(drafter ranks against the 14B, offline).
+~1.5× code at a 20 ms loop) do not rule yet. **Step 5 (§ 10, 2026-11-22): not built — the pacer cannot be A/B'd on
+today's computers.** It needs a card that holds no slice. Beside the head's layers on this card it was already a
+measured loss (two processes time-slice one card, gotcha #759). On this computer's processor the 0.5B drafts ~3×
+slower than the head's forward. The far card runs only releases and holds a slice. No third card sits near the tail.
+Its predicted gain on this pair was code only, under +10%. **Next**: step 2 (drafter ranks against the 14B, offline),
+then step 3 recalibrated on those ranks to price what moves prose here: fewer misses, more rows kept a forward.
 
 Prior art: none taken as the design, by the owner's direction; the debate checked each idea against our own
 measured kills instead (lanes, twins, a drafter guild, verdict taps, scout-and-stitch: the plan's appendix), and
