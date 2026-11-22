@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #493**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #495**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -2213,6 +2213,28 @@ same build check `shard_holders` applies (`expected_build_tag`), withdrawn when 
 disconnects — or have the newcomer's catch-up carry the holdings point to point, as manifests
 are. Either way a capability is a peer's claim, so it may add a holder for planning and never
 remove one. Measure the newcomer's first-plan delay before and after.
+
+#### #493 — A graphics card advertises ~0.55 of its memory roofline; this card decodes at ~0.76-0.80 now
+
+`P3` · routing · **OPEN** — 2026-11-22 · history: #225 (§ Closed: the constant was 0.35, raised to 0.55 on 2026-10-06)
+
+Every node gossips `NodeCapability.est_tokens_per_sec_7b` from `vram::estimate_tokens_per_sec_7b`: bandwidth (the
+card-name table, 448 GB/s for this RTX 3070 Laptop) ÷ `MODEL_SIZE_7B_Q4_GB` (4.4) × an efficiency, **0.55 for a card,
+0.75 for a processor** (`vram.rs`, `let efficiency = if is_gpu { 0.55 } else { 0.75 }`). The planner prices a peer it
+has never measured from that figure (`scheduler/mod.rs`, `1000 / tokens_per_sec_7b / parallax::BASELINE_LAYER_COUNT`). 0.55 was set
+from 59.53 tok/s (0.585 of the roofline) on 2026-10-06; the README's v0.3.305 release check reads Qwen2.5-Coder-7B
+Q4_K_M on this card at **77 tok/s**, i.e. **0.76** against the 4.4 GB reference (0.80 against the file's ~4.7 GB). So an
+unmeasured card is priced ~1.4x slower than it is, and — the processor constant not having moved — ~1.4x slow
+AGAINST an unmeasured processor: a cold plan can lean to a processor peer it should not.
+Prior art: llamaperf.com's speed calculator is this same formula (bandwidth ÷ active bytes per token × efficiency);
+its default efficiency is 0.55 (from llmfit), and calibrated against llama.cpp's own scoreboards it reads **0.74-0.79**;
+its stated miss is ~21% on dense models, ~46% on mixtures of experts (median measured/estimate 1.13 there),
+https://llamaperf.com/blog/how-accurate-is-the-llm-speed-calculator (read 2026-11-22). That agrees with our
+measurement; it is not calibration data of ours (self-reported results, licence unstated — never bundle it).
+Next: re-measure with the harness in `estimate_tokens_per_sec_7b`'s doc comment (`prefill_bench`, a `--features cuda`
+release build, live node stopped), keep the constant just under the measurement as before (~0.7), and check the
+processor's 0.75 the same way in the same sitting. A mixture of experts is priced by its ACTIVE bytes
+(`layer_work_from_bytes`) — check that path's error against a measured MoE before trusting it at 1.13.
 
 ### Network and transport
 
@@ -8225,6 +8247,26 @@ Each has a reason it is not being built now. Pick one up only when its trigger a
   (`huggingface::is_embedding_repo`'s rule), and have the header refusal name a GGUF carrying
   `.decision.type`; neither has been seen in the field. Trigger: a second request, or the
   llama.cpp contract stable for a release cycle.
+
+- **#494 — What the same cards do in ONE box: reference ceilings for the models between** (llamaperf.com,
+  read 2026-11-22 by a research agent; self-reported results, mostly one report each, extracted by a language model,
+  licence unstated — use as references, never bundle the data). Single-box llama.cpp results on our class of card:
+  - **Qwen3.8-27B, 2× RTX 3060 in one computer: 56 tok/s** decode, 497 prompt (UD-Q4_K_XL, q4_0 KV, flash attention,
+    tensor split, the file's guess head) — https://llamaperf.com/report/82329a50-18b9-4195-a522-9537d43127d5. Our
+    27B splits across continents run 3-7 tok/s: the gap to the 20-30 bar is the split, not the cards
+    (`docs/plans/small_slices.md`, `recurrent_flow.md`, #428).
+  - **Qwen3.6-35B-A3B on ONE RTX 3060 12 GB: 79 tok/s** median over 433 replies (Q4_K_M; experts in system memory,
+    `--cpu-moe` with a 7,500 MiB expert cache, mlock, the guess head at ~85% kept). Its own ladder: 50-58 with
+    `--n-cpu-moe 25`, 71-73 with `--cpu-moe` + the expert cache, 75-81 with mlock, 77-84 after a llama.cpp update —
+    https://llamaperf.com/report/94edf301-6912-4c01-be30-db723571efd2. Bears on #138 / #366 (experts in RAM, the
+    expert cache: `memory/moe_expert_cache_survey.md`) and #425 (the guess head).
+  - **Guessing ahead**: 35 same-card/model/quant pairs, median 1.62x over plain (0.52-7.44); method and drafter not
+    recorded. **Quant**: llama.cpp's quantize README via the site — IQ3_S 69.3 tok/s against Q4_K_S 76.7 on Llama 3.1
+    8B (a K-quant reads faster than a smaller IQ quant).
+  - Nothing on splits across machines (no RPC/exo results; checked its about page, guides and multi-GPU page).
+  Trigger / next: measure Qwen3.6-35B-A3B on THIS card with its experts in system memory and its guess head
+  (`SWARMLLM_EXPERTS_IN_RAM`, #138's path) as the one-computer REFERENCE a split of it is judged against — a reference,
+  never the design (the user, 11-20: a whole copy is a reference); and compare #425's kept rate with the ~85% above.
 
 ## Decided — not doing
 
