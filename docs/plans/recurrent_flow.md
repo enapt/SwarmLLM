@@ -297,6 +297,35 @@ followers in the same tree read whole; red (checked) without the walk: the secon
   and the planner's room, the download pass and the record that a split wanted a drafter now ask
   `engine_drafter::DrafterUse::for_target` — a recurrent target's drafter grows its flow, so a node fetches the
   0.8B and a plan leaves it room (beside a held block drafter, room for whichever needs more).
+- **Re-run on main after the fix** (`real_link_rf9b2_1122/`, same rig and prompts, the flow ON by default, off arms
+  `SWARMLLM_RECURRENT_FLOW=0`, order on, off, off, on, on, off): on — prose **12.42, 12.46, 12.30**, code **21.15,
+  19.81, 19.60**; off — prose 6.43, 6.88, 6.53, code 6.29, 6.58, 6.87 (prose ~1.9×, code ~3.0×). Every arm wrote
+  its 160 tokens. Australia had 9.1 GB free this time and refused nothing, so the take-over was NOT exercised on the
+  link — its test is the evidence (red without the fix).
+- **Where a forward's time goes** (arm 7, `SWARMLLM_COUNT_KERNELS=1`): the drafter's call was 46 ms (3 levels), its
+  level **870 launches and 59 host-to-card copies**; a flowing forward of the 9B's first 17 layers here, 612
+  launches and 48 copies. **The bookkeeping of kept rows, not the arithmetic, was most of both**: `copy2d_f32` 369
+  and the gathers 98 of a drafter level (54%), 297 and 93 of the target's (64%) — every recurrent layer gathered its
+  earlier rows, joined them to the new ones, and joined the new ones to the held ones apart — and 55 of the 59 copies
+  were three tables every recurrent layer uploaded again (parents, walks, gather rows; each pageable copy waits for
+  the stream to drain). Now one join and one gather a kind (`FlowRows::keep_joined`, `rows_the_lines_read`), the
+  tables uploaded once while their content stands (`qwen35::rows_on`), and the walk's replay in two launches
+  (`FlowRows::advance_to` hands `cuda::replay` buffers of its own). A/B `SWARMLLM_FLOW_ROWS=per-layer`
+  (+ `SWARMLLM_SSM_REPLAY=composed`).
+  **Measured** (`real_link_rf9b3_1122/`, same rig, ABBA, old arms `SWARMLLM_FLOW_ROWS=per-layer
+  SWARMLLM_SSM_REPLAY=composed`): the drafter's call **43.2-45.3 → 38.8-42.2 ms** a flowing forward, the head's 17
+  layers unchanged (22.0-25.1 → 22.1-23.8); prose 12.19, 12.84 against 10.94, 11.27, 12.03, code 22.50, 20.80, 19.24
+  against 24.99, 20.03, 19.62 — within the runs' spread. The count arm: a drafter level **870 → 705 launches**, host
+  copies 59 → 7; the head 612 → 466. Of a level's 705, `copy2d_f32` 202 and gathers 100 remain — the join of the held
+  rows to the new ones (two copies a kind) and the lines' gather (one a kind), every recurrent layer. Next: an
+  append-only store a kind (one copy of the new rows, never the held ones) and the two kernels reading rows through
+  a table (no gather).
+- **A flowing forward refused for memory keeps its conversation** (the same sitting's first arm: Australia's card had
+  no room, `budget 0 MB`, the flow failed over to the rounds — and the rounds' first check was answered "no longer
+  holds the conversation", because the refusal had cleared the request as a request-ending refusal does). The tree
+  rounds finish the reply from the tree's start, which allocates nothing there; `executor`'s claim now clears only a
+  refusal that ends the reply. Test `a_flowing_forward_refused_for_memory_keeps_the_conversation` (red without it:
+  "a DeltaNet layer's state describes None positions").
 
 ## Not in this plan
 

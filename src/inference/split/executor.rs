@@ -2025,7 +2025,22 @@ impl SplitModel {
                     // Freeing here is safe because the request is over: we are
                     // returning an error, no later forward will reuse this
                     // cache, and a retry rebuilds it from the prompt.
-                    kv_cache_store.clear_request(&self.kv_model_key, request_id);
+                    //
+                    // Except a FLOWING forward's: that refusal ends the tree, not
+                    // the reply. The coordinator finishes it in tree rounds from
+                    // the tree's start (`dsd_flow::rounds_may_finish`,
+                    // `rounds_take_over`), which allocate nothing here — so the
+                    // conversation stays as the flow found it (nothing of this
+                    // forward was claimed). Cleared, the take-over's first check
+                    // was answered "no longer holds the conversation" and a 9B
+                    // reply TH↔AU failed outright (2026-11-22). A reply that ends
+                    // anyway is released at its end (`router::release_request_on_peers`).
+                    // Prior art: llama.cpp's server sizes a draft to the room its
+                    // slot has left (`get_n_draft_max`) and with none decodes on
+                    // unspeculated, the slot kept.
+                    if self.flow_walk.is_none() {
+                        kv_cache_store.clear_request(&self.kv_model_key, request_id);
+                    }
                     // This node's own budget refused it, which is a different
                     // fact from "this server cannot serve" — see
                     // `SwarmError::LocalMemoryUnavailable`. The router re-plans

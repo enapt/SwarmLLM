@@ -1054,3 +1054,70 @@ fn a_guess_through_a_far_run_is_the_two_ends_read_step_by_step() {
     }
     assert_eq!(got, want);
 }
+
+/// A flowing forward this segment's memory refuses ends the TREE, never the
+/// reply: the coordinator finishes it in tree rounds from the tree's start
+/// (`dsd_flow::rounds_may_finish`, `rounds_take_over`), so the refusal keeps
+/// the conversation where the flow found it, and the cut back to the tree's
+/// start reads on exactly as a conversation that never flowed. Red when the
+/// refusal clears the request as a request-ending refusal does: the cut finds
+/// no conversation (2026-11-22, a 9B reply TH↔AU failed outright that way).
+///
+/// Needs a real file: `SWARMLLM_GUESS_TEST_GGUF=~/swarmllm-ref/qwen35/Qwen3.5-0.8B-Q8_0.gguf
+/// cargo dev-test --lib refused_for_memory -- --ignored --nocapture`.
+#[test]
+#[ignore = "needs a GGUF in SWARMLLM_GUESS_TEST_GGUF"]
+fn a_flowing_forward_refused_for_memory_keeps_the_conversation() {
+    use crate::inference::draft_tree::DraftTree;
+    let Ok(path) = std::env::var("SWARMLLM_GUESS_TEST_GGUF") else {
+        eprintln!("SWARMLLM_GUESS_TEST_GGUF not set — skipped");
+        return;
+    };
+    let mut model =
+        SplitModel::load_from_gguf(std::path::Path::new(&path), 0, 999, true, true, true)
+            .expect("load the file");
+    assert!(model.carries_recurrent_state(), "the file is not recurrent");
+    let ids = model.encode_ids(
+        "fn fibonacci(n: u64) -> u64 {\n    match n {\n        0 => 0,\n        1 => 1,\n",
+    );
+    let (context, rows) = ids.split_at(ids.len() - 6);
+    let p = context.len();
+    let parents: Vec<Option<u16>> = vec![None, Some(0), Some(1), Some(0), Some(2), Some(4)];
+    let read = |model: &mut SplitModel, kv: &KvCacheStore, tokens: &[u32], at: usize| {
+        let input = model.tensor_from_ids(tokens).unwrap();
+        model.forward_verify_all_positions(&input, at, kv, "f")
+    };
+    let flowing = |model: &mut SplitModel, kv: &KvCacheStore, sent: std::ops::Range<usize>| {
+        let shape = DraftTree::new(p, parents[..sent.end].to_vec()).unwrap();
+        let input = model.tensor_from_ids(&rows[sent.clone()]).unwrap();
+        model
+            .with_draft_tree(shape, Some(0), |m| {
+                m.forward_verify_all_positions(&input, p + sent.start, kv, "f")
+            })
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())
+    };
+    let kv = KvCacheStore::new(std::time::Duration::from_secs(600));
+    read(&mut model, &kv, context, 0).unwrap();
+    flowing(&mut model, &kv, 0..2).expect("a flowing forward with room");
+    flowing(&mut model, &kv, 2..4).expect("a second flowing forward with room");
+    // No room for anything more: the next flowing forward claims its rows.
+    model.kv_budget_bytes = Some(0);
+    let refused = flowing(&mut model, &kv, 4..6).expect_err("a flowing forward past the budget");
+    assert!(refused.contains("Not enough free memory"), "{refused}");
+    model.kv_budget_bytes = None;
+    // The take-over: every cache cut to the tree's start, the reply's tokens
+    // past it read again as a chain.
+    kv.truncate_request_to(model.kv_model_key(), "f", p)
+        .expect("the refusal kept the conversation");
+    let path = [rows[0], rows[1], rows[2]];
+    let got = read(&mut model, &kv, &path, p).expect("the take-over reads on");
+    let fresh = KvCacheStore::new(std::time::Duration::from_secs(60));
+    read(&mut model, &fresh, context, 0).unwrap();
+    let want = read(&mut model, &fresh, &path, p).unwrap();
+    assert_eq!(
+        got.to_vec3::<f32>().unwrap(),
+        want.to_vec3::<f32>().unwrap(),
+        "the conversation read on from the tree's start is not the one that never flowed"
+    );
+}

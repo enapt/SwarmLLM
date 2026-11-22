@@ -6187,6 +6187,20 @@ width keeps +36% (the 11-18 processor measure). Now the layer reads the whole tr
   `TreeLines::for_flow`) — a line 35 deep read by the tree kernel was 0.11 off (of 1.38) on the
   RTX 3070, by the flow kernel within 1e-4 (`a_flowing_tree_on_the_card_is_the_processors`,
   2026-11-22).
+- **A flowing forward's bookkeeping is one join and one gather a kind, its row tables uploaded once
+  while their content stands** (2026-11-22, `docs/plans/recurrent_flow.md` § Stage 5). A kernel count
+  (`SWARMLLM_COUNT_KERNELS=1`) of the 0.8B drafter's level on the RTX 3070 under WSL2 put 369 of 870
+  launches in copies and 98 in gathers — every recurrent layer gathered its earlier rows, joined them
+  to the new ones and the new ones to the held ones apart — and 55 of 59 host-to-card copies in three
+  tables (parents, walks, gather rows) uploaded again a layer; a pageable copy waits for the stream to
+  drain. Now `FlowRows::keep_joined` joins each kind once, `rows_the_lines_read` gathers the lines'
+  rows from that, `qwen35::rows_on` keeps a table on the card while its content stands (the
+  content-keyed cache `CudaDevice::layout_params` set the pattern; llama.cpp fills
+  `llm_graph_input_*::set_input` once a graph), and the walk's replay runs in two launches with
+  buffers of its own (`FlowRows::advance_to`). A level 870 → 705 launches, copies 59 → 7; the
+  drafter's call 43-45 → 39-42 ms a forward on the TH↔AU link. Copies and gathers only: bit for bit on
+  the processor (both arms of `a_flowing_tree_through_a_recurrent_model_reads_each_rows_path`) and
+  the three card tests pass in both arms. A/B `SWARMLLM_FLOW_ROWS=per-layer`.
 - **On a card the convolution is ONE launch too** (`ssm_conv_silu_tree_f32_k4`): a thread a
   channel builds each row's window up its line, then the read window, rounding as the chain's
   kernel does — bit for bit `causal_conv_along`. The parents reach the card once a step for both

@@ -629,13 +629,46 @@ impl DeltaNetWeights {
         let lines = flow.lines(before, &parents);
         let device = x.device();
         let ahead = lines.earlier.len();
-        let earlier = flow.inputs_of(&lines.earlier, device)?;
-        let joined = |kept: Option<&Tensor>, new: &Tensor| -> CandleResult<Tensor> {
-            match kept {
-                Some(kept) => Tensor::cat(&[kept, new], 1),
-                None => Ok(new.clone()),
+        // The rows the lines read — the earlier rows on them, then the new
+        // ones. Each kind is joined ONCE to the held rows (what this forward
+        // keeps, `FlowRows::keep_joined`) and the lines' rows gathered from
+        // that: one join and one gather a kind, where gathering the earlier
+        // rows, joining them to the new ones and joining the new ones to the
+        // held ones made one gather and four copies — the copies were 369 of
+        // a drafter level's 870 launches on a card (2026-11-22, Qwen3.5-0.8B,
+        // `SWARMLLM_COUNT_KERNELS`). Copies and gathers only, so the same
+        // bits either way. A/B `SWARMLLM_FLOW_ROWS=per-layer`.
+        let as_before = flow_rows_as_before();
+        let earlier = match as_before {
+            true => flow.inputs_of(&lines.earlier, device)?,
+            false => None,
+        };
+        let read_rows = match as_before {
+            true => None,
+            false => flow.rows_the_lines_read(&lines.earlier, seq_len, device)?,
+        };
+        let held_rows = match as_before {
+            true => None,
+            false => flow.held_inputs().cloned(),
+        };
+        // Held then new, a kind (`None` as before).
+        let with_held = |kept: Option<&Tensor>, new: &Tensor| -> CandleResult<Option<Tensor>> {
+            match (as_before, kept) {
+                (true, _) => Ok(None),
+                (false, Some(kept)) => Ok(Some(Tensor::cat(&[kept, new], 1)?)),
+                (false, None) => Ok(Some(new.clone())),
             }
         };
+        // What the lines read of a kind: as before, its earlier rows gathered
+        // and joined to the new ones; else gathered from held-then-new.
+        let joined =
+            |kept: Option<&Tensor>, all: Option<&Tensor>, new: &Tensor| -> CandleResult<Tensor> {
+                match (as_before, kept, all, &read_rows) {
+                    (true, Some(kept), _, _) => Tensor::cat(&[kept, new], 1),
+                    (false, _, Some(all), Some(at)) => all.index_select(at, 1),
+                    _ => Ok(new.clone()),
+                }
+            };
         let (b_sz, nk, kd, nv, vd) = (
             mixed.dim(0)?,
             self.n_k_heads,
@@ -646,7 +679,12 @@ impl DeltaNetWeights {
         let anchor = flow.anchor().clone();
         let tree = TreeLines::for_flow(lines.parents.clone(), device)?;
         let rows = ahead + seq_len;
-        let all_mixed = joined(earlier.as_ref().map(|e| &e.mixed), &mixed)?;
+        let mixed_all = with_held(held_rows.as_ref().map(|h| &h.mixed), &mixed)?;
+        let all_mixed = joined(
+            earlier.as_ref().map(|e| &e.mixed),
+            mixed_all.as_ref(),
+            &mixed,
+        )?;
         // On a card the convolution and its SiLU are one launch along the
         // tree's lines (`ssm_conv_silu_tree_f32_k4`, bit for bit the
         // composition); the window it writes is not this forward's to keep.
@@ -683,13 +721,21 @@ impl DeltaNetWeights {
             None => l2_norm(&qk, self.eps)?,
         };
         let v = v.contiguous()?;
+        let qk_all = with_held(held_rows.as_ref().map(|h| &h.qk), &qk)?;
+        let v_all = with_held(held_rows.as_ref().map(|h| &h.v), &v)?;
+        let g_all = with_held(held_rows.as_ref().map(|h| &h.g), &gates.g)?;
+        let beta_all = with_held(held_rows.as_ref().map(|h| &h.beta), &gates.beta)?;
         let (out, _, _) = delta_rule_into(
-            &joined(earlier.as_ref().map(|e| &e.qk), &qk)?,
+            &joined(earlier.as_ref().map(|e| &e.qk), qk_all.as_ref(), &qk)?,
             nk,
-            &joined(earlier.as_ref().map(|e| &e.v), &v)?,
+            &joined(earlier.as_ref().map(|e| &e.v), v_all.as_ref(), &v)?,
             &Gates::apart(
-                joined(earlier.as_ref().map(|e| &e.g), &gates.g)?,
-                joined(earlier.as_ref().map(|e| &e.beta), &gates.beta)?,
+                joined(earlier.as_ref().map(|e| &e.g), g_all.as_ref(), &gates.g)?,
+                joined(
+                    earlier.as_ref().map(|e| &e.beta),
+                    beta_all.as_ref(),
+                    &gates.beta,
+                )?,
             ),
             &anchor.recurrent_state,
             None,
@@ -697,18 +743,32 @@ impl DeltaNetWeights {
         )?;
         let gated = self.gated_output(&out.narrow(1, ahead, seq_len)?, &z)?;
 
-        flow.keep(
-            before,
-            &parents,
-            &lines.live,
-            SsmRows {
-                mixed,
-                qk,
-                v,
-                g: gates.g,
-                beta: gates.beta,
-            },
-        )?;
+        match (mixed_all, qk_all, v_all, g_all, beta_all) {
+            (Some(mixed), Some(qk), Some(v), Some(g), Some(beta)) => flow.keep_joined(
+                before,
+                &parents,
+                &lines.live,
+                SsmRows {
+                    mixed,
+                    qk,
+                    v,
+                    g,
+                    beta,
+                },
+            )?,
+            _ => flow.keep(
+                before,
+                &parents,
+                &lines.live,
+                SsmRows {
+                    mixed,
+                    qk,
+                    v,
+                    g: gates.g,
+                    beta: gates.beta,
+                },
+            )?,
+        }
         flow.advance_to(walk)?;
         held.note_flow_read();
         self.ssm_out.forward(&gated)
@@ -1380,7 +1440,7 @@ impl FlowRows {
                     })
                 })
                 .collect::<CandleResult<_>>()?;
-        let at = Tensor::from_vec(at, rows.len(), device)?;
+        let at = rows_on(at, device)?;
         let pick = |t: &Tensor| t.index_select(&at, 1);
         Ok(Some(SsmRows {
             mixed: pick(&inputs.mixed)?,
@@ -1389,6 +1449,40 @@ impl FlowRows {
             g: pick(&inputs.g)?,
             beta: pick(&inputs.beta)?,
         }))
+    }
+
+    /// The kept rows' inputs, in `kept`'s order (`None` while none are kept).
+    pub(super) fn held_inputs(&self) -> Option<&SsmRows> {
+        self.inputs.as_ref()
+    }
+
+    /// Which rows of the kept rows' inputs followed by a forward's `new` rows
+    /// (as [`Self::held_inputs`] joined with them) its lines read: the
+    /// `earlier` rows on them, then every new row — `None` where no earlier
+    /// row is read, the new rows being the lines' own. One gather a kind
+    /// where gathering the earlier rows and joining them to the new ones was
+    /// one gather and two copies (`forward_flowing`).
+    pub(super) fn rows_the_lines_read(
+        &self,
+        earlier: &[usize],
+        new: usize,
+        device: &Device,
+    ) -> CandleResult<Option<Tensor>> {
+        if earlier.is_empty() {
+            return Ok(None);
+        }
+        let held = self.kept.len();
+        let mut at: Vec<u32> = earlier
+            .iter()
+            .map(|r| {
+                self.kept
+                    .binary_search(r)
+                    .map(|i| i as u32)
+                    .map_err(|_| candle_core::Error::Msg(format!("flowing row {r} was not kept")))
+            })
+            .collect::<CandleResult<_>>()?;
+        at.extend((held..held + new).map(|i| i as u32));
+        Ok(Some(rows_on(at, device)?))
     }
 
     /// A forward's new rows (`parents` as tree rows, the first at tree row
@@ -1445,6 +1539,47 @@ impl FlowRows {
         }
     }
 
+    /// [`Self::keep`] handed the kept rows' inputs ALREADY joined with the
+    /// forward's (`all`: [`Self::held_inputs`] then the new rows, as
+    /// `forward_flowing` builds them to read its lines): where every new row
+    /// follows the anchor that IS the new held set — no second join — and
+    /// otherwise one gather of the held rows and the live new ones.
+    pub(super) fn keep_joined(
+        &mut self,
+        before: usize,
+        parents: &[Option<usize>],
+        live: &[bool],
+        all: SsmRows,
+    ) -> CandleResult<()> {
+        debug_assert_eq!(before, self.read);
+        let held = self.kept.len();
+        self.parents.extend_from_slice(parents);
+        self.read = before + parents.len();
+        let picked: Vec<usize> = (0..live.len()).filter(|&i| live[i]).collect();
+        if picked.is_empty() {
+            return Ok(());
+        }
+        self.kept.extend(picked.iter().map(|&i| before + i));
+        self.inputs = Some(if picked.len() == live.len() {
+            all
+        } else {
+            let at: Vec<u32> = (0..held)
+                .chain(picked.iter().map(|&i| held + i))
+                .map(|i| i as u32)
+                .collect();
+            let at = rows_on(at, all.mixed.device())?;
+            let pick = |t: &Tensor| t.index_select(&at, 1);
+            SsmRows {
+                mixed: pick(&all.mixed)?,
+                qk: pick(&all.qk)?,
+                v: pick(&all.v)?,
+                g: pick(&all.g)?,
+                beta: pick(&all.beta)?,
+            }
+        });
+        Ok(())
+    }
+
     /// Keeps a forward's rows: every row's parent, and the inputs of the rows
     /// following the anchor (`live`).
     pub(super) fn keep(
@@ -1468,7 +1603,7 @@ impl FlowRows {
         let rows = if picked.len() == live.len() {
             rows
         } else {
-            let at = Tensor::from_vec(picked.clone(), picked.len(), rows.mixed.device())?;
+            let at = rows_on(picked.clone(), rows.mixed.device())?;
             let pick = |t: &Tensor| t.index_select(&at, 1);
             SsmRows {
                 mixed: pick(&rows.mixed)?,
@@ -1522,8 +1657,25 @@ impl FlowRows {
         let rows = self
             .inputs_of(path, &device)?
             .expect("a path of kept rows has inputs");
+        // On a card each replay is handed buffers of its own, so it takes the
+        // two-launch replay (`cuda::replay` takes only a target): without one
+        // every recurrent layer composed both replays, ~12 launches each, at
+        // every forward the walk moved — bit for bit the same state either way
+        // (`a_replay_on_the_card_lands_where_the_composed_replay_does`).
+        // Fresh, never the pair being replaced: a forward's rollback copy
+        // (`SsmState::flow_begun`) may still hold it. A/B
+        // `SWARMLLM_SSM_REPLAY=composed`.
+        let target = || -> CandleResult<Option<SsmSlot>> {
+            if !device.is_cuda() {
+                return Ok(None);
+            }
+            Ok(Some(SsmSlot {
+                conv_state: self.anchor.conv_state.zeros_like()?,
+                recurrent_state: self.anchor.recurrent_state.zeros_like()?,
+            }))
+        };
         let before = if reach > 1 {
-            replay_rows(&self.anchor, &rows, reach - 1, None)?
+            replay_rows(&self.anchor, &rows, reach - 1, target()?.as_ref())?
         } else {
             self.anchor.clone()
         };
@@ -1538,7 +1690,7 @@ impl FlowRows {
                 beta: last(&rows.beta)?,
             },
             1,
-            None,
+            target()?.as_ref(),
         )?;
         let row = path[reach - 1];
         self.before_anchor = before;
@@ -1805,6 +1957,73 @@ fn tree_parents_now(seq_len: usize) -> CandleResult<Option<Vec<Option<usize>>>> 
     Ok(Some(parents))
 }
 
+/// A table of row numbers a tree forward hands its recurrent layers — the
+/// tree's parents, a flow's walks, the kept rows a layer gathers — as a `u32`
+/// tensor on `device`. Every recurrent layer of a forward reads the SAME
+/// tables (one tree, one walk, one kept set), and an upload from pageable
+/// memory waits for the card's stream to drain first
+/// (`docs/invariants/inference.md` § "A speculative check is captured too, and
+/// a layout is uploaded once"), so on a card a table is copied ONCE while its
+/// content stands and handed out again by content: the 0.8B drafter's 18
+/// recurrent layers made three or four copies each a level of its flow. A hit
+/// is the very bytes the upload would make, read only; a recurrent tree is
+/// never captured (`SplitModel::tree_steps_may_be_captured`), so no upload
+/// here is inside one. Kept in a `static` — never dropped, so no card memory
+/// is freed after the context at exit. A/B `SWARMLLM_FLOW_ROWS=per-layer`.
+///
+/// Prior art: llama.cpp sets a graph's inputs once a micro-batch
+/// (`llm_graph_input_*::set_input` — positions, masks, `s_copy`) and every
+/// layer reads them; `CudaDevice::layout_params` keeps each distinct strided
+/// layout on the card the same way.
+fn rows_on(ids: Vec<u32>, device: &Device) -> CandleResult<Tensor> {
+    #[cfg(feature = "candle-cuda")]
+    if device.is_cuda() && !flow_rows_as_before() {
+        let mut held = ROWS_ON_CARD.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(at) = held
+            .iter()
+            .position(|(rows, on, _)| rows == &ids && on.same_device(device))
+        {
+            let hit = held.remove(at);
+            let tensor = hit.2.clone();
+            held.insert(0, hit);
+            return Ok(tensor);
+        }
+        let len = ids.len();
+        let tensor = Tensor::from_vec(ids.clone(), len, device)?;
+        held.insert(0, (ids, device.clone(), tensor.clone()));
+        held.truncate(ROW_TABLES_HELD);
+        return Ok(tensor);
+    }
+    let len = ids.len();
+    Tensor::from_vec(ids, len, device)
+}
+
+/// How many distinct tables [`rows_on`] keeps: a flowing forward hands its
+/// layers up to five (parents, walks, the earlier rows, the walk's path, the
+/// rows kept), a drafter's call three levels of them.
+#[cfg(feature = "candle-cuda")]
+const ROW_TABLES_HELD: usize = 16;
+
+#[cfg(feature = "candle-cuda")]
+#[allow(clippy::type_complexity)]
+static ROWS_ON_CARD: std::sync::Mutex<Vec<(Vec<u32>, Device, Tensor)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// `SWARMLLM_FLOW_ROWS=per-layer` → a tree forward's row bookkeeping as it
+/// was before 2026-11-22: [`rows_on`] copies every table for every layer, and
+/// a flowing layer gathers its earlier rows, joins them to the new ones and
+/// joins the new ones to the held ones apart ([`FlowRows::keep`]). The A/B
+/// arm of both. Read once.
+fn flow_rows_as_before() -> bool {
+    static AS_BEFORE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AS_BEFORE.get_or_init(|| {
+        matches!(
+            std::env::var("SWARMLLM_FLOW_ROWS").as_deref(),
+            Ok("per-layer")
+        )
+    })
+}
+
 /// A tree check's rows as a recurrent layer reads them (#437): each row's
 /// parent among the step's rows ([`tree_parents_now`]), and on a card the same
 /// as `u32`s (`u32::MAX`: no parent), copied there once a step for both of its
@@ -1833,8 +2052,7 @@ impl TreeLines {
                     .iter()
                     .map(|p| p.map_or(u32::MAX, |p| p as u32))
                     .collect();
-                let rows = ids.len();
-                Some(Tensor::from_vec(ids, rows, device)?)
+                Some(rows_on(ids, device)?)
             } else {
                 None
             };
@@ -1860,9 +2078,7 @@ impl TreeLines {
         {
             let mut lines = Self::new(parents, device)?;
             if device.is_cuda() {
-                let walks = flow_walks(&lines.parents);
-                let len = walks.len();
-                lines.walks_on_card = Some(Tensor::from_vec(walks, len, device)?);
+                lines.walks_on_card = Some(rows_on(flow_walks(&lines.parents), device)?);
             }
             Ok(lines)
         }
