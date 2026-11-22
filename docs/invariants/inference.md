@@ -6169,7 +6169,13 @@ width keeps +36% (the 11-18 processor measure). Now the layer reads the whole tr
   whose parent is not the row just read starts again from the state read and walks down its own
   line, root first — the same updates in the same order as the line read alone. A row following
   the row before it (the in-place chain; a first child in best-child-first order) just goes on, so
-  a tree walks again once a branch.
+  a tree walks again once a branch. ⚠ That kernel walks at most 32 ancestors (`int line[32]`),
+  enough for one forward's ≤ 32 rows and silently short past it: a tree that FLOWS
+  (`docs/plans/recurrent_flow.md`) reads lines as deep as the forwards in flight, so it goes to
+  `delta_rule_flow_f32_d*`, whose walks the host names (`qwen35::flow_walks`, via
+  `TreeLines::for_flow`) — a line 35 deep read by the tree kernel was 0.11 off (of 1.38) on the
+  RTX 3070, by the flow kernel within 1e-4 (`a_flowing_tree_on_the_card_is_the_processors`,
+  2026-11-22).
 - **On a card the convolution is ONE launch too** (`ssm_conv_silu_tree_f32_k4`): a thread a
   channel builds each row's window up its line, then the read window, rounding as the chain's
   kernel does — bit for bit `causal_conv_along`. The parents reach the card once a step for both

@@ -1,7 +1,8 @@
 # A tree that flows through recurrent layers (Qwen 3.5 / 3.6 / 3.8) — plan, 2026-11-22
 
-Status: stage 1 BUILT (2026-11-22, processor layer + test; nothing sets a flowing scope outside the test until stage
-3). Stages 2-5 are PLAN. Figures are MEASURED (our records), READ (a header or source) or DERIVED.
+Status: stages 1 and 2 BUILT (2026-11-22, the layer on the processor and on a card, with tests; nothing sets a
+flowing scope outside the tests until stage 3). Stages 3-5 are PLAN. Figures are MEASURED (our records), READ (a
+header or source) or DERIVED.
 
 ## Why
 
@@ -148,6 +149,29 @@ parents across forwards read off the visibility (`RowVisibility::parents_across_
   rebased tree; every reachable row and each anchor 0.0 from its line read alone; both cuts land on their starts.
   Red (checked): earlier rows replayed as one chain (row 6), parents in earlier forwards ignored (row 5), the anchor's
   path replay cut to its last row (row 9).
+
+## Stage 2 as built (2026-11-22)
+
+`forward_flowing` on a card runs what a tree check runs: the convolution and SiLU over the extended forward in one
+launch along its lines (`conv_on_the_card` → `ssm_conv_silu_tree_f32_k4`; it walks only `kernel − 1` ancestors, so a
+deep line costs it nothing), the L2 norm in one (`l2_norm_on_the_card`), the delta rule in one. What the build
+settled:
+
+- **Not the state stack this plan named — the host names each row's walk.** The tree kernel
+  (`delta_rule_tree_f32_d*`) already restarts a row whose parent is not the row before it from the anchor and walks
+  its line, but collects the line in `int line[32]` and silently drops what is deeper. A flowing forward's lines run
+  as deep as the forwards in flight. `delta_rule_flow_f32_d*` is the same body reading `walks` instead: for each such
+  row, its parent's line root first, built on the host once a forward (`qwen35::flow_walks`, `TreeLines::for_flow`;
+  `[rows + 1]` offsets, then the rows), checked for length before the launch (`WalksView::of`). Every row the walk
+  names is below the row it walks for, as `flow_walks` builds it from the same parents.
+- **Cost, DERIVED**: a branching row re-reads its whole line, so a forward's updates are the sum of its branching
+  rows' depths — on the test's deep forward ~70 against 38 minimal. A depth-first stack would read each row once;
+  worth building only if stage 5 times the delta rule as a share of the segment's forward that matters.
+- **Test** `a_flowing_tree_on_the_card_is_the_processors` (the stage 1 script, hoisted into `flowing_script`, now
+  ending with a forward whose last row's line runs 35 rows below the anchor): every reachable row, each anchor and
+  each start a cut puts back within 1e-4 × the largest value of the processor's (`head_width_weights`: 4 value
+  heads of 128, the 27B's head width). Red (checked, RTX 3070): the walks switched off, row 41 — the 35-deep line —
+  0.11 off of 1.38.
 
 ## Not in this plan
 

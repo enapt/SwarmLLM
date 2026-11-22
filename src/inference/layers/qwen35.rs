@@ -644,23 +644,45 @@ impl DeltaNetWeights {
             self.v_head_dim,
         );
         let anchor = flow.anchor().clone();
-        let (conv, _) = self.causal_conv_along(
-            &joined(earlier.as_ref().map(|e| &e.mixed), &mixed)?,
-            &anchor.conv_state,
-            &lines.parents,
-        )?;
-        let conv = candle_nn::ops::silu(&conv.narrow(1, ahead, seq_len)?)?;
-        let qk = l2_norm(
-            &conv
-                .narrow(2, 0, 2 * self.key_dim())?
-                .reshape((b_sz, seq_len, 2 * nk, kd))?,
-            self.eps,
-        )?;
-        let v = conv
-            .narrow(2, 2 * self.key_dim(), self.value_dim())?
-            .reshape((b_sz, seq_len, nv, vd))?
-            .contiguous()?;
-        let tree = TreeLines::new(lines.parents.clone(), device)?;
+        let tree = TreeLines::for_flow(lines.parents.clone(), device)?;
+        let rows = ahead + seq_len;
+        let all_mixed = joined(earlier.as_ref().map(|e| &e.mixed), &mixed)?;
+        // On a card the convolution and its SiLU are one launch along the
+        // tree's lines (`ssm_conv_silu_tree_f32_k4`, bit for bit the
+        // composition); the window it writes is not this forward's to keep.
+        let window = match device.is_cuda() {
+            true => Some(anchor.conv_state.zeros_like()?),
+            false => None,
+        };
+        let fused = match &window {
+            Some(window) => {
+                self.conv_on_the_card(&all_mixed, &anchor.conv_state, window, Some(&tree))?
+            }
+            None => None,
+        };
+        let (qk, v) = match fused {
+            Some((qk, v)) => (
+                qk.reshape((b_sz, rows, 2 * nk, kd))?
+                    .narrow(1, ahead, seq_len)?,
+                v.reshape((b_sz, rows, nv, vd))?.narrow(1, ahead, seq_len)?,
+            ),
+            None => {
+                let (conv, _) =
+                    self.causal_conv_along(&all_mixed, &anchor.conv_state, &lines.parents)?;
+                let conv = candle_nn::ops::silu(&conv.narrow(1, ahead, seq_len)?)?;
+                (
+                    conv.narrow(2, 0, 2 * self.key_dim())?
+                        .reshape((b_sz, seq_len, 2 * nk, kd))?,
+                    conv.narrow(2, 2 * self.key_dim(), self.value_dim())?
+                        .reshape((b_sz, seq_len, nv, vd))?,
+                )
+            }
+        };
+        let qk = match l2_norm_on_the_card(&qk.contiguous()?, self.eps)? {
+            Some(normed) => normed,
+            None => l2_norm(&qk, self.eps)?,
+        };
+        let v = v.contiguous()?;
         let (out, _, _) = delta_rule_into(
             &joined(earlier.as_ref().map(|e| &e.qk), &qk)?,
             nk,
@@ -1734,6 +1756,13 @@ struct TreeLines {
     parents: Vec<Option<usize>>,
     #[cfg(feature = "candle-cuda")]
     on_card: Option<Tensor>,
+    /// A flowing forward's walks (`TreeLines::for_flow`): for each row whose
+    /// parent is not the row before it, the rows of its line root first —
+    /// `[seq + 1]` offsets, then the rows — on the card, for
+    /// `delta_rule_flow_f32_d*`, whose lines may be deeper than the tree
+    /// kernel's 32.
+    #[cfg(feature = "candle-cuda")]
+    walks_on_card: Option<Tensor>,
 }
 
 impl TreeLines {
@@ -1750,7 +1779,11 @@ impl TreeLines {
             } else {
                 None
             };
-            Ok(Self { parents, on_card })
+            Ok(Self {
+                parents,
+                on_card,
+                walks_on_card: None,
+            })
         }
         #[cfg(not(feature = "candle-cuda"))]
         {
@@ -1758,6 +1791,54 @@ impl TreeLines {
             Ok(Self { parents })
         }
     }
+
+    /// A flowing forward's rows ([`DeltaNetWeights::forward_flowing`]): as
+    /// [`Self::new`], and on a card each row's walk named for the delta rule
+    /// (`delta_rule_flow_f32_d*`), since a line read from the walk's anchor is
+    /// as deep as the forwards in flight make it.
+    fn for_flow(parents: Vec<Option<usize>>, device: &Device) -> CandleResult<Self> {
+        #[cfg(feature = "candle-cuda")]
+        {
+            let mut lines = Self::new(parents, device)?;
+            if device.is_cuda() {
+                let walks = flow_walks(&lines.parents);
+                let len = walks.len();
+                lines.walks_on_card = Some(Tensor::from_vec(walks, len, device)?);
+            }
+            Ok(lines)
+        }
+        #[cfg(not(feature = "candle-cuda"))]
+        {
+            Self::new(parents, device)
+        }
+    }
+}
+
+/// [`TreeLines::for_flow`]'s walks: for each row whose parent is not the row
+/// before it, the rows of its parent's line from the root down — what
+/// `delta_rule_flow_f32_d*` replays from the state read before the row's own
+/// update; `[rows + 1]` offsets into the rows that follow them.
+#[cfg(feature = "candle-cuda")]
+fn flow_walks(parents: &[Option<usize>]) -> Vec<u32> {
+    let rows = parents.len();
+    let mut offsets = Vec::with_capacity(rows + 1);
+    let mut walked: Vec<u32> = Vec::new();
+    for (t, parent) in parents.iter().enumerate() {
+        offsets.push(walked.len() as u32);
+        if *parent == t.checked_sub(1) {
+            continue;
+        }
+        let from = walked.len();
+        let mut at = *parent;
+        while let Some(r) = at {
+            walked.push(r as u32);
+            at = parents[r];
+        }
+        walked[from..].reverse();
+    }
+    offsets.push(walked.len() as u32);
+    offsets.extend(walked);
+    offsets
 }
 
 /// Does `kernels/delta_rule.cu` take this layer? A lane holds `D / 32` of a
@@ -1805,11 +1886,13 @@ fn delta_rule_cuda(
         }
         // A tree's rows each start from their parent's state
         // (`delta_rule_tree_f32_d*`), never the chain's kernel.
-        let parents = match tree {
-            None => None,
+        let (parents, walks) = match tree {
+            None => (None, None),
             Some(TreeLines {
-                on_card: Some(p), ..
-            }) => Some(p.clone()),
+                on_card: Some(p),
+                walks_on_card,
+                ..
+            }) => (Some(p.clone()), walks_on_card.clone()),
             Some(_) => return Ok(None),
         };
         let (b, seq, nv, vd) = v.dims4()?;
@@ -1820,6 +1903,7 @@ fn delta_rule_cuda(
             nk,
             scale,
             parents,
+            walks,
         };
         let out = qk.contiguous()?.apply_op3_no_bwd(v, &stacked, &op)?;
         Ok(Some(out.reshape((b, seq, nv, vd))?))
@@ -1893,6 +1977,42 @@ mod cuda {
         fn slice(&self) -> Result<candle_core::cuda_backend::cudarc::driver::CudaView<'_, u32>> {
             let candle_core::Storage::Cuda(on_card) = &*self.storage else {
                 candle_core::bail!("a tree's parents are not on the card");
+            };
+            Ok(on_card.as_cuda_slice::<u32>()?.slice(self.start..self.end))
+        }
+    }
+
+    /// A flowing forward's walks on the card (`super::flow_walks`): u32,
+    /// contiguous, at least the `[rows + 1]` offsets. Their values are the
+    /// host's, built from the same parents as the tree's (`TreeLines::for_flow`):
+    /// every row a walk names is an ancestor of the row it walks for.
+    struct WalksView<'a> {
+        storage: std::sync::RwLockReadGuard<'a, candle_core::Storage>,
+        start: usize,
+        end: usize,
+    }
+
+    impl<'a> WalksView<'a> {
+        fn of(walks: &'a Tensor, rows: usize) -> Result<Self> {
+            if walks.dtype() != DType::U32 || walks.rank() != 1 || walks.dim(0)? < rows + 1 {
+                candle_core::bail!(
+                    "gated-delta-rule: a flow's walks must be u32, [{rows} + 1 + …]"
+                );
+            }
+            let (storage, layout) = walks.storage_and_layout();
+            let Some((start, end)) = layout.contiguous_offsets() else {
+                candle_core::bail!("gated-delta-rule: a flow's walks must be contiguous");
+            };
+            Ok(Self {
+                storage,
+                start,
+                end,
+            })
+        }
+
+        fn slice(&self) -> Result<candle_core::cuda_backend::cudarc::driver::CudaView<'_, u32>> {
+            let candle_core::Storage::Cuda(on_card) = &*self.storage else {
+                candle_core::bail!("a flow's walks are not on the card");
             };
             Ok(on_card.as_cuda_slice::<u32>()?.slice(self.start..self.end))
         }
@@ -2520,6 +2640,9 @@ mod cuda {
         /// A tree's parents (`super::TreeLines::on_card`, `[seq]` u32): each
         /// row starts from its parent's state (`delta_rule_tree_f32_d*`).
         pub(super) parents: Option<Tensor>,
+        /// A flowing forward's walks (`super::TreeLines::walks_on_card`,
+        /// `super::flow_walks`), beside `parents` (`delta_rule_flow_f32_d*`).
+        pub(super) walks: Option<Tensor>,
     }
 
     impl CustomOp3 for DeltaRule {
@@ -2601,12 +2724,22 @@ mod cuda {
                 None => None,
             };
             let parents = tree.as_ref().map(ParentsView::slice).transpose()?;
+            // The walks name rows by index: every offset and row is checked
+            // against the step's rows before the kernel reads one.
+            let walked = match (&self.walks, &parents) {
+                (Some(w), Some(_)) => Some(WalksView::of(w, seq)?),
+                (Some(_), None) => candle_core::bail!("gated-delta-rule: walks with no tree"),
+                (None, _) => None,
+            };
+            let walks = walked.as_ref().map(WalksView::slice).transpose()?;
             let func = dev.get_or_load_custom_func(
-                match (d, parents.is_some()) {
-                    (64, false) => "delta_rule_f32_d64",
-                    (64, true) => "delta_rule_tree_f32_d64",
-                    (_, false) => "delta_rule_f32_d128",
-                    (_, true) => "delta_rule_tree_f32_d128",
+                match (d, parents.is_some(), walks.is_some()) {
+                    (64, false, _) => "delta_rule_f32_d64",
+                    (64, true, false) => "delta_rule_tree_f32_d64",
+                    (64, true, true) => "delta_rule_flow_f32_d64",
+                    (_, false, _) => "delta_rule_f32_d128",
+                    (_, true, false) => "delta_rule_tree_f32_d128",
+                    (_, true, true) => "delta_rule_flow_f32_d128",
                 },
                 "swarmllm_delta_rule",
                 super::DELTA_RULE_PTX,
@@ -2635,13 +2768,19 @@ mod cuda {
             if let Some(parents) = &parents {
                 builder.arg(parents);
             }
+            if let Some(walks) = &walks {
+                builder.arg(walks);
+            }
             // SAFETY: ffi. Shapes and contiguity are checked above and the
             // width by `card_delta_rule_covers` (d ∈ {64, 128}, the kernel's
             // two entry points); every read is within the views by those
             // shapes and v's strides, `dst` is sized for exactly the outputs
-            // and `state_out` is the state's shape. It is written through a
-            // read view, which only the ONE stream per device orders
-            // (`SWARMLLM_CUDA_OWN_STREAM`; event tracking is off by default).
+            // and `state_out` is the state's shape. A flow's walks hold their
+            // `seq + 1` offsets (`WalksView::of`), each naming rows below the
+            // row it walks for, as `super::flow_walks` builds them. It is
+            // written through a read view, which only the ONE stream per device
+            // orders (`SWARMLLM_CUDA_OWN_STREAM`; event tracking is off by
+            // default).
             unsafe { builder.launch(cfg) }.w()?;
             Ok((
                 candle_core::CudaStorage::wrap_cuda_slice(dst, dev),
@@ -3804,64 +3943,70 @@ mod tests {
         }
     }
 
-    /// A tree that FLOWS (`docs/plans/recurrent_flow.md` stage 1): rows sent
-    /// over several forwards, each forward's rows with parents in earlier
-    /// ones, the walk moving down the tree between them — onto a row of the
-    /// forward that carries it, too (a missed draw's row) — then a rebase that
-    /// cuts the layer back to the tree's start and reads the walk's path again,
-    /// and a forward of the rebased tree. Every row the walk can still reach
-    /// writes what its line read alone as a chain writes, 0.0 apart, and the
-    /// anchor after each forward is the walk's line's state; the cuts land on
-    /// the starts' states; a walk that went back up the tree is refused.
-    #[test]
-    fn a_flowing_trees_rows_are_their_lines_read_alone() {
-        use crate::inference::draft_tree::DraftTree;
-        let device = Device::Cpu;
-        let w = weights_of(&device, true);
-        let pool = exact(Tensor::randn(0f32, 1.0, (1, 32, 8), &device).unwrap(), 8.0);
-        let row_of = |i: usize| pool.narrow(1, i, 1).unwrap();
-        let prompt = || {
-            let mut s = None;
-            w.forward_deltanet_into(&pool.narrow(1, 0, 3).unwrap(), &mut s, 0, false)
-                .unwrap();
-            s
-        };
-        // A line's inputs read alone after the prompt: its last row's output
-        // and the state after it.
-        let alone = |line: &[usize]| {
-            let mut s = prompt();
-            let rows: Vec<Tensor> = line.iter().map(|&i| row_of(i)).collect();
-            let out = w
-                .forward_deltanet_into(&Tensor::cat(&rows, 1).unwrap(), &mut s, 3, false)
-                .unwrap();
-            (out.narrow(1, line.len() - 1, 1).unwrap(), s.unwrap())
-        };
-        // A tree: its start, the inputs before it past the prompt, each row's
-        // parent and input.
-        struct Epoch {
-            base: usize,
-            prefix: Vec<usize>,
-            parents: Vec<Option<usize>>,
-            inputs: Vec<usize>,
-        }
-        impl Epoch {
-            fn line(&self, row: usize) -> Vec<usize> {
-                let mut rows = vec![row];
-                while let Some(p) = self.parents[*rows.last().unwrap()] {
-                    rows.push(p);
-                }
-                let mut line = self.prefix.clone();
-                line.extend(rows.iter().rev().map(|&r| self.inputs[r]));
-                line
+    /// A tree: its start, the pool rows before it past the prompt, each row's
+    /// parent and pool row.
+    struct Epoch {
+        base: usize,
+        prefix: Vec<usize>,
+        parents: Vec<Option<usize>>,
+        inputs: Vec<usize>,
+    }
+
+    impl Epoch {
+        /// Row `row`'s line as pool rows, from the prompt's end.
+        fn line(&self, row: usize) -> Vec<usize> {
+            let mut rows = vec![row];
+            while let Some(p) = self.parents[*rows.last().unwrap()] {
+                rows.push(p);
             }
+            let mut line = self.prefix.clone();
+            line.extend(rows.iter().rev().map(|&r| self.inputs[r]));
+            line
         }
-        // Sends tree rows `rows` of `tree` with the walk on `walk`; checks each
-        // row in `live` against its line read alone.
+    }
+
+    /// What [`flowing_script`] shows, each with the line — pool rows after the
+    /// prompt — a chain read alone reaches it by.
+    enum FlowSeen {
+        /// A row the walk can still reach: its output.
+        Row {
+            what: String,
+            line: Vec<usize>,
+            out: Tensor,
+        },
+        /// An anchor, or a start a cut put back.
+        State {
+            what: String,
+            line: Vec<usize>,
+            state: SsmSlot,
+        },
+    }
+
+    /// A tree that FLOWS through `w` (`docs/plans/recurrent_flow.md`), its rows
+    /// read off `pool` (`[1, 64, hidden]` on `w`'s device; rows 0-2 the
+    /// prompt): rows sent over several forwards, each forward's rows with
+    /// parents in earlier ones, the walk moving down the tree between them —
+    /// onto a row of the forward that carries it, too (a missed draw's row) —
+    /// then a rebase that cuts the layer back to the tree's start and reads the
+    /// walk's path again, a forward of the rebased tree and one whose last row's
+    /// line runs 35 rows below the anchor. Every row the walk can still reach,
+    /// each anchor and each start a cut puts back goes to `seen`; the
+    /// refusals — a walk back up the tree, a step on from the tree's state, a
+    /// cut that is no start — are asserted here.
+    fn flowing_script(w: &DeltaNetWeights, pool: &Tensor, seen: &mut dyn FnMut(FlowSeen)) {
+        use crate::inference::draft_tree::DraftTree;
+        let row_of = |i: usize| pool.narrow(1, i, 1).unwrap();
+        let mut held = None;
+        w.forward_deltanet(&pool.narrow(1, 0, 3).unwrap(), &mut held, 0)
+            .unwrap();
+        // Sends tree rows `rows` of `tree` with the walk on `walk`; shows each
+        // row in `live`.
         let send = |held: &mut Option<SsmState>,
                     tree: &Epoch,
                     rows: std::ops::Range<usize>,
                     walk: usize,
-                    live: &[usize]|
+                    live: &[usize],
+                    seen: &mut dyn FnMut(FlowSeen)|
          -> CandleResult<()> {
             let shape = DraftTree::new(
                 tree.base,
@@ -3872,37 +4017,26 @@ mod tests {
             )
             .unwrap();
             let index_pos = tree.base + rows.start;
-            let (positions, seen) = shape.rows_for(index_pos, rows.len()).unwrap();
+            let (positions, visible) = shape.rows_for(index_pos, rows.len()).unwrap();
             let x: Vec<Tensor> = rows.clone().map(|r| row_of(tree.inputs[r])).collect();
             let out = {
                 let _flow =
-                    super::super::RowPositions::for_flowing_tree(positions, seen, walk as u32);
-                w.forward_deltanet_into(&Tensor::cat(&x, 1).unwrap(), held, index_pos, false)?
+                    super::super::RowPositions::for_flowing_tree(positions, visible, walk as u32);
+                w.forward_deltanet(&Tensor::cat(&x, 1).unwrap(), held, index_pos)?
             };
             for &row in live {
-                let (want, _) = alone(&tree.line(row));
-                assert_eq!(
-                    max_abs_diff(&out.narrow(1, row - rows.start, 1).unwrap(), &want),
-                    0.0,
-                    "row {row}, its line {:?}",
-                    tree.line(row)
-                );
+                seen(FlowSeen::Row {
+                    what: format!("row {row} of the tree from {}", tree.base),
+                    line: tree.line(row),
+                    out: out.narrow(1, row - rows.start, 1).unwrap(),
+                });
             }
             Ok(())
         };
-        let anchor_is = |held: &Option<SsmState>, line: &[usize], what: &str| {
-            let (_, want) = alone(line);
-            let anchor = &held.as_ref().unwrap().flow.as_ref().unwrap().anchor;
-            assert_eq!(
-                max_abs_diff(&anchor.recurrent_state, &want.current().recurrent_state),
-                0.0,
-                "{what}: the anchor's state"
-            );
-            assert_eq!(
-                max_abs_diff(&anchor.conv_state, &want.current().conv_state),
-                0.0,
-                "{what}: the anchor's window"
-            );
+        let anchor = |held: &Option<SsmState>, line: Vec<usize>, what: &str| FlowSeen::State {
+            what: format!("the anchor {what}"),
+            line,
+            state: held.as_ref().unwrap().flow.as_ref().unwrap().anchor.clone(),
         };
 
         let first = Epoch {
@@ -3928,25 +4062,28 @@ mod tests {
             ],
             inputs: (3..19).collect(),
         };
-        let mut held = prompt();
-        send(&mut held, &first, 0..5, 0, &[0, 1, 2, 3, 4]).unwrap();
-        anchor_is(&held, &first.line(0), "after the first forward");
+        send(&mut held, &first, 0..5, 0, &[0, 1, 2, 3, 4], seen).unwrap();
+        seen(anchor(&held, first.line(0), "after the first forward"));
         // Rows from both branches below the walk's row are read again ahead
         // of the new ones (1→2 and 3→4).
-        send(&mut held, &first, 5..9, 0, &[5, 6, 7, 8]).unwrap();
+        send(&mut held, &first, 5..9, 0, &[5, 6, 7, 8], seen).unwrap();
         // The walk went 0 → 1 → 2: rows 3, 4, 6 and 8 no longer follow it,
-        // and row 12 (under 6) is read from the anchor, never compared.
-        send(&mut held, &first, 9..13, 2, &[9, 10, 11]).unwrap();
-        anchor_is(&held, &first.line(2), "after the walk reached row 2");
+        // and row 12 (under 6) is read from the anchor, never shown.
+        send(&mut held, &first, 9..13, 2, &[9, 10, 11], seen).unwrap();
+        seen(anchor(&held, first.line(2), "after the walk reached row 2"));
         {
             let mut back = held.clone();
-            let refused = send(&mut back, &first, 13..16, 1, &[]);
+            let refused = send(&mut back, &first, 13..16, 1, &[], &mut |_| {});
             assert!(refused.is_err(), "a walk back up the tree is refused");
         }
         // Row 2's draw kept 5, whose draw no row carries: the walk is on the
         // missed draw's row, 13, sent in the forward that carries it.
-        send(&mut held, &first, 13..16, 13, &[13, 14, 15]).unwrap();
-        anchor_is(&held, &first.line(13), "on a row of the forward itself");
+        send(&mut held, &first, 13..16, 13, &[13, 14, 15], seen).unwrap();
+        seen(anchor(
+            &held,
+            first.line(13),
+            "on a row of the forward itself",
+        ));
 
         // The rebase (`FlowTree::rebase`): the walk's path 0 1 2 5 becomes the
         // reply, its row 13 the first of a tree from 7 with 14 and 15.
@@ -3968,66 +4105,185 @@ mod tests {
                 "only a start is a cut a flow takes"
             );
             assert!(h.rewind_to(3).unwrap());
-            let (got, want) = (h.current(), prompt().unwrap());
-            assert_eq!(
-                max_abs_diff(&got.recurrent_state, &want.current().recurrent_state),
-                0.0
-            );
+            seen(FlowSeen::State {
+                what: "the first tree's start".into(),
+                line: Vec::new(),
+                state: h.current().clone(),
+            });
         }
-        send(&mut held, &rebase, 0..7, 4, &[0, 1, 2, 3, 4, 5, 6]).unwrap();
-        anchor_is(&held, &rebase.line(4), "after the rebase's forward");
+        send(&mut held, &rebase, 0..7, 4, &[0, 1, 2, 3, 4, 5, 6], seen).unwrap();
+        seen(anchor(&held, rebase.line(4), "after the rebase's forward"));
 
+        // The rebased tree, then a line deeper than the card's tree kernel
+        // holds (32): rows 6-40 a chain under row 5, row 41 a second child of
+        // row 38, its walk 35 rows below the anchor.
+        let mut parents = vec![None, Some(0), Some(0), Some(1), Some(2), Some(3)];
+        parents.extend((6..41).map(|r| Some(r - 1)));
+        parents.push(Some(38));
+        let mut inputs = vec![
+            first.inputs[13],
+            first.inputs[14],
+            first.inputs[15],
+            19,
+            20,
+            21,
+        ];
+        inputs.extend(22..58);
         let second = Epoch {
             base: 7,
             prefix: path.clone(),
-            parents: vec![None, Some(0), Some(0), Some(1), Some(2), Some(3)],
-            inputs: vec![
-                first.inputs[13],
-                first.inputs[14],
-                first.inputs[15],
-                19,
-                20,
-                21,
-            ],
+            parents,
+            inputs,
         };
         // The walk went 13 → 14: row 4 (under 15) is gone; row 5 reads on
         // from row 3 of the same forward.
-        send(&mut held, &second, 3..6, 1, &[3, 5]).unwrap();
-        anchor_is(&held, &second.line(1), "after the rebased tree's forward");
+        send(&mut held, &second, 3..6, 1, &[3, 5], seen).unwrap();
+        seen(anchor(
+            &held,
+            second.line(1),
+            "after the rebased tree's forward",
+        ));
+        let deep: Vec<usize> = (6..42).collect();
+        send(&mut held, &second, 6..42, 1, &deep, seen).unwrap();
 
-        let next = row_of(30);
+        let next = row_of(60);
+        let at = held.as_ref().unwrap().positions();
         assert!(
-            w.forward_deltanet_into(&next, &mut held.clone(), 10, false)
-                .is_err(),
+            w.forward_deltanet(&next, &mut held.clone(), at).is_err(),
             "nothing reads on from a flowing tree's state"
         );
         // A failed flow cuts to the last start every segment answered: the
         // rebased tree's, or the one before it.
         let mut earlier = held.clone();
         assert!(earlier.as_mut().unwrap().rewind_to(3).unwrap());
+        seen(FlowSeen::State {
+            what: "the first tree's start, after the rebase".into(),
+            line: Vec::new(),
+            state: earlier.as_ref().unwrap().current().clone(),
+        });
         let h = held.as_mut().unwrap();
         assert!(!h.can_rewind_to(9));
         assert!(h.rewind_to(7).unwrap());
-        let (_, want) = alone(&path);
-        let got = held.as_ref().unwrap();
-        assert_eq!(got.positions(), 7);
-        assert_eq!(
-            max_abs_diff(
-                &got.current().recurrent_state,
-                &want.current().recurrent_state
-            ),
-            0.0,
-            "the rebased tree's start"
-        );
-        let mut want = Some(want);
-        assert_eq!(
-            max_abs_diff(
-                &w.forward_deltanet_into(&next, &mut held, 7, false).unwrap(),
-                &w.forward_deltanet_into(&next, &mut want, 7, false).unwrap()
-            ),
-            0.0,
-            "the reply reads on from the start as from the path read alone"
-        );
+        assert_eq!(h.positions(), 7);
+        seen(FlowSeen::State {
+            what: "the rebased tree's start".into(),
+            line: path.clone(),
+            state: h.current().clone(),
+        });
+        let mut line = path;
+        line.push(60);
+        seen(FlowSeen::Row {
+            what: "the reply read on from the rebased tree's start".into(),
+            line,
+            out: w.forward_deltanet(&next, &mut held, 7).unwrap(),
+        });
+    }
+
+    /// [`flowing_script`] on the processor (`docs/plans/recurrent_flow.md`
+    /// stage 1): every row the walk can still reach writes what its line read
+    /// alone as a chain writes, 0.0 apart — the projections exact, as
+    /// `a_tree_checks_rows_are_their_lines_read_alone` — and each anchor and
+    /// start is its line's state.
+    #[test]
+    fn a_flowing_trees_rows_are_their_lines_read_alone() {
+        let device = Device::Cpu;
+        let w = weights_of(&device, true);
+        let pool = exact(Tensor::randn(0f32, 1.0, (1, 64, 8), &device).unwrap(), 8.0);
+        // A line's pool rows read alone after the prompt: the last row's
+        // output (none for an empty line) and the state after it.
+        let alone = |line: &[usize]| {
+            let mut s = None;
+            w.forward_deltanet(&pool.narrow(1, 0, 3).unwrap(), &mut s, 0)
+                .unwrap();
+            if line.is_empty() {
+                return (None, s.unwrap());
+            }
+            let rows: Vec<Tensor> = line
+                .iter()
+                .map(|&i| pool.narrow(1, i, 1).unwrap())
+                .collect();
+            let out = w
+                .forward_deltanet(&Tensor::cat(&rows, 1).unwrap(), &mut s, 3)
+                .unwrap();
+            (Some(out.narrow(1, line.len() - 1, 1).unwrap()), s.unwrap())
+        };
+        let (mut rows, mut states) = (0, 0);
+        flowing_script(&w, &pool, &mut |shown| match shown {
+            FlowSeen::Row { what, line, out } => {
+                let want = alone(&line).0.unwrap();
+                assert_eq!(max_abs_diff(&out, &want), 0.0, "{what}, its line {line:?}");
+                rows += 1;
+            }
+            FlowSeen::State { what, line, state } => {
+                let want = alone(&line).1;
+                assert_eq!(
+                    max_abs_diff(&state.recurrent_state, &want.current().recurrent_state),
+                    0.0,
+                    "{what}: the state, its line {line:?}"
+                );
+                assert_eq!(
+                    max_abs_diff(&state.conv_state, &want.current().conv_state),
+                    0.0,
+                    "{what}: the window, its line {line:?}"
+                );
+                states += 1;
+            }
+        });
+        assert_eq!((rows, states), (61, 8), "every row and state shown");
+    }
+
+    /// [`flowing_script`] on a card (`docs/plans/recurrent_flow.md` stage 2)
+    /// writes what it writes on the processor, every row, anchor and start
+    /// within float rounding — the convolution along the tree's lines and the
+    /// delta rule each one launch (`ssm_conv_silu_tree_f32_k4`,
+    /// `delta_rule_flow_f32_d*`), the latter walking a line 35 rows below the
+    /// anchor, deeper than the tree kernel's 32.
+    #[cfg(feature = "candle-cuda")]
+    #[test]
+    fn a_flowing_tree_on_the_card_is_the_processors() {
+        let Ok(device) = Device::new_cuda(0) else {
+            eprintln!("SKIPPED: no card");
+            return;
+        };
+        let (on_cpu, on_card) = head_width_weights(&device);
+        assert!(on_card.delta_rule_runs_on_the_card_kernel());
+        let pool = Tensor::randn(0f32, 1.0, (1, 64, 256), &Device::Cpu).unwrap();
+        let mut want = Vec::new();
+        flowing_script(&on_cpu, &pool, &mut |shown| want.push(shown));
+        let mut got = Vec::new();
+        flowing_script(&on_card, &pool.to_device(&device).unwrap(), &mut |shown| {
+            got.push(shown)
+        });
+        assert_eq!(got.len(), want.len());
+        let close = |got: &Tensor, want: &Tensor, what: &str| {
+            let got = got.to_device(&Device::Cpu).unwrap();
+            let scale: f32 = want
+                .abs()
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .max(0)
+                .unwrap()
+                .to_scalar()
+                .unwrap();
+            let diff = max_abs_diff(&got, want);
+            assert!(
+                diff <= 1e-4 * scale.max(1.0),
+                "{what}: {diff} off (up to {scale})"
+            );
+        };
+        for (got, want) in got.iter().zip(&want) {
+            match (got, want) {
+                (FlowSeen::Row { out: g, .. }, FlowSeen::Row { what, out: w, .. }) => {
+                    close(g, w, what)
+                }
+                (FlowSeen::State { state: g, .. }, FlowSeen::State { what, state: w, .. }) => {
+                    close(&g.recurrent_state, &w.recurrent_state, what);
+                    close(&g.conv_state, &w.conv_state, what);
+                }
+                _ => panic!("the card and the processor showed different things"),
+            }
+        }
     }
 
     /// A tree check on a card (#437) — the convolution and the delta rule
