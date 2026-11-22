@@ -6344,7 +6344,8 @@ round costs one per check.
   goes a token a round: a failed flow's take-over cuts to the settled start, which every
   recurrent layer keeps, and reads the reply again as a chain. Prior art: vLLM, SGLang and
   llama.cpp verify a recurrent model's guesses one check at a time; none keeps checks in flight
-  (§ Prior art of the plan). A/B `SWARMLLM_RECURRENT_FLOW=0`.
+  (§ Prior art of the plan). Shipped OFF on the computer driving a reply until stage 5
+  measures it (`SWARMLLM_RECURRENT_FLOW=1` turns it on); every node reads the walk as a segment.
 - **A run that finishes HERE flows too, its rows drawn by this node's last layers** (#369,
   2026-10-29). "Start and finish on this computer" is automatic wherever this node holds both
   ends, and that shape ran tree rounds — 1.6-2.2x slower than the flow at the same split on TH↔AU.

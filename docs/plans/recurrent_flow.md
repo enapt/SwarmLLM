@@ -120,7 +120,7 @@ state a chain read of the reply would reach.
    tree; the trailer, the bit, the drafter's IPC. Wire → `security-reviewer`.
 4. **The coordinator**: the gates above; the drafter chosen (`engine_drafter::release_line` — Qwen3.5-0.8B for every
    `qwen35` target of the same vocabulary).
-5. **Measure, one binary, A/B by `SWARMLLM_RECURRENT_FLOW=0`**: first Qwen3.5-9B Q4_K_M split here ↔ AU (both
+5. **Measure, one binary, A/B by `SWARMLLM_RECURRENT_FLOW=1` / unset**: first Qwen3.5-9B Q4_K_M split here ↔ AU (both
    cards hold their share whole), the 0.8B drafting on this card, against the n-gram loop with the file's guess
    head. **Kill**: under 1.5× the one-check loop's tok/s on that link, or replies parting from the one-check loop's
    anywhere but at near ties. Then Qwen3.8-27B all-card (here + AU + US, `run_allcard_rig.sh`'s shares).
@@ -233,8 +233,9 @@ followers in the same tree read whole; red (checked) without the walk: the secon
 
 ## Stage 4 as built (2026-11-22): the coordinator
 
-- **The entry** (`distributed.rs`): the drafter's path (`try_dsd_distributed`) runs for a recurrent target too unless
-  `SWARMLLM_RECURRENT_FLOW=0`; the single-segment path stays closed. Before any token it asks
+- **The entry** (`distributed.rs`): the drafter's path (`try_dsd_distributed`) runs for a recurrent target too where
+  `SWARMLLM_RECURRENT_FLOW=1` — OFF by default on the computer driving a reply until stage 5 measures it (every node
+  reads the walk as a segment regardless, so peers need only the release); the single-segment path stays closed. Before any token it asks
   `dsd_flow::recurrent_flow_may_start` — the flow switch, `tree_check_possible`, a stream shape whose every peer
   advertises `RECURRENT_FLOW` beside `DRAFT_TREE_FLOW | DRAFT_TREES` (`flow_possible`'s new `with_the_walk`, from
   `dsd_flow::flows_with_the_walk`, the one answer), and the tree line (`trees_wanted`, the drafter taken on a card).

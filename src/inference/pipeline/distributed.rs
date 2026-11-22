@@ -64,7 +64,8 @@ impl PipelineExecutor {
         // (`docs/plans/recurrent_flow.md`): the drafter's paths run on it only
         // for that — `try_dsd_distributed` asks `dsd_flow::
         // recurrent_flow_may_start` before any token, A/B
-        // `SWARMLLM_RECURRENT_FLOW=0` — asked once, here, ahead of all three;
+        // `SWARMLLM_RECURRENT_FLOW=1` until it is measured — asked once, here,
+        // ahead of all three;
         // the n-gram loop asks `checks_can_be_taken_back` of the plan.
         let speculation_allowed = speculation_can_roll_back(
             self.shared_state

@@ -820,17 +820,21 @@ pub(super) fn flow_requested() -> bool {
     })
 }
 
-/// Whether a reply of a recurrent target may guess ahead in a tree that
-/// flows (`docs/plans/recurrent_flow.md`): ON unless `SWARMLLM_RECURRENT_FLOW=0`
-/// (or `off` / `false`), which keeps such a reply in the n-gram loop and no
-/// recurrent model drafting — the A/B inside one binary. Asked by
-/// `flow_possible` and `engine_drafter::could_draft`.
-pub(crate) fn recurrent_flow_on() -> bool {
+/// Whether a reply of a recurrent target driven from here may guess ahead in
+/// a tree that flows (`docs/plans/recurrent_flow.md`): OFF unless
+/// `SWARMLLM_RECURRENT_FLOW=1` (or `on` / `true`) until stage 5 measures it on
+/// a real link — the A/B inside one binary; off, such a reply stays in the
+/// n-gram loop. Only the computer DRIVING a reply asks: every node reads a
+/// flowing tree's walk as a segment (`features::RECURRENT_FLOW`) whatever
+/// this says. Asked where a reply is let in — the gate in `distributed.rs`
+/// and [`recurrent_flow_may_start`] — never by [`flow_possible`], which
+/// answers for the peers and the shape alone.
+pub(super) fn recurrent_flow_on() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| {
-        !matches!(
+        matches!(
             std::env::var("SWARMLLM_RECURRENT_FLOW").ok().as_deref(),
-            Some("0") | Some("off") | Some("false")
+            Some("1") | Some("on") | Some("true")
         )
     })
 }
@@ -986,8 +990,9 @@ fn cuts_below(next: &Here, waiting: &Here) -> bool {
 /// draw reads the same tree, as a chain's middle hop does), and the sampler
 /// reads no history — a draw per row reads no path's tokens. Where the tree
 /// goes with the walk's row ([`flows_with_the_walk`], REQUIRED: a recurrent
-/// target), every peer reads that too (`features::RECURRENT_FLOW`) and
-/// `SWARMLLM_RECURRENT_FLOW` is not off.
+/// target), every peer reads that too (`features::RECURRENT_FLOW`). Whether
+/// this computer lets such a reply flow at all is
+/// [`recurrent_flow_may_start`]'s.
 pub(super) fn flow_possible(
     state: &SharedState,
     shape: &StreamShape,
@@ -997,7 +1002,6 @@ pub(super) fn flow_possible(
     use swarmllm_types::node::features::{DRAFT_TREES, DRAFT_TREE_FLOW, RECURRENT_FLOW};
     let needs = DRAFT_TREE_FLOW | DRAFT_TREES | if with_the_walk { RECURRENT_FLOW } else { 0 };
     (shape.far_walks() || finish_here_on())
-        && (!with_the_walk || recurrent_flow_on())
         && !crate::inference::sampling::sampler_reads_history(sampling)
         && std::iter::once(&shape.far.node_id)
             .chain(shape.chain.iter().map(|h| &h.node_id))
@@ -1030,7 +1034,8 @@ pub(super) fn flows_with_the_walk(state: &SharedState, model: &crate::types::Mod
 
 /// May a reply of a RECURRENT target guess ahead with a drafter at all: only
 /// in a tree that flows, where its segments take back to the flow's starts
-/// (`docs/plans/recurrent_flow.md` stage 4) — the flow's own conditions
+/// (`docs/plans/recurrent_flow.md` stage 4) — the switch
+/// ([`recurrent_flow_on`]) and the flow's own conditions
 /// (`flow_possible` with the walk, trees checked by every segment, the tree
 /// line `dsd_tree::trees_wanted`), asked BEFORE any token by
 /// `try_dsd_distributed`, so a reply refused here still falls through to the
@@ -1041,7 +1046,8 @@ pub(super) fn recurrent_flow_may_start(exec: &PipelineExecutor) -> bool {
     use super::dsd_tree::FlowDraws;
     let state = &exec.shared_state;
     let segments = &exec.assignment.segments;
-    flow_requested()
+    recurrent_flow_on()
+        && flow_requested()
         && super::tree_check_possible(state, segments, swarmllm_types::node::features::DRAFT_TREES)
         && super::dsd_stream::stream_shape(state, segments, exec.verify_may_chain())
             .filter(|shape| flow_possible(state, shape, &exec.request.sampling_params, true))
