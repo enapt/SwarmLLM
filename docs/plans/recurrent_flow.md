@@ -261,6 +261,16 @@ followers in the same tree read whole; red (checked) without the walk: the secon
   `a_recurrent_targets_tree_flows_only_through_peers_that_read_the_walk` (every peer of the run, the middle hop too),
   `a_recurrent_drafter_is_chosen_only_to_grow_a_flow`. The path end to end — the walk accepted by every segment, the
   take-over on a recurrent target (`SWARMLLM_FAULT_FLOW_FAIL`) — is stage 5's first run, on a real link.
+- **First run, on this machine (2026-11-22)**: `split_rig.sh repeat`, Qwen3.5-4B Q4_K_M split over two nodes on this
+  card through a private 300 ms link (A: part 0 = layer 0 only, B: the rest and the head), Qwen3.5-0.8B drafting on A,
+  128-token greedy replies, one binary, arms `SWARMLLM_RECURRENT_FLOW=1` / `=0` / `=1` + `SWARMLLM_FAULT_FLOW_FAIL=6`.
+  It found a fault older than the flow: a segment with no attention layer measured its caches by attention layers
+  alone and read 0, so the first flowing forward was refused twice over (the worker's order check, then the tree's
+  position check) — fixed in all three readings (`kv_cache::positions_without_attention`, gotcha #1161). After it:
+  both flowing replies complete (40-45 forwards, one rebase, one miss each), every fault-arm reply is finished by the
+  take-over, and each reply is one the one-check loop itself writes (that loop's own repeats differ at near-ties on
+  the card, so byte-equality is no bar; the real-link run scores against llama.cpp). Not a speed figure — a repeated
+  prompt, the owner's earlier replies copied — but replies 2-3 took 9.5 / 6.3 s flowing against 25.0 / 13.1 s.
 
 ## Not in this plan
 

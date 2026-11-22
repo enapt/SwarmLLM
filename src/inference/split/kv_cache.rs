@@ -1313,6 +1313,21 @@ pub(crate) struct KvCacheEntry {
     pub(crate) last_accessed: std::time::Instant,
 }
 
+/// Where a request's caches stand in a segment with NO attention layer — a
+/// Qwen 3.5 run of recurrent layers only (attention is every fourth layer):
+/// the fewest positions any recurrent state describes (during a flow, its
+/// cache length, `FlowRows::positions`). The one fallback of every "how far
+/// do the caches reach" question — the store's count (`request_positions`,
+/// the worker's order checks), a forward's offset (its tree rows, its masks,
+/// where a failed step is put back) and a batched step's — each of which read
+/// attention layers alone and answered 0 for such a segment, so a split's
+/// first flowing forward was refused (gotcha #1161). A segment with an
+/// attention layer is counted by it, as before. llama.cpp's hybrid memory
+/// asks both kinds the same question (`llama_memory_hybrid::seq_pos_max`).
+pub(crate) fn positions_without_attention(states: &[Option<SsmState>]) -> Option<usize> {
+    states.iter().flatten().map(SsmState::positions).min()
+}
+
 /// Which memory a KV budget is drawn from (#262): a graphics card's, or the
 /// machine's. A card/processor split keeps the caches of its card-held layers
 /// on the card and the rest in host memory, and each is charged to its own
@@ -2213,13 +2228,17 @@ impl KvCacheStore {
         }
     }
 
+    /// The fewest positions any attention layer holds, else
+    /// [`positions_without_attention`].
     fn positions_of(entry: &KvCacheEntry) -> usize {
-        entry
+        let attention = entry
             .layers
             .iter()
             .flatten()
             .map(|kv| kv.current_seq_len())
-            .min()
+            .min();
+        attention
+            .or_else(|| positions_without_attention(&entry.ssm_states))
             .unwrap_or(0)
     }
 
@@ -3674,6 +3693,41 @@ mod tests {
 
         entry.ssm_states[1] = None;
         entry.truncate_to(5).unwrap();
+    }
+
+    /// A segment of recurrent layers only keeps no attention cache, and holds
+    /// as many positions as its states describe: a streamed check after its
+    /// prompt pass continues from there, not from 0. With an attention layer
+    /// beside them the count stays the attention layers'.
+    #[test]
+    fn a_segment_of_recurrent_layers_only_holds_what_its_states_describe() {
+        let dev = candle_core::Device::Cpu;
+        let slot = || crate::inference::layers::SsmSlot {
+            conv_state: Tensor::zeros((1, 4, 3), candle_core::DType::F32, &dev).unwrap(),
+            recurrent_state: Tensor::zeros((1, 2, 4, 4), candle_core::DType::F32, &dev).unwrap(),
+        };
+        let store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        let key = KvCacheStore::cache_key("m", "r");
+        {
+            let mut entry = store.get_or_create_keyed(&key, 2);
+            entry.layers = vec![None, None];
+            entry.ssm_states = vec![
+                Some(SsmState::new(slot(), 538)),
+                Some(SsmState::new(slot(), 538)),
+            ];
+        }
+        assert_eq!(store.request_positions("m", "r"), 538);
+        assert_eq!(store.positions_in_place("m", "r", 2), Some(538));
+        {
+            let mut entry = store.get_or_create_keyed(&key, 2);
+            entry.layers = vec![None, Some(filled(&dev, 8))];
+            entry.ssm_states = vec![Some(SsmState::new(slot(), 538)), None];
+        }
+        assert_eq!(
+            store.request_positions("m", "r"),
+            8,
+            "an attention layer decides"
+        );
     }
 
     /// A captured step allocates nothing, so a recurrent layer holds only once

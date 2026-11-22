@@ -8951,6 +8951,21 @@ system cuts a model into numbered parts, so the rule is our own, built on #398's
 **Measured.** See FUTURE_WORK § Closed #408 for the tests red with the old reading and the live
 check on the 27B.
 
+## A segment of recurrent layers only stands where its states do (2026-11-22, gotcha #1161)
+
+Qwen 3.5 puts an attention layer every fourth layer, so a segment of one to three layers can hold recurrent layers
+only. Three readings of "how far do this request's caches reach" asked attention layers alone and answered 0 for such
+a segment: the store's count (`KvCacheStore::request_positions` → the worker's order checks on a streamed check and a
+later prompt piece), a forward's offset (`executor`: the tree rows' positions, the masks, where a failed step is put
+back) and a batched step's put-back offsets. Found by the recurrent flow's first mechanism run (`split_rig.sh
+repeat`, the first segment holding layer 0 alone): every flowing reply wrote one word, then "holds 0 positions … the
+stream arrived out of order", and after that fix "a tree from position 538 read after only 0 cached positions". All
+three now fall back to **`split::kv_cache::positions_without_attention`** (the fewest positions any recurrent state
+describes; in a flow its cache length, `FlowRows::positions`). A segment with an attention layer counts as before.
+Prior art: llama.cpp's `llama_memory_hybrid::seq_pos_max` asks both its attention and recurrent memory. Test
+`a_segment_of_recurrent_layers_only_holds_what_its_states_describe` (0 against 538 without it); the forward's offset is
+checked end to end by the rig (the flow completes on a one-layer first segment).
+
 ## Single-source-of-truth helpers — Inference kernels, caches and the tokenizer
 
 Each names the ONE place a decision is made. A second implementation of any of

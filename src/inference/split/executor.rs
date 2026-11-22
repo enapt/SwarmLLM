@@ -2100,10 +2100,13 @@ impl SplitModel {
         // through to `kv_offset = 0`, leaving subsequent attention layers
         // with a square `(seq_len × seq_len)` mask instead of the offset
         // mask required for the populated KV.
+        // A segment with no attention layer at all stands where its recurrent
+        // states do (`positions_without_attention`, gotcha #1161).
         let kv_offset = layer_kv_caches
             .iter()
             .find_map(|c| c.as_ref())
             .map(|c| c.current_seq_len())
+            .or_else(|| super::kv_cache::positions_without_attention(&layer_ssm_states))
             .unwrap_or(0);
 
         // The pictures in this forward whose rows attend both ways (#115
@@ -3109,10 +3112,12 @@ impl SplitModel {
         // path's `kv_offset`, per item: a failed step puts them back there.
         let kv_offsets: Vec<usize> = all_kv_caches
             .iter()
-            .map(|slot| {
+            .zip(&all_ssm_states)
+            .map(|(slot, states)| {
                 slot.iter()
                     .find_map(|c| c.as_ref())
                     .map(|c| c.current_seq_len())
+                    .or_else(|| super::kv_cache::positions_without_attention(states))
                     .unwrap_or(0)
             })
             .collect();
