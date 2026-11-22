@@ -8180,12 +8180,35 @@ holder's own record), `part_has_a_holder_where` does not count it, and `age_out_
 it when stale whoever it names — a connected holder announces its parts itself, on connecting
 (#359) and at every full re-announce. It refreshes only a record the DHT alone vouches for: a
 holder's own record is kept fresh by its own announcements, and a provider record outlives the
-fact by hours. It is still a place to ask (`shard_holders`), which is what a lookup is for: the
-router fires one per split (`dht_query_tx`) and takes only connected holders anyway (gotcha #83).
-The holder's own claim on such a record confirms it and counts as a new holder. Left for #177: the
-records still count as copies wherever `shard_holders` is counted (prune's `would_shed_copy`, a
-hole, the rebalancer), and prune's redundancy reads the DHT's uncapped count
-(`global_holder_count`, one answer's `providers.len()`).
+fact by hours. It is still a place to ask (`places_to_ask`), which is what a lookup is for. The
+holder's own claim on such a record confirms it and counts as a new holder.
+
+**And no count of copies reads it** (2026-11-22, #177's second half). #341 kept the rule in one
+predicate (`part_has_a_holder_where`) while `shard_holders`, the accessor ~60 sites read, still
+returned DHT-only records — so they counted as copies in prune's keep-or-give-back
+(`live_holders_with_us`, a cooled model's two kept copies), carrying, holes, scoring and the
+planner. Seen the same day, cause unconfirmed (the holder's log is out of reach): Qwen3.6-35B-A3B's
+only whole copy, on the computer in Australia, was given back unused, and parts 10-39 were then
+held by no connected computer ("No reachable node holds layers 10-39", 11 of 41 parts reachable).
+A provider record outlives its part by hours, and `retracted_claims` (gotcha #364) only blocks a
+withdrawal this node HEARD. Now `shard_holders` returns holders on their own word
+(`first_hand`), and `places_to_ask` — every holder record — serves only the five places a download
+looks for a source (`trigger_download`, `handle_acquire`, the dashboard's `download_shard`,
+`retry_shard_or_fallback`, `ask_again_after_busy`). The planner plans only through holders on their
+own word: a connected holder announces its parts on connecting (#359), and the router's DHT wait
+(`assemble_awaiting_dht`) still gives such an announcement 1.5 s to land. `global_holder_count`
+(one answer's uncapped `providers.len()`, a ranking input of prune's score) is believed only where
+`shard_holders` counted to `MAX_HOLDERS_PER_SHARD`. The readers that start from the HOLDER read the same way
+(`parts_on_its_word`: the reverse index `node_shards` lists the DHT's records too) — `parts_credited_to`, whose two
+parts let a computer use the swarm (`swarm_use`; a `GetProviders` answer naming a freeloader for two parts bought it
+that), `holds_part_of` (the use rule's "served by a connected holder", a pool member's hand-off) and `models_held_by`
+— and the HuggingFace search's replica count walks the raw map through `holder_on_its_word`. An independent review
+(sonnet, 2026-11-22) found those four after the accessor was fixed. Prior art: BitTorrent counts a piece's
+availability from each peer's own bitfield and HAVE messages; its DHT only names peers to connect
+to. A/B `SWARMLLM_HOLDERS_ON_THEIR_WORD=0` (both readers). Tests
+`a_dht_record_naming_a_connected_peer_is_not_counted_as_a_copy`,
+`global_holder_count_is_believed_only_past_the_cap`, `a_part_the_dht_alone_names_a_peer_for_is_not_credited_to_it`,
+each red under the switch.
 
 **Tests** (`model::registry`, `daemon::state::peer_models`), each red with its safeguard
 switched off (14 switches, 2026-10-25):

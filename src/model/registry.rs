@@ -1507,7 +1507,44 @@ impl ModelRegistry {
     /// This is the single read accessor for the holder map — every consumer in
     /// the tree goes through it — which is why the filter lives here rather
     /// than at the ~60 call sites.
+    ///
+    /// **And only holders on their OWN word** (#341's rule, kept at the
+    /// accessor since 2026-11-22): a DHT provider record
+    /// (`HolderRecord::first_hand == false`) names a place to ASK, never a
+    /// copy. #341 stopped counting it in [`Self::part_has_a_holder_where`]
+    /// only; read through here it was still a copy to every other count —
+    /// prune's keep-or-give-back and a cooled model's last copies
+    /// (`live_holders_with_us`), carrying, scoring, rarity, model trust. A
+    /// provider record outlives its part by hours; #364's retraction memory
+    /// blocks the ones whose withdrawal this node HEARD, not a holder that
+    /// withdrew before it connected or a node the DHT names that never held
+    /// the part, so a computer could give back what it took for a third copy.
+    /// Seen 2026-11-22, cause unconfirmed (the holder's log is out of reach):
+    /// Qwen3.6-35B-A3B's only whole copy was given back unused, and parts
+    /// 10-39 were then held by no connected computer. BitTorrent counts a
+    /// piece's copies from each peer's own bitfield; the DHT only names peers
+    /// to connect to. A download looking for a source asks
+    /// [`Self::places_to_ask`]. A/B `SWARMLLM_HOLDERS_ON_THEIR_WORD=0` counts
+    /// the DHT's records too.
     pub fn shard_holders(&self, shard_id: &ShardId) -> Vec<NodeId> {
+        let on_their_word = Self::holders_on_their_word();
+        self.holders_where(shard_id, |rec| rec.first_hand || !on_their_word)
+    }
+
+    /// Every node a part may be ASKED of: the holders on their own word and
+    /// the nodes a DHT provider record names (#341) — for a download looking
+    /// for a source, never a count of copies ([`Self::shard_holders`]).
+    pub fn places_to_ask(&self, shard_id: &ShardId) -> Vec<NodeId> {
+        self.holders_where(shard_id, |_| true)
+    }
+
+    /// The holders of `shard_id`, of a build that does not conflict with
+    /// ours, whose record `keep` accepts.
+    fn holders_where(
+        &self,
+        shard_id: &ShardId,
+        keep: impl Fn(&HolderRecord) -> bool,
+    ) -> Vec<NodeId> {
         let expected = if Self::build_filter_enabled() {
             self.expected_build_tag(shard_id)
         } else {
@@ -1518,10 +1555,22 @@ impl ModelRegistry {
             .map(|v| {
                 v.iter()
                     .filter(|(_, rec)| !swarmllm_types::build_tags_conflict(expected, rec.build))
+                    .filter(|(_, rec)| keep(rec))
                     .map(|(node, _)| node.clone())
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// `SWARMLLM_HOLDERS_ON_THEIR_WORD=0` counts a DHT provider record as a
+    /// holder in [`Self::shard_holders`] — the reading before 2026-11-22, for
+    /// an A/B inside one binary. Read once.
+    fn holders_on_their_word() -> bool {
+        use std::sync::OnceLock;
+        static ON: OnceLock<bool> = OnceLock::new();
+        *ON.get_or_init(|| {
+            std::env::var("SWARMLLM_HOLDERS_ON_THEIR_WORD").map_or(true, |v| v.trim() != "0")
+        })
     }
 
     /// Can the swarm, between its computers, run this model right now — does
@@ -1642,8 +1691,18 @@ impl ModelRegistry {
     /// DHT-reported count if any query has resolved, else `None` — caller
     /// should fall back to the cached `shard_holders().len()` for the local
     /// view.
+    ///
+    /// **Believed only where this node's own count is full** (2026-11-22,
+    /// #177): the figure is one `GetProviders` answer's `providers.len()`,
+    /// which the answering node chooses, and a provider record outlives its
+    /// part by hours. It is needed only where [`Self::shard_holders`] — the
+    /// holders on their own word — stopped counting at
+    /// `MAX_HOLDERS_PER_SHARD`; below that it is `None` and the caller counts
+    /// those. A/B `SWARMLLM_HOLDERS_ON_THEIR_WORD=0` believes it always.
     pub fn global_holder_count(&self, shard_id: &ShardId) -> Option<u32> {
-        self.global_holder_count.get(shard_id).map(|v| *v)
+        let reported = self.global_holder_count.get(shard_id).map(|v| *v)?;
+        let counted_to_the_cap = self.shard_holders(shard_id).len() >= MAX_HOLDERS_PER_SHARD;
+        (counted_to_the_cap || !Self::holders_on_their_word()).then_some(reported)
     }
 
     /// Get a model manifest by ID.
@@ -2100,15 +2159,47 @@ impl ModelRegistry {
         removed
     }
 
-    /// How many parts the registry credits to `node_id`, without copying the
-    /// set — this node's own count for `SharedState::swarm_use_here`, and a
-    /// peer's wherever its parts are counted (#91 (2j): its capability
-    /// carries none).
+    /// How many parts the registry credits to `node_id` on its own word
+    /// ([`Self::parts_on_its_word`]) — this node's own count for
+    /// `SharedState::swarm_use_here`, and a peer's wherever its parts are
+    /// counted (#91 (2j): its capability carries none), "shares nothing" above
+    /// all: a part the DHT alone names it for never buys it the swarm.
     pub fn parts_credited_to(&self, node_id: &NodeId) -> usize {
-        self.node_shards.get(node_id).map_or(0, |s| s.len())
+        self.parts_on_its_word(node_id).len()
     }
 
-    /// Get all shards held by a specific node (via reverse index).
+    /// The parts `node_id` holds on its OWN word (#177, 2026-11-22): the
+    /// reverse index also lists every part a DHT provider record names it for
+    /// (`merge_dht_providers` writes both maps), which no count of what a
+    /// holder holds may credit — [`Self::shard_holders`]'s rule, for the
+    /// readers that start from the holder. The index is copied before the
+    /// forward map is read: writers take `shard_holders` then `node_shards`,
+    /// and a reader holding the reverse guard while it asked the forward map
+    /// could deadlock against one. A/B `SWARMLLM_HOLDERS_ON_THEIR_WORD=0`.
+    fn parts_on_its_word(&self, node_id: &NodeId) -> Vec<ShardId> {
+        self.shards_for_node(node_id)
+            .into_iter()
+            .filter(|part| self.holder_on_its_word(part, node_id))
+            .collect()
+    }
+
+    /// Whether this node has `node_id`'s OWN word that it holds `shard_id`
+    /// (any build) — never a DHT provider record alone (#177). For a reader
+    /// that walks the raw map ([`Self::all_shard_entries`]) and still counts
+    /// copies. Any record passes under `SWARMLLM_HOLDERS_ON_THEIR_WORD=0`.
+    pub fn holder_on_its_word(&self, shard_id: &ShardId, node_id: &NodeId) -> bool {
+        let on_their_word = Self::holders_on_their_word();
+        self.shard_holders.get(shard_id).is_some_and(|holders| {
+            holders
+                .get(node_id)
+                .is_some_and(|rec| rec.first_hand || !on_their_word)
+        })
+    }
+
+    /// Every part the reverse index lists for `node_id` — the DHT's records
+    /// included, so it is for THIS node's own parts (always on its own word)
+    /// and the index's upkeep; a peer's holding is
+    /// [`Self::parts_credited_to`] / [`Self::holds_part_of`].
     pub fn shards_for_node(&self, node_id: &NodeId) -> Vec<ShardId> {
         self.node_shards
             .get(node_id)
@@ -2120,21 +2211,22 @@ impl ModelRegistry {
     /// (`ShardAnnounce`) and finished downloads recorded — every upload, as
     /// its capability's own parts list said until #91 (2j). A connected peer
     /// sends its list beside its capability on every connection (#359), so
-    /// this is as fresh as the capability was. Copies nothing.
+    /// this is as fresh as the capability was. Only parts on its own word
+    /// ([`Self::parts_on_its_word`]).
     pub fn holds_part_of(&self, node_id: &NodeId, model_id: &ModelId) -> bool {
-        self.node_shards
-            .get(node_id)
-            .is_some_and(|parts| parts.iter().any(|p| &p.model_id == model_id))
+        self.parts_on_its_word(node_id)
+            .iter()
+            .any(|p| &p.model_id == model_id)
     }
 
     /// The models `node_id` holds a part of ([`Self::holds_part_of`]), sorted
     /// by id, each once.
     pub fn models_held_by(&self, node_id: &NodeId) -> Vec<ModelId> {
         let mut models: Vec<ModelId> = self
-            .node_shards
-            .get(node_id)
-            .map(|parts| parts.iter().map(|p| p.model_id.clone()).collect())
-            .unwrap_or_default();
+            .parts_on_its_word(node_id)
+            .into_iter()
+            .map(|p| p.model_id)
+            .collect();
         models.sort_unstable_by(|a, b| a.0.cmp(&b.0));
         models.dedup();
         models
@@ -4170,8 +4262,12 @@ mod tests {
         assert_eq!(registry.age_out_holders(), 0);
     }
 
+    /// The DHT's uncapped count stands in only where this node's own count
+    /// stopped at the cap (#177, 2026-11-22): below it, one answer's
+    /// `providers.len()` — the answering node's choice, and hours stale —
+    /// would make a part look copied enough for prune to shed first.
     #[test]
-    fn global_holder_count_overrides_local_cap() {
+    fn global_holder_count_is_believed_only_past_the_cap() {
         let registry = ModelRegistry::new();
         let shard_id = ShardId {
             model_id: ModelId("test".into()),
@@ -4181,16 +4277,22 @@ mod tests {
         // No DHT data yet — global_holder_count returns None.
         assert!(registry.global_holder_count(&shard_id).is_none());
 
-        // Cache has 3 holders, DHT reports 247 — the uncapped figure wins
-        // for redundancy_ratio purposes.
-        for i in 1u8..=3 {
-            let mut bytes = [0u8; 32];
-            bytes[0] = i;
-            registry.record_shard_holder(shard_id.clone(), NodeId(bytes));
+        // 3 holders on their own word, the DHT reports 247: the 3 are counted.
+        for i in 1..=3 {
+            registry.record_shard_holder(shard_id.clone(), key(i));
         }
         registry.record_global_holder_count(shard_id.clone(), 247);
-
         assert_eq!(registry.shard_holders(&shard_id).len(), 3);
+        assert_eq!(registry.global_holder_count(&shard_id), None);
+
+        // Counted to the cap: the uncapped figure wins for redundancy_ratio.
+        for i in 4..=MAX_HOLDERS_PER_SHARD as u32 {
+            registry.record_shard_holder(shard_id.clone(), key(i));
+        }
+        assert_eq!(
+            registry.shard_holders(&shard_id).len(),
+            MAX_HOLDERS_PER_SHARD
+        );
         assert_eq!(registry.global_holder_count(&shard_id), Some(247));
 
         // remove_all_model_shards must drop the global entry too — a future
@@ -4279,8 +4381,12 @@ mod tests {
 
         registry.merge_dht_providers(&part, std::slice::from_ref(&peer));
         assert!(
-            registry.shard_holders(&part).contains(&peer),
+            registry.places_to_ask(&part).contains(&peer),
             "a place to ask"
+        );
+        assert!(
+            !registry.shard_holders(&part).contains(&peer),
+            "the DHT's word counted as a copy"
         );
         assert!(
             !registry.part_has_a_holder_where(&part, |_| true),
@@ -4315,6 +4421,61 @@ mod tests {
         assert!(registry.shards_for_node(&far).is_empty());
     }
 
+    /// **A copy is counted on its holder's own word, never the DHT's**
+    /// (2026-11-22): every count of copies reads `shard_holders` — prune's
+    /// keep-or-give-back above all — and a provider record outlives the part
+    /// it names by hours. Two connected peers the DHT alone says hold a part
+    /// this node holds whole: this node's copy is the only one counted, and
+    /// both stay places to ask a download of.
+    #[test]
+    fn a_dht_record_naming_a_connected_peer_is_not_counted_as_a_copy() {
+        let local = key(0);
+        let (a, b) = (key(1), key(2));
+        let registry = connected_to(&local, [(a.clone(), 1), (b.clone(), 2)]);
+        let part = part0();
+        registry.record_shard_holder(part.clone(), local.clone());
+        registry.merge_dht_providers(&part, &[a.clone(), b.clone()]);
+
+        assert_eq!(registry.shard_holders(&part), vec![local.clone()]);
+        let ask: HashSet<NodeId> = registry.places_to_ask(&part).into_iter().collect();
+        assert_eq!(ask, HashSet::from([local, a.clone(), b]));
+        assert!(registry.record_shard_holder(part.clone(), a.clone()));
+        assert!(
+            registry.shard_holders(&part).contains(&a),
+            "its own word makes it a copy"
+        );
+    }
+
+    /// ... and nothing that starts from the HOLDER credits it either: the
+    /// reverse index lists the DHT's records too, and "shares nothing"
+    /// (`swarm_use`, two parts) counts `parts_credited_to` — a GetProviders
+    /// answer naming a peer for two parts must not buy it the swarm.
+    #[test]
+    fn a_part_the_dht_alone_names_a_peer_for_is_not_credited_to_it() {
+        let local = key(0);
+        let peer = key(1);
+        let registry = connected_to(&local, [(peer.clone(), 1)]);
+        let (a, b) = (
+            part0(),
+            ShardId {
+                index: 1,
+                ..part0()
+            },
+        );
+        registry.merge_dht_providers(&a, std::slice::from_ref(&peer));
+        registry.merge_dht_providers(&b, std::slice::from_ref(&peer));
+
+        assert_eq!(registry.parts_credited_to(&peer), 0);
+        assert!(!registry.holds_part_of(&peer, &a.model_id));
+        assert!(registry.models_held_by(&peer).is_empty());
+        assert_eq!(registry.shards_for_node(&peer).len(), 2, "still indexed");
+
+        registry.record_shard_holder(a.clone(), peer.clone());
+        assert_eq!(registry.parts_credited_to(&peer), 1, "its own word counts");
+        assert!(registry.holds_part_of(&peer, &a.model_id));
+        assert_eq!(registry.models_held_by(&peer), vec![a.model_id.clone()]);
+    }
+
     /// #341 on a full list: a DHT record naming a connected peer was that
     /// peer's connected claim, and took a fresh stranger's place.
     #[test]
@@ -4324,10 +4485,10 @@ mod tests {
         let registry = connected_to(&local, [(peer.clone(), 999)]);
         let part = part0();
         fill(&registry, &part, &local);
-        let before: HashSet<NodeId> = registry.shard_holders(&part).into_iter().collect();
+        let before: HashSet<NodeId> = registry.places_to_ask(&part).into_iter().collect();
 
         registry.merge_dht_providers(&part, std::slice::from_ref(&peer));
-        let after: HashSet<NodeId> = registry.shard_holders(&part).into_iter().collect();
+        let after: HashSet<NodeId> = registry.places_to_ask(&part).into_iter().collect();
         assert_eq!(after, before, "the DHT's word took a holder's place");
         assert!(
             registry.record_shard_holder(part.clone(), peer),
@@ -4359,7 +4520,7 @@ mod tests {
         // Every holder connected, each its own network: "the newest goes"
         // would give up key(49); the DHT's record goes instead.
         assert!(registry.record_shard_holder(part.clone(), key(55)));
-        let after: HashSet<NodeId> = registry.shard_holders(&part).into_iter().collect();
+        let after: HashSet<NodeId> = registry.places_to_ask(&part).into_iter().collect();
         assert!(!after.contains(&key(1)), "the DHT-only record was given up");
         assert!((2..MAX_HOLDERS_PER_SHARD as u32).all(|i| after.contains(&key(i))));
         assert!(after.contains(&key(55)));

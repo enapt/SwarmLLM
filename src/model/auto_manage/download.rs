@@ -925,7 +925,7 @@ impl AutoShardManager {
             // Private mode and the self-exclusion both live in
             // `select_best_allowed_peer` now, so this path and the retry that
             // follows a failure cannot disagree about who is in scope.
-            let holders = self.shared_state.model_registry.shard_holders(&sid);
+            let holders = self.shared_state.model_registry.places_to_ask(&sid);
             let Some(target) = self.shared_state.select_best_allowed_peer(&holders) else {
                 tracing::debug!(
                     model = %candidate.model_id,

@@ -187,8 +187,9 @@ impl ShardRebalancer {
             // peer left — is exactly what it misses.
             //
             // The filtered list is what goes into the result too: the caller
-            // uses it to pick somewhere to fetch from, and a conflicting build
-            // is not somewhere to fetch from.
+            // re-announces a part this node holds and counts the rest for the
+            // download pass, and neither a conflicting build nor a holder the
+            // DHT alone names is a copy (#177).
             let holders = self.shared_state.model_registry.shard_holders(&shard_id);
             if holders.len() < MIN_REPLICATION {
                 result.push((shard_id, holders));

@@ -234,7 +234,7 @@ impl NetworkManager {
             let other_holders: Vec<_> = self
                 .shared_state
                 .model_registry
-                .shard_holders(&shard_id)
+                .places_to_ask(&shard_id)
                 .into_iter()
                 .filter(|n| match &failed_nid {
                     Some(fp) => n != fp,
@@ -470,7 +470,7 @@ impl NetworkManager {
         }
         let ask = next_ask(
             busy,
-            &self.shared_state.model_registry.shard_holders(&shard_id),
+            &self.shared_state.model_registry.places_to_ask(&shard_id),
             now,
         );
         // The holder answered, so the transfer is alive: the permit sweep

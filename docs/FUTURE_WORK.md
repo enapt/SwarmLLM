@@ -2668,23 +2668,17 @@ only when the warning is about to fire; never feed the result to `try_activate_r
 doing with pool onboarding (`pool::invite::any_internet_reachable` inspects addresses rather
 than testing them).
 
-#### #177 — Gossip has no peer scoring, and DHT provider records are never challenged
-`P3` · security · **OPEN** — 2026-07-29 · absorbs archive § "Audit deferral — R128 sweep-log triage" (its architectural deferrals); history: archive § "Gossip has no peer scoring"
+#### #177 — Gossip has no peer scoring
+`P3` · security · **OPEN** — 2026-07-29 · absorbs archive § "Audit deferral — R128 sweep-log triage" (its architectural deferrals); history: archive § "Gossip has no peer scoring"; second half (DHT records counted as copies) closed 2026-11-22
 
 Strict signing, a 4 MiB cap, a freshness filter and bounded `foreign_*` maps exist, but a peer
 flooding valid signed messages is never penalised or pruned (no `PeerScoreParams` anywhere).
 Enable gossipsub peer scoring only after deriving parameters from measured delivery times on
 a real multi-node swarm, with permissive thresholds and a per-peer score metric so a wrongly
-penalised slow or CGNAT peer is visible — the risk is the mesh partitioning itself. Second
-half: DHT provider records are add-only and can outlive the fact by up to their 12 h TTL (see #49); a
-capability challenge before trusting one would address it. No incident is known. Since #341 a
-DHT-named holder has no standing (not counted by `holder_counts`, a stranger on a full list,
-aged out), but it still counts as a COPY wherever `shard_holders` is counted — prune's
-`would_shed_copy`, a hole (`scoring::fills_a_hole`), the rebalancer — and prune's redundancy reads
-the DHT's uncapped count (`global_holder_count`: one `GetProviders` answer's `providers.len()`, which
-the answering node chooses). A node near a key could make a part look copied enough to shed, or a
-hole look filled. Next: count copies from first-hand records only (`HolderRecord::first_hand`),
-keeping DHT records as places to ask, and bound the uncapped count by what was verified.
+penalised slow or CGNAT peer is visible — the risk is the mesh partitioning itself. The second
+half — a DHT provider record counted as a COPY wherever `shard_holders` was counted, and prune's
+redundancy reading the DHT's uncapped count — is closed (§ "Closed", 2026-11-22): copies are
+counted on their holders' own word, the DHT's records are only places to ask.
 
 #### #315 — Two key exchanges in flight to one peer: the first answer meets the second secret
 `P4` · crypto · **OPEN** — 2026-10-20 · history: #304's security review (LOW, pre-existing)
@@ -8316,6 +8310,20 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-11-22** (#177's second half)
+- #177 (second half) — `P3` — **A DHT provider record counted as a copy of a part.** #341 kept the rule ("the DHT's
+  word, never the holder's") in `part_has_a_holder_where` alone; `shard_holders`, which every count of copies reads,
+  still returned DHT-only records, so prune's keep-or-give-back, a cooled model's two kept copies, carrying, holes,
+  scoring and the planner counted a record that outlives its part by hours. Seen 2026-11-22, cause unconfirmed:
+  Qwen3.6-35B-A3B's only whole copy (Australia) was given back unused and parts 10-39 were then held by no connected
+  computer. Now `shard_holders` returns holders on their own word, `places_to_ask` serves the five places a download
+  looks for a source, `global_holder_count` is believed only past `MAX_HOLDERS_PER_SHARD`, and the readers that start
+  from the holder (`parts_credited_to` — the two parts "shares nothing" asks for —, `holds_part_of`, `models_held_by`)
+  and the search's replica count credit only records on the holder's own word. Prior art: BitTorrent
+  counts availability from each peer's own bitfield; its DHT only names peers. A/B `SWARMLLM_HOLDERS_ON_THEIR_WORD=0`.
+  Tests `a_dht_record_naming_a_connected_peer_is_not_counted_as_a_copy`,
+  `global_holder_count_is_believed_only_past_the_cap`, `a_part_the_dht_alone_names_a_peer_for_is_not_credited_to_it`.
 
 **Closed 2026-11-21, released in v0.3.305** (#439, #297)
 - #439 — `P3` — **The relay hint said "turn on UPnP" where a router found late refused the ports.** Fixed as the entry

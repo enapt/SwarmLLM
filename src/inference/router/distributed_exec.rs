@@ -395,8 +395,11 @@ pub(super) async fn execute_distributed_batch(
 const DHT_ASSEMBLY_GRACE: std::time::Duration = std::time::Duration::from_millis(1500);
 const DHT_ASSEMBLY_POLL: std::time::Duration = std::time::Duration::from_millis(250);
 
-/// Assemble a pipeline, giving in-flight DHT provider results a brief chance to
-/// land if the first attempt finds no holder.
+/// Assemble a pipeline, giving holders' own announcements a brief chance to
+/// land if the first attempt finds no holder — a peer that has just connected
+/// sends its parts list straight after its capability (#359). A DHT provider
+/// record is never one of them: it names a place to ask a download of, never
+/// a holder a plan may send work to (`ModelRegistry::shard_holders`, #177).
 ///
 /// Only retries the "nothing known to serve this" case. Any other scheduling
 /// error is returned immediately — waiting would add latency without changing
@@ -840,9 +843,10 @@ pub(super) async fn execute_request(
         }
     }
 
-    // S5: Fire-and-forget DHT provider query to pre-warm the shard holder cache.
-    // Results arrive asynchronously and are merged into model_registry by NetworkManager.
-    // First request for a model may miss the cache, but subsequent ones benefit.
+    // S5: Fire-and-forget DHT provider query. Results arrive asynchronously and
+    // are merged into model_registry by NetworkManager as places to ASK — what a
+    // download of a missing part looks for — and the swarm-wide count prune
+    // reads past the holder list's cap; never a holder a plan sends work to (#177).
     let _ = shared_state.dht_query_tx.try_send(model_id.clone());
 
     // The trace goes into `active_traces` BEFORE the scheduler runs, because

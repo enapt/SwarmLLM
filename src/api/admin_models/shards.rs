@@ -423,7 +423,7 @@ pub async fn download_shard(
     // drops the local node and anything outside the pool when private mode is
     // on, so this button cannot reach a stranger the auto-manage scorer would
     // have refused; `None` falls through to the HuggingFace path below.
-    let holders = shared.model_registry.shard_holders(&shard_id);
+    let holders = shared.model_registry.places_to_ask(&shard_id);
 
     if let Some(target) = shared.select_best_allowed_peer(&holders) {
         let peer_id_bytes = shared

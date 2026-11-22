@@ -32,11 +32,15 @@ pub(super) fn count_unique_shard_holders(
     registry: &crate::model::registry::ModelRegistry,
     model_ids: &[crate::types::ModelId],
 ) -> usize {
+    // Every build, but only holders on their own word: a DHT provider record
+    // names a place to ask, never a copy (#177, 2026-11-22).
     let mut unique = std::collections::HashSet::new();
     for (shard_id, holders) in registry.all_shard_entries() {
         if model_ids.contains(&shard_id.model_id) {
-            for h in &holders {
-                unique.insert(h.clone());
+            for h in holders {
+                if registry.holder_on_its_word(&shard_id, &h) {
+                    unique.insert(h);
+                }
             }
         }
     }

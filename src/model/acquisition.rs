@@ -609,7 +609,7 @@ impl AcquisitionManager {
 
             for attempt in 0..3u32 {
                 // Find peers that hold this shard, excluding previously failed ones
-                let holders = self.shared_state.model_registry.shard_holders(shard_id);
+                let holders = self.shared_state.model_registry.places_to_ask(shard_id);
                 let eligible: Vec<_> = holders
                     .iter()
                     .filter(|h| !failed_peers.contains(h))
