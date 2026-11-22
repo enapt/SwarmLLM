@@ -15,11 +15,11 @@ mod engine_drafter;
 pub(crate) mod handoff_prompt_cache;
 #[cfg(test)]
 pub(crate) use engine_drafter::note_split_wanting_a_drafter;
-#[cfg(test)]
-pub(crate) use engine_drafter::DrafterStep;
 pub(crate) use engine_drafter::{
     drafter_to_acquire, drafter_to_leave_room_for, DrafterToAcquire, DRAFTER_WANTED_FOR,
 };
+#[cfg(test)]
+pub(crate) use engine_drafter::{plant_vocabulary_match, DrafterStep};
 mod local;
 pub(crate) use local::LoadAllowance;
 mod local_generate;

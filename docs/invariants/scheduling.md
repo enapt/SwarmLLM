@@ -6325,7 +6325,10 @@ round costs one per check.
   are checked from the start (`dsd_tree::trees_wanted`).
 - **A failed flow finishes in tree rounds** where the peers answered (`rounds_may_finish`:
   `Validation`, `Inference`, `Internal` — a stale reading of a peer's features, a refusal, a
-  fault of the flow's own): every forward still out is answered first, every segment is cut back
+  fault of the flow's own — and, since 2026-11-22, `ServiceUnavailable` /
+  `LocalMemoryUnavailable`: a card too full for the flow's tree rows still holds a round's, and
+  stage 5's 9B failed whole replies, three continuations each, when a peer with 301 MB for
+  conversations refused its seventh flowing forward): every forward still out is answered first, every segment is cut back
   to the last start they ANSWERED at and the reply past it is read again in front of the next
   check (`rounds_take_over` → `TreeRounds::reread`, a kept path's own rule), and the drafter
   follows the reply (`EngineDrafter::follow`). ⚠ Past the tree's start a cache holds rows in the

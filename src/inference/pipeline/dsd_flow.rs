@@ -754,10 +754,26 @@ fn fault_draft_delay() -> Option<std::time::Duration> {
 /// security review's case) or answered one this node could not use — so a
 /// round still reaches them. A peer gone silent or out of reach is the
 /// router's to re-plan, never waited on twice.
+///
+/// **A refusal for memory is answered by the rounds too** (`ServiceUnavailable`
+/// — what a peer's `LocalMemoryUnavailable` reads as here, its type flattened
+/// on the wire — and this node's own): a flowing forward claims room for the
+/// tree's rows on top of the reply's cache (`SsmState::bytes_a_flowing_forward_may_add`),
+/// and a round claims none of it, so a card the flow found too full still
+/// finishes the reply a token a round. Stage 5 (2026-11-22): a peer's card
+/// with 301 MB for conversations refused the 9B's flow at its seventh forward
+/// and the whole reply failed, three times over as the router continued it.
+/// Prior art: vLLM's scheduler answers a KV shortage by preempting and
+/// recomputing a sequence, SGLang by retracting a decode — neither fails the
+/// request; here the speculative rows are what gives way.
 pub(super) fn rounds_may_finish(e: &SwarmError) -> bool {
     matches!(
         e,
-        SwarmError::Validation(_) | SwarmError::Inference(_) | SwarmError::Internal(_)
+        SwarmError::Validation(_)
+            | SwarmError::Inference(_)
+            | SwarmError::Internal(_)
+            | SwarmError::ServiceUnavailable(_)
+            | SwarmError::LocalMemoryUnavailable(_)
     )
 }
 
@@ -821,20 +837,22 @@ pub(super) fn flow_requested() -> bool {
 }
 
 /// Whether a reply of a recurrent target driven from here may guess ahead in
-/// a tree that flows (`docs/plans/recurrent_flow.md`): OFF unless
-/// `SWARMLLM_RECURRENT_FLOW=1` (or `on` / `true`) until stage 5 measures it on
-/// a real link — the A/B inside one binary; off, such a reply stays in the
-/// n-gram loop. Only the computer DRIVING a reply asks: every node reads a
+/// a tree that flows (`docs/plans/recurrent_flow.md`): ON unless
+/// `SWARMLLM_RECURRENT_FLOW=0` (or `off` / `false`) — the A/B inside one
+/// binary; off, such a reply stays in the n-gram loop. Stage 5 measured it on
+/// the real link before it was turned on (2026-11-22, plan § "Stage 5 as
+/// measured"). Only the computer DRIVING a reply asks: every node reads a
 /// flowing tree's walk as a segment (`features::RECURRENT_FLOW`) whatever
 /// this says. Asked where a reply is let in — the gate in `distributed.rs`
-/// and [`recurrent_flow_may_start`] — never by [`flow_possible`], which
-/// answers for the peers and the shape alone.
-pub(super) fn recurrent_flow_on() -> bool {
+/// and [`recurrent_flow_may_start`] — and by the drafter's choice for the
+/// planner's room and the download pass (`engine_drafter::DrafterUse::for_target`),
+/// never by [`flow_possible`], which answers for the peers and the shape alone.
+pub(crate) fn recurrent_flow_on() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| {
-        matches!(
+        !matches!(
             std::env::var("SWARMLLM_RECURRENT_FLOW").ok().as_deref(),
-            Some("1") | Some("on") | Some("true")
+            Some("0") | Some("off") | Some("false")
         )
     })
 }
@@ -3216,6 +3234,25 @@ mod tests {
         assert_eq!(copy_under(&flow, 0, &[3, 6], 10), (0, &[3u32, 6][..]));
         // From a row further down, only what follows that row counts.
         assert_eq!(copy_under(&flow, six, &[9, 1], 10), (six, &[9u32, 1][..]));
+    }
+
+    #[test]
+    fn a_peers_memory_refusal_is_finished_in_rounds_and_silence_is_not() {
+        // What a peer's refusal for memory reads as once its type crossed the
+        // wire — the stage 5 failure, word for word.
+        let refused = crate::error::reclassify_flattened_error(
+            "Worker: Service unavailable: Not enough free memory on this node to continue \
+             this conversation (190 MB of KV cache already in use, budget 301 MB).",
+        )
+        .expect("a flattened refusal is reclassified");
+        assert!(rounds_may_finish(&refused), "{refused:?}");
+        assert!(rounds_may_finish(&SwarmError::LocalMemoryUnavailable(
+            "full".into()
+        )));
+        // A peer that went silent is the router's.
+        assert!(!rounds_may_finish(&SwarmError::PeerUnresponsive(
+            "silent".into()
+        )));
     }
 
     #[test]

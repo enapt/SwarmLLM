@@ -7132,6 +7132,21 @@ impl PipelineScheduler {
                 drafter.layer_range,
                 kv,
             )?;
+        // A recurrent target's engine drafter grows only its flow
+        // (`DrafterUse::for_target`); where its plan cannot flow the n-gram
+        // loop guesses with the BLOCK drafter beside the first segment. Room
+        // is left for whichever needs more, so neither guesser is planned out
+        // by the other's choice.
+        let room =
+            match crate::inference::pipeline::block_drafter_room_mb(&self.shared_state, model_id)
+                .and_then(|mb| {
+                    self.shared_state
+                        .model_process_pool
+                        .max_hostable_layers_beside_bytes(model_id, requester, mb)
+                }) {
+                Some(block_room) => room.min(block_room),
+                None => room,
+            };
         let cut = leaving_room_here(candidates, local, room)?;
         tracing::debug!(
             model = %model_id,

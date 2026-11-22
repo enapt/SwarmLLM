@@ -312,10 +312,11 @@ impl PipelineExecutor {
                 ranges: &ranges,
                 requester: super::worker_requester(&self.request),
             };
-            let using = if recurrent {
-                DrafterUse::OnlyInAFlow
-            } else {
-                DrafterUse::Anywhere
+            // The one answer the planner's room and the download pass read
+            // too; `None` only for a recurrent target with its flow off, which
+            // `recurrent_flow_may_start` turned away above.
+            let Some(using) = DrafterUse::for_target(&self.shared_state, &target) else {
+                return Ok(None);
             };
             let chosen =
                 engine_drafter_for(&self.shared_state, &target, conversation, &here, using);
@@ -329,10 +330,14 @@ impl PipelineExecutor {
                     )
                 })
             {
-                // Nothing fetched for it (`note_split_wanting_a_drafter` asks
-                // for a drafter of any use, which a recurrent model has none of
-                // until stage 5 measures the flow), and nothing said: the
-                // n-gram loop guesses next.
+                // Recorded for the download pass, which fetches one that
+                // could grow the flow (`DrafterUse::for_target`) or keeps the
+                // one held; nothing said: the n-gram loop guesses next.
+                super::engine_drafter::note_split_wanting_a_drafter(
+                    &self.shared_state,
+                    &target,
+                    chosen.is_some(),
+                );
                 tracing::debug!(
                     %request_id,
                     drafter = ?chosen.as_ref().map(|s| &s.model_id),

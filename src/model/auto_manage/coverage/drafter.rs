@@ -346,6 +346,84 @@ mod tests {
         );
     }
 
+    /// A header of `arch` with `layers` × `width`, enough to size and classify
+    /// a model as a drafter or its target.
+    fn header(arch: &str, layers: usize, width: usize) -> crate::inference::split::GgufTensorMeta {
+        crate::inference::split::GgufTensorMeta {
+            tensors: Default::default(),
+            tensor_data_offset: 0,
+            model_name: None,
+            head_count: 16,
+            head_count_kv: 4,
+            block_count: layers,
+            embedding_length: width,
+            head_dim: 256,
+            rope_dim: 64,
+            rope_freq_base: 10_000_000.0,
+            rms_norm_eps: 1e-6,
+            expert_count: 0,
+            expert_used_count: 0,
+            architecture: arch.into(),
+            context_length: 262_144,
+            pooling_type: 0,
+            kv_layout: None,
+            unbuilt_part: None,
+            shared_kv_layers: 0,
+        }
+    }
+
+    /// **A recurrent target's split fetches a drafter that can grow its flow**
+    /// (`DrafterUse::for_target`): Qwen 3.5's families guess only in a tree
+    /// that flows, and the pass asked every candidate whether it could draft
+    /// ANYWHERE — which none of the family can (recurrent state) — so no node
+    /// ever fetched the 0.8B whose flow ran 1.86x (prose) and 3.4x (code) on
+    /// the real link (stage 5, 2026-11-22). The control: a target that is not
+    /// recurrent still never takes a recurrent drafter.
+    #[test]
+    fn a_recurrent_targets_split_fetches_a_drafter_that_grows_its_flow() {
+        let (state, _manager) = make_test_manager_with_config(Config::default());
+        let target = register_manifest_with_sized_shards(
+            &state,
+            "qwen3.5-9b",
+            32,
+            &[(0, 16), (16, 32)],
+            2800 * MIB,
+        );
+        let small =
+            register_manifest_with_sized_shards(&state, "qwen3.5-0.8b", 24, &[(0, 24)], 800 * MIB);
+        state
+            .gguf_meta
+            .insert(target.clone(), header("qwen35", 32, 4096));
+        state
+            .gguf_meta
+            .insert(small.clone(), header("qwen35", 24, 1024));
+        crate::inference::pipeline::plant_vocabulary_match(&target, &small, 248_320);
+        assert_eq!(
+            drafter_to_acquire(&state, &target, |_| true),
+            DrafterToAcquire {
+                held: None,
+                next: DrafterStep::Fetch(small.clone()),
+            }
+        );
+
+        let dense = register_manifest_with_sized_shards(
+            &state,
+            "dense-8b",
+            32,
+            &[(0, 16), (16, 32)],
+            2800 * MIB,
+        );
+        state
+            .gguf_meta
+            .insert(dense.clone(), header("llama", 32, 4096));
+        crate::inference::pipeline::plant_vocabulary_match(&dense, &small, 248_320);
+        assert_eq!(
+            drafter_to_acquire(&state, &dense, |_| true).next,
+            DrafterStep::Nothing,
+            "control: a recurrent drafter cannot take a refused guess back for a dense target"
+        );
+    }
+
     /// Only a small model is ever fetched to draft: a 4 GiB one of the
     /// target's family — a quarter of a 70B, so the size rule alone would take
     /// it — is not even a candidate whose header is learned; a 1 GiB one is.

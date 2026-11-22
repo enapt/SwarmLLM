@@ -52,6 +52,13 @@ fn vocabulary_matches() -> &'static DashMap<(ModelId, ModelId), Option<u32>> {
     M.get_or_init(DashMap::new)
 }
 
+/// Records that `drafter` reads `target`'s vocabulary (`reads` rows), as if
+/// both headers had been read — for a test elsewhere with no header files.
+#[cfg(test)]
+pub(crate) fn plant_vocabulary_match(target: &ModelId, drafter: &ModelId, reads: u32) {
+    vocabulary_matches().insert((target.clone(), drafter.clone()), Some(reads));
+}
+
 /// `tokenizer.ggml.token_type` for an entry the tokenizer never produces
 /// (llama.cpp's `LLAMA_TOKEN_TYPE_UNUSED`).
 const TOKEN_TYPE_UNUSED: i32 = 5;
@@ -256,10 +263,40 @@ pub(crate) enum DrafterUse {
     /// with recurrent state may serve it — its tree is held as a flow too,
     /// taken back only to a start (`SplitModel::grow_flow`, stage 3 (b)) — and
     /// any other must read a tree (`ModelArch::reads_draft_trees`), or it would
-    /// fail its first flow. Never the planner's room nor the download pass's
-    /// fetch: those keep [`DrafterUse::Anywhere`] until stage 5 measures the
-    /// flow pays.
+    /// fail its first flow. The planner's room and the download pass's fetch
+    /// ask it too, through [`DrafterUse::for_target`].
     OnlyInAFlow,
+}
+
+impl DrafterUse {
+    /// What a drafter for `target` will be asked to do — the ONE answer the
+    /// reply ([`engine_drafter_for`] in `dsd.rs`), the planner's room
+    /// ([`drafter_to_leave_room_for`]), the download pass
+    /// ([`drafter_to_acquire`]) and the record that a split wanted one
+    /// ([`note_split_wanting_a_drafter`]) all read: `None` where no drafter
+    /// will guess for it at all — a recurrent target while its flow is off
+    /// (`dsd_flow::recurrent_flow_on`). Until stage 5 the three beside the
+    /// reply kept [`DrafterUse::Anywhere`], which no drafter of a recurrent
+    /// target's family passes, so a Qwen 3.5 split left its 0.8B no room and
+    /// no node fetched one: the flow's 1.86x (prose) and 3.4x (code) on the
+    /// real link (`docs/plans/recurrent_flow.md` § "Stage 5 as measured")
+    /// reached only a node that held the drafter already.
+    pub(crate) fn for_target(state: &SharedState, target: &ModelId) -> Option<Self> {
+        Self::for_target_given(
+            super::dsd_flow::flows_with_the_walk(state, target),
+            super::dsd_flow::recurrent_flow_on(),
+        )
+    }
+
+    /// [`Self::for_target`] given whether the target is recurrent and the
+    /// flow is on.
+    fn for_target_given(recurrent: bool, flow_on: bool) -> Option<Self> {
+        match (recurrent, flow_on) {
+            (false, _) => Some(Self::Anywhere),
+            (true, true) => Some(Self::OnlyInAFlow),
+            (true, false) => None,
+        }
+    }
 }
 
 /// Can a drafter of `arch` be used as `using` asks ([`DrafterUse`])?
@@ -373,9 +410,8 @@ pub(crate) fn drafter_to_leave_room_for(
     state: &SharedState,
     target: &ModelId,
 ) -> Option<DrafterSpec> {
-    chosen(state, target, DrafterUse::Anywhere, |_| {
-        Some(DrafterPlace::Unasked)
-    })
+    let using = DrafterUse::for_target(state, target)?;
+    chosen(state, target, using, |_| Some(DrafterPlace::Unasked))
 }
 
 /// How long a split wants a drafter after it last ran
@@ -402,7 +438,13 @@ pub(crate) fn note_split_wanting_a_drafter(
     target: &ModelId,
     drafter_found: bool,
 ) {
-    if state.cfg().inference.draft_model.is_some() {
+    // Nothing where the owner named the drafter, nor where no drafter would
+    // guess for this target (a recurrent one with its flow off,
+    // [`DrafterUse::for_target`]): prune would keep, and the pass fetch, a
+    // model no reply could use.
+    if state.cfg().inference.draft_model.is_some()
+        || DrafterUse::for_target(state, target).is_none()
+    {
         return;
     }
     let now = std::time::Instant::now();
@@ -517,20 +559,23 @@ pub(crate) fn drafter_to_acquire(
     may_fetch: impl Fn(&crate::types::ModelManifest) -> bool,
 ) -> DrafterToAcquire {
     let held = drafter_to_leave_room_for(state, target).map(|spec| spec.model_id);
-    let next = if state.cfg().inference.draft_model.is_some() {
-        DrafterStep::Nothing
-    } else {
-        next_drafter_step(state, target, held.as_ref(), may_fetch)
+    let next = match DrafterUse::for_target(state, target) {
+        Some(using) if state.cfg().inference.draft_model.is_none() => {
+            next_drafter_step(state, target, held.as_ref(), using, may_fetch)
+        }
+        _ => DrafterStep::Nothing,
     };
     DrafterToAcquire { held, next }
 }
 
 /// [`drafter_to_acquire`]'s step: the candidates, then [`acquisition_among`]
-/// with the held drafter's size to beat.
+/// with the held drafter's size to beat — each asked whether it could draft
+/// as `using` says ([`DrafterUse::for_target`]).
 fn next_drafter_step(
     state: &SharedState,
     target: &ModelId,
     held: Option<&ModelId>,
+    using: DrafterUse,
     may_fetch: impl Fn(&crate::types::ModelManifest) -> bool,
 ) -> DrafterStep {
     let target_line = release_line(target);
@@ -576,7 +621,7 @@ fn next_drafter_step(
         small_drafter_fraction(state),
         to_beat,
         |m| size_proxy(state, m),
-        |m| could_draft(state, target, m, DrafterUse::Anywhere),
+        |m| could_draft(state, target, m, using),
     )
 }
 
@@ -1782,6 +1827,28 @@ mod tests {
         assert!(usable_for(&arch("llama"), DrafterUse::OnlyInAFlow));
         assert!(!usable_for(&arch("gemma2"), DrafterUse::OnlyInAFlow));
         assert!(usable_for(&arch("gemma2"), DrafterUse::Anywhere));
+    }
+
+    /// The planner's room, the download pass and the reply ask ONE answer of
+    /// what a target's drafter does: a recurrent target's grows its flow while
+    /// the flow is on, and none is wanted while it is off — never `Anywhere`,
+    /// which no drafter of its family passes (the planner left its 0.8B no
+    /// room and no node fetched one before stage 5).
+    #[test]
+    fn a_recurrent_targets_drafter_is_wanted_only_while_its_flow_is_on() {
+        assert_eq!(
+            DrafterUse::for_target_given(false, true),
+            Some(DrafterUse::Anywhere)
+        );
+        assert_eq!(
+            DrafterUse::for_target_given(false, false),
+            Some(DrafterUse::Anywhere)
+        );
+        assert_eq!(
+            DrafterUse::for_target_given(true, true),
+            Some(DrafterUse::OnlyInAFlow)
+        );
+        assert_eq!(DrafterUse::for_target_given(true, false), None);
     }
 
     #[test]

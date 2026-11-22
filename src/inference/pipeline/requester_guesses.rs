@@ -205,9 +205,12 @@ pub(super) fn start(
             )
         })
         .flatten();
-    if head_takes_them && on {
-        // A split led by its head guesses with what this node offers: with no
-        // drafter here, fetch one for the next; with one, keep it (#134).
+    // A split led by its head guesses with what this node offers: with no
+    // drafter here, fetch one for the next; with one, keep it (#134). Never
+    // for a recurrent target: the head checks CHAINS of these, which such a
+    // target cannot take back, and the pass would fetch it a drafter only a
+    // flow driven from here could use (`DrafterUse::for_target`).
+    if head_takes_them && on && !super::dsd_flow::flows_with_the_walk(state, target) {
         engine_drafter::note_split_wanting_a_drafter(state, target, spec.is_some());
     }
     if !offers(head_takes_them, on, spec.is_some()) {

@@ -2,10 +2,10 @@
 
 Status: stages 1-4 BUILT (2026-11-22: the layer on the processor and on a card, the worker and the wire, the
 recurrent drafter's own growth, the coordinator's gates and walk, with tests) and RELEASED in v0.3.306 — every node on it
-reads the walk (feature bit 47); the computer driving a reply flows only with `SWARMLLM_RECURRENT_FLOW=1`. Stage 5 — the measurement that
-decides whether it stays on — is PLAN; until it runs, a recurrent split guesses in a flow only where a node HOLDS a
-flow drafter (nothing fetches or leaves room for one, § Stage 4 as built). Figures are MEASURED (our records), READ (a
-header or source) or DERIVED.
+reads the walk (feature bit 47). Stage 5 MEASURED on the real link (2026-11-22, § Stage 5 as measured: the 9B split
+1.86× prose, 3.4× code): the computer driving a reply now flows by default (`SWARMLLM_RECURRENT_FLOW=0` is the A/B),
+and the planner and the download pass leave room for and fetch the flow's drafter. On main, not in a release yet.
+Figures are MEASURED (our records), READ (a header or source) or DERIVED.
 
 ## Why
 
@@ -246,7 +246,8 @@ followers in the same tree read whole; red (checked) without the walk: the secon
   chains, the planner's room, the download pass) keeps refusing recurrent drafters. The chosen one must guess on a
   card where it would load (`guesses_on_a_card`, `admitted`'s place), else `Ok(None)` before the prompt pass. Nothing
   is fetched or noted for a recurrent target (`note_split_wanting_a_drafter` is skipped): the download pass and the
-  planner's room move to a recurrent drafter only once stage 5 measures the flow pays.
+  planner's room move to a recurrent drafter only once stage 5 measures the flow pays. (Moved since: § Stage 5 as
+  measured, `DrafterUse::for_target`.)
 - **The walk** (`FlowRun::send`, `read_here`, `take_together`): every flowing forward — this node's segments before
   the run, the far one, this node's after it — carries `flow_walk` = `walk_on_the_forward(rows.lead, flow.at())`: the
   walk's row in that forward's tree, which for a rebase's forward is the path's length (the rebased tree's row 0 after
@@ -272,6 +273,30 @@ followers in the same tree read whole; red (checked) without the walk: the secon
   take-over, and each reply is one the one-check loop itself writes (that loop's own repeats differ at near-ties on
   the card, so byte-equality is no bar; the real-link run scores against llama.cpp). Not a speed figure — a repeated
   prompt, the owner's earlier replies copied — but replies 2-3 took 9.5 / 6.3 s flowing against 25.0 / 13.1 s.
+
+## Stage 5 as measured (2026-11-22)
+
+- **Rig** (`~/swarmllm-gate/deep/fr/real_link9b.sh`, out `real_link_rf9b_1122/`): Qwen3.5-9B Q4_K_M, parts 0-4
+  here on this card (8 GB) and parts 5-9 on Australia's RTX 3060 (v0.3.306, ~115-134 ms round trip), Qwen3.5-0.8B
+  Q8_0 drafting on this card, 160-token greedy replies (a prose and a code prompt) after a 64-token warm-up, ONE
+  binary (v0.3.306), arms `SWARMLLM_RECURRENT_FLOW=1` (flowcon) / unset (flowcoff, the n-gram loop with the file's
+  guess head) in the order on, off, off, on, on, off; the live node stopped.
+- **Measured** (decode tok/s): off — prose 6.50, 5.70, 5.87; code 5.53, 6.23, 6.36. On, arm 1 — prose **11.18**
+  (1.86× the off median), code **20.59** (3.4×); each reply opens as the one-check loop's does. Counters, arm 1:
+  prose 194 forwards, 9 rebases, 29 misses; code 109 forwards, 4 rebases, 5 misses — prose loses its rows to misses,
+  where a higher E is the only gain (`faster_than_local.md` § 10).
+- **Arms 4 and 5 failed**, both at the same token (prose 16, code 22): Australia refused a flowing forward — "190 MB
+  of KV cache already in use, budget 301 MB" — its card nearly full of other work. A flowing forward claims room for
+  the tree's rows beside the reply's cache (`SsmState::bytes_a_flowing_forward_may_add`: two states and the kept
+  rows' inputs, each recurrent layer), which a plain round never claims; the refusal arrived as
+  `ServiceUnavailable`, outside `rounds_may_finish`, so the whole reply failed — three times, as the router continued
+  it each time into another flow. **Fixed**: a memory refusal is finished in rounds (`rounds_may_finish`; test
+  `a_peers_memory_refusal_is_finished_in_rounds_and_silence_is_not`).
+- **The bar** (§ Stages, 5): 1.5× the one-check loop — met by arm 1 on both kinds of reply. The flow is ON by
+  default on the computer driving a reply (`dsd_flow::recurrent_flow_on`; `SWARMLLM_RECURRENT_FLOW=0` is the A/B),
+  and the planner's room, the download pass and the record that a split wanted a drafter now ask
+  `engine_drafter::DrafterUse::for_target` — a recurrent target's drafter grows its flow, so a node fetches the
+  0.8B and a plan leaves it room (beside a held block drafter, room for whichever needs more).
 
 ## Not in this plan
 
