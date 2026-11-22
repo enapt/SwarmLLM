@@ -6710,7 +6710,7 @@ rows. So the next factor has to come from E itself: a drafter that guesses bette
 copied text where the reply repeats (§ copied runs: 2× on an edit), or a shorter round trip (near
 chains). Not from rows, levels or the window.
 
-*Levels on the recurrent 9B, captured: two beat three* (2026-11-23 21:50-22:23Z, `real_link9b.sh` flowc, TAG
+*Levels on the recurrent 9B, captured: two beat three* (2026-11-22 21:50-22:23Z, `real_link9b.sh` flowc, TAG
 rf9b11 then rf9b12, binary rf10 = main c763fce1c's code under `SWARMLLM_FLOW_GRAPH=1`, Qwen3.5-9B parts 0-4
 [0, 17) here and 5-9 + the head on the Australian card, Qwen3.5-0.8B Q8_0 drafting on this card, 160-token
 greedy replies, the client's decode_tok_s; ABCCBA twice; 0 refusals of any kind in 12 arms):
@@ -6728,6 +6728,11 @@ its tokens. One level reads best in its one sitting, within two's spread; its fo
 node's layers (14 against 19-20 ms: 8 rows may be a captured step there, unchecked) and its forwards half again as
 many across the link, which a slower far end would pay — measure it against two where the far end is the slower
 side before moving the default (FUTURE_WORK #228). Another family's flow keeps three (`dsd_flow::levels_by_default`).
+A second sitting of one level against the shipped two (rf9b14, 22:41-22:52Z, main be8b85b1c's CUDA build, ABBAAB):
+one 15.63 / 16.74 / 15.75 prose and 27.12 / 27.19 / 21.67 code, two 14.83 / 14.90 / 15.33 and 24.81 / 23.65 / 24.72 —
+one ahead again (pace 24-26 against 38-40 ms; 382-418 forwards a prose reply against 273-279), on a link where
+this node is the slower side. Where the far end is, fewer, wider forwards serve it better (the 14B's sweep above),
+so the count wants choosing by which side is slower, not a constant (FUTURE_WORK #228).
 
 *The drafter, on the same link* (02:44-03:11Z, `~/swarmllm-318/flowdraft.sh` then `flowfmt.sh`,
 main's build, arms by the one drafter H holds, alternating; every DSD line named that drafter with
