@@ -71,6 +71,27 @@ impl RowVisibility {
             .collect())
     }
 
+    /// [`Self::parents`] for a forward of a tree that FLOWS, which may hold
+    /// only the tree's LAST rows (`LayerForward::draft_tree_from`): how many
+    /// tree rows earlier forwards wrote, and each forward row's parent as a TREE
+    /// row — any row before it, this forward's or an earlier one's — or `None`
+    /// for one that follows the position before the tree. A recurrent layer
+    /// that keeps the inputs of the rows a flow may still need
+    /// (`layers::qwen35::FlowRows`) reads them by it.
+    pub(crate) fn parents_across_forwards(&self) -> Result<(usize, Vec<Option<usize>>), String> {
+        let rows = self.rows();
+        let before = self
+            .kv_len
+            .checked_sub(self.base + rows)
+            .ok_or_else(|| format!("a forward of {rows} rows past its tree's end"))?;
+        Ok((
+            before,
+            (0..rows)
+                .map(|q| (0..before + q).rev().find(|&j| self.sees(q, self.base + j)))
+                .collect(),
+        ))
+    }
+
     /// The additive mask `[rows, kv_len]`, row-major: 0 where a row reads a
     /// key, −∞ where it does not — what the matmul path adds to its scores.
     pub(crate) fn mask(&self) -> Vec<f32> {

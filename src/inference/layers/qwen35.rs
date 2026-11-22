@@ -408,6 +408,9 @@ impl DeltaNetWeights {
         index_pos: usize,
         into_spare: bool,
     ) -> CandleResult<Tensor> {
+        if let Some(walk) = super::flow_walk_now() {
+            return self.forward_flowing(x, ssm_state, index_pos, walk as usize);
+        }
         let (b_sz, seq_len, _hidden) = x.dims3()?;
         let device = x.device();
         let (nk, kd, nv, vd) = (
@@ -522,21 +525,7 @@ impl DeltaNetWeights {
             target.as_ref().map(|t| &t.recurrent_state),
             tree.as_ref(),
         )?; // out [b, seq, nv, vd]
-
-        // Gated RMSNorm per value head: RMSNorm(o, ssm_norm) · silu(z).
-        let z = z.reshape((b_sz, seq_len, nv, vd))?;
-        let normed = self.ssm_norm.forward(&out)?;
-        let gated = (normed * candle_nn::ops::silu(&z)?)?;
-        // `ssm_out` reads the file's head order (`ValueHeadOrder`): a grouped
-        // file's kernel head `j·nk + kh` is its `kh·r + j`.
-        let gated = match self.out_heads {
-            ValueHeadOrder::Tiled => gated,
-            ValueHeadOrder::GroupedByKeyHead => gated
-                .reshape((b_sz, seq_len, nv / nk, nk, vd))?
-                .transpose(2, 3)?
-                .contiguous()?,
-        };
-        let gated = gated.reshape((b_sz, seq_len, nv * vd))?;
+        let gated = self.gated_output(&out, &z)?;
 
         let in_place = target.is_some();
         let next = written_into(target, new_conv, new_state, written)?;
@@ -555,6 +544,151 @@ impl DeltaNetWeights {
         if tree.is_some() {
             held.mark_branched();
         }
+        self.ssm_out.forward(&gated)
+    }
+
+    /// The delta rule's outputs `out` `[b, seq, nv, vd]` through the gated
+    /// RMSNorm — RMSNorm(o, ssm_norm) · silu(z), per value head, `z` the
+    /// step's `[b, seq, nv·vd]` — in the order `ssm_out` reads: what
+    /// `ssm_out` is applied to.
+    fn gated_output(&self, out: &Tensor, z: &Tensor) -> CandleResult<Tensor> {
+        let (b_sz, seq_len, nv, vd) = out.dims4()?;
+        let nk = self.n_k_heads;
+        let z = z.reshape((b_sz, seq_len, nv, vd))?;
+        let normed = self.ssm_norm.forward(out)?;
+        let gated = (normed * candle_nn::ops::silu(&z)?)?;
+        // `ssm_out` reads the file's head order (`ValueHeadOrder`): a grouped
+        // file's kernel head `j·nk + kh` is its `kh·r + j`.
+        let gated = match self.out_heads {
+            ValueHeadOrder::Tiled => gated,
+            ValueHeadOrder::GroupedByKeyHead => gated
+                .reshape((b_sz, seq_len, nv / nk, nk, vd))?
+                .transpose(2, 3)?
+                .contiguous()?,
+        };
+        gated.reshape((b_sz, seq_len, nv * vd))
+    }
+
+    /// A forward of a tree that FLOWS (`pipeline::dsd_flow`,
+    /// `docs/plans/recurrent_flow.md`): its rows are the tree's LAST, their
+    /// parents rows of this forward or of earlier ones, `walk` the tree row the
+    /// walk stood on when it was sent. Each row's state is rebuilt from the
+    /// ANCHOR — the state after the walk's row, final — along its line: the
+    /// rows of earlier forwards on the new rows' lines (their kept inputs, never
+    /// projected again) and the new rows, read as ONE tree from the anchor by
+    /// the step's own convolution and delta rule ([`Self::causal_conv_along`],
+    /// [`delta_rule_into`]), so each row's arithmetic is its line's alone and
+    /// its output the one a chain read of that line writes. Then the anchor
+    /// moves to the walk's row ([`FlowRows::advance_to`]) and only rows
+    /// following it are kept.
+    ///
+    /// A row whose line leaves the anchor's subtree is one the walk can no
+    /// longer reach (its draw is never read): it is read from the anchor, for a
+    /// finite output, and kept by nothing.
+    ///
+    /// Prior art: ReplaySSM (Dao AI Lab, 2026) caches each step's inputs and
+    /// replays from one checkpoint; STree (arXiv 2505.14969) and TreeWY (arXiv
+    /// 2608.20961) keep per-row activations and rebuild the accepted state along
+    /// the accepted path; SGLang starts each tree node from its parent's state.
+    /// All verify one tree and commit before the next is sent; here a dozen
+    /// forwards are in flight, so the checkpoint follows the walk instead.
+    fn forward_flowing(
+        &self,
+        x: &Tensor,
+        ssm_state: &mut Option<SsmState>,
+        index_pos: usize,
+        walk: usize,
+    ) -> CandleResult<Tensor> {
+        let (_b_sz, seq_len, _hidden) = x.dims3()?;
+        let Some(seen) = super::tree_scope_now().and_then(|scope| scope.visibility) else {
+            candle_core::bail!("a flowing forward with no tree");
+        };
+        let (before, parents) = seen
+            .parents_across_forwards()
+            .map_err(candle_core::Error::msg)?;
+        if parents.len() != seq_len || seen.base + before != index_pos {
+            candle_core::bail!(
+                "a flowing tree of {} rows from {} after {before} of them, in a DeltaNet step of {seq_len} at {index_pos}",
+                parents.len(),
+                seen.base
+            );
+        }
+        let Some(held) = ssm_state.as_mut() else {
+            candle_core::bail!("a flowing tree reached a DeltaNet layer with no state");
+        };
+        held.flow_from(seen.base, index_pos)?;
+        let flow = held.flow_mut().expect("set by flow_from");
+        flow.check_walk(walk, before, &parents)?;
+
+        let mixed = self.wqkv.forward(x)?;
+        let z = self.wz.forward(x)?;
+        let gates = self.gates(x)?;
+        // The walk's row may be one an earlier forward read: the anchor goes
+        // there first, so fewer rows are read again.
+        flow.advance_to(walk)?;
+        let lines = flow.lines(before, &parents);
+        let device = x.device();
+        let ahead = lines.earlier.len();
+        let earlier = flow.inputs_of(&lines.earlier, device)?;
+        let joined = |kept: Option<&Tensor>, new: &Tensor| -> CandleResult<Tensor> {
+            match kept {
+                Some(kept) => Tensor::cat(&[kept, new], 1),
+                None => Ok(new.clone()),
+            }
+        };
+        let (b_sz, nk, kd, nv, vd) = (
+            mixed.dim(0)?,
+            self.n_k_heads,
+            self.k_head_dim,
+            self.n_v_heads,
+            self.v_head_dim,
+        );
+        let anchor = flow.anchor().clone();
+        let (conv, _) = self.causal_conv_along(
+            &joined(earlier.as_ref().map(|e| &e.mixed), &mixed)?,
+            &anchor.conv_state,
+            &lines.parents,
+        )?;
+        let conv = candle_nn::ops::silu(&conv.narrow(1, ahead, seq_len)?)?;
+        let qk = l2_norm(
+            &conv
+                .narrow(2, 0, 2 * self.key_dim())?
+                .reshape((b_sz, seq_len, 2 * nk, kd))?,
+            self.eps,
+        )?;
+        let v = conv
+            .narrow(2, 2 * self.key_dim(), self.value_dim())?
+            .reshape((b_sz, seq_len, nv, vd))?
+            .contiguous()?;
+        let tree = TreeLines::new(lines.parents.clone(), device)?;
+        let (out, _, _) = delta_rule_into(
+            &joined(earlier.as_ref().map(|e| &e.qk), &qk)?,
+            nk,
+            &joined(earlier.as_ref().map(|e| &e.v), &v)?,
+            &Gates::apart(
+                joined(earlier.as_ref().map(|e| &e.g), &gates.g)?,
+                joined(earlier.as_ref().map(|e| &e.beta), &gates.beta)?,
+            ),
+            &anchor.recurrent_state,
+            None,
+            Some(&tree),
+        )?;
+        let gated = self.gated_output(&out.narrow(1, ahead, seq_len)?, &z)?;
+
+        flow.keep(
+            before,
+            &parents,
+            &lines.live,
+            SsmRows {
+                mixed,
+                qk,
+                v,
+                g: gates.g,
+                beta: gates.beta,
+            },
+        )?;
+        flow.advance_to(walk)?;
+        held.note_flow_read();
         self.ssm_out.forward(&gated)
     }
 
@@ -992,6 +1126,407 @@ fn replay_rows_composed(
         None,
     )?;
     written_into(into.cloned(), Some(conv_state), recurrent_state, written)
+}
+
+/// What a DeltaNet layer keeps of a tree that FLOWS through it
+/// ([`DeltaNetWeights::forward_flowing`], `docs/plans/recurrent_flow.md`):
+/// the tree's rows sit in the cache in the order SENT, a forward's rows have
+/// parents in earlier forwards, and the requester's walk moves down the tree
+/// while a dozen forwards are in flight.
+///
+/// - **The anchor**: the state after the row the walk stands on — final, every
+///   row before it on its line is the reply's — and the state before it (after
+///   its parent), which is the state at the start of a rebased tree whose
+///   first row the walk's row becomes ([`Self::rebase_onto`]).
+/// - **The inputs of every row following the anchor** (`kept`): what the
+///   convolution and the delta rule read ([`SsmRows`]), never a state — 80 KB
+///   a row a layer on Qwen3.8-27B against a state's 3 MiB. A row's state is
+///   rebuilt from the anchor along its line when a later row needs it.
+/// - **The states at the tree's starts**: what a cut back to a start puts
+///   back — a rebase's, or a failed flow's, which cuts to the last start every
+///   segment answered (`dsd_flow::FlowRun::settled_base`): the current one or,
+///   with a rebase unanswered, the one before it.
+#[derive(Debug, Clone)]
+pub(crate) struct FlowRows {
+    /// The cache position of tree row 0.
+    base: usize,
+    /// The states at the starts a cut may go back to, oldest first, at most
+    /// two: `(position, state)`.
+    starts: Vec<(usize, SsmSlot)>,
+    /// Tree rows read so far: the cache holds `base + read` positions.
+    read: usize,
+    /// Every row read's parent, as a tree row.
+    parents: Vec<Option<usize>>,
+    /// The row the walk stands on; `None` before it reached one (the anchor
+    /// is then the state at `base`).
+    anchor_row: Option<usize>,
+    anchor: SsmSlot,
+    /// The state before `anchor_row` — after its parent.
+    before_anchor: SsmSlot,
+    /// The rows following the anchor's, ascending, and their inputs in that
+    /// order (`None` while there are none).
+    kept: Vec<usize>,
+    inputs: Option<SsmRows>,
+}
+
+/// A flowing forward's rows read as one tree from the anchor
+/// ([`FlowRows::lines`]).
+pub(super) struct FlowLines {
+    /// Kept rows on the new rows' lines, ascending: read again ahead of them.
+    pub(super) earlier: Vec<usize>,
+    /// Each row's parent among `earlier` then the new rows; `None` for a row
+    /// following the anchor — and for a row whose line left it.
+    pub(super) parents: Vec<Option<usize>>,
+    /// Which new rows follow the anchor: the rows kept.
+    pub(super) live: Vec<bool>,
+}
+
+impl FlowRows {
+    /// A flow whose tree starts at `base`, from the state there.
+    pub(super) fn new(base: usize, at_base: SsmSlot) -> Self {
+        Self {
+            base,
+            starts: vec![(base, at_base.clone())],
+            read: 0,
+            parents: Vec::new(),
+            anchor_row: None,
+            anchor: at_base.clone(),
+            before_anchor: at_base,
+            kept: Vec::new(),
+            inputs: None,
+        }
+    }
+
+    /// The cache position of the tree's first row.
+    pub(crate) fn base(&self) -> usize {
+        self.base
+    }
+
+    /// The cache's length: the tree's start and the rows read.
+    pub(crate) fn positions(&self) -> usize {
+        self.base + self.read
+    }
+
+    /// The state at cache position `positions`, where a cut may put it: a
+    /// start, or the start of the tree a rebase onto the walk's row would make
+    /// (the walk's line a chain from the tree's first row).
+    pub(crate) fn state_at(&self, positions: usize) -> Option<&SsmSlot> {
+        if let Some((_, state)) = self.starts.iter().rev().find(|(at, _)| *at == positions) {
+            return Some(state);
+        }
+        let row = self.anchor_row?;
+        (positions == self.base + row && self.line_is_chain(row)).then_some(&self.before_anchor)
+    }
+
+    pub(super) fn anchor(&self) -> &SsmSlot {
+        &self.anchor
+    }
+
+    /// Every tensor kept, for a cache's accounting.
+    pub(crate) fn tensors(&self) -> Vec<&Tensor> {
+        let mut out: Vec<&Tensor> = self
+            .starts
+            .iter()
+            .flat_map(|(_, s)| [&s.conv_state, &s.recurrent_state])
+            .collect();
+        for slot in [&self.anchor, &self.before_anchor] {
+            out.extend([&slot.conv_state, &slot.recurrent_state]);
+        }
+        if let Some(rows) = &self.inputs {
+            out.extend(rows.tensors());
+        }
+        out
+    }
+
+    /// Is `row`'s line the tree's first rows, one after another?
+    fn line_is_chain(&self, row: usize) -> bool {
+        let mut at = row;
+        loop {
+            match self.parents.get(at) {
+                Some(None) => return at == 0,
+                Some(Some(p)) if *p + 1 == at => at = *p,
+                _ => return false,
+            }
+        }
+    }
+
+    /// Does `row` follow `of` (or is it `of`)? Every row follows the start.
+    fn follows(&self, row: usize, of: Option<usize>) -> bool {
+        let Some(of) = of else { return true };
+        let mut at = Some(row);
+        while let Some(r) = at {
+            if r == of {
+                return true;
+            }
+            at = self.parents.get(r).copied().flatten();
+        }
+        false
+    }
+
+    /// The tree a rebase made goes on from `from` (`FlowTree::rebase`): the
+    /// walk's row became its first row and the rows before it on its line —
+    /// the tree's first rows, a chain — the reply. Rows are numbered from it,
+    /// and the state before it is the new start's.
+    pub(super) fn rebase_onto(&mut self, from: usize) -> CandleResult<()> {
+        let shift = from - self.base;
+        if self.anchor_row != Some(shift) || !self.line_is_chain(shift) {
+            candle_core::bail!(
+                "a flowing tree goes on from {from}, where the walk's row {:?} after {} is not its first",
+                self.anchor_row,
+                self.base
+            );
+        }
+        let base = self.base;
+        self.starts.retain(|(at, _)| *at == base);
+        self.starts.push((from, self.before_anchor.clone()));
+        self.parents = self.parents[shift..]
+            .iter()
+            .map(|p| p.and_then(|p| p.checked_sub(shift)))
+            .collect();
+        for row in &mut self.kept {
+            *row -= shift;
+        }
+        self.anchor_row = Some(0);
+        self.base = from;
+        self.read -= shift;
+        Ok(())
+    }
+
+    /// Refuses a walk this forward does not let the anchor reach: a row past
+    /// the rows read with it, or one not following the anchor's — the walk
+    /// only goes down the tree.
+    pub(super) fn check_walk(
+        &self,
+        walk: usize,
+        before: usize,
+        parents: &[Option<usize>],
+    ) -> CandleResult<()> {
+        if before != self.read {
+            candle_core::bail!(
+                "a flowing forward after {before} rows of a tree this layer read {} of",
+                self.read
+            );
+        }
+        if walk >= before + parents.len() {
+            candle_core::bail!(
+                "a flowing tree's walk stands on row {walk} of {}",
+                before + parents.len()
+            );
+        }
+        let parent = |r: usize| match r.checked_sub(before) {
+            Some(i) => parents[i],
+            None => self.parents[r],
+        };
+        let mut at = Some(walk);
+        while let Some(r) = at {
+            if Some(r) == self.anchor_row {
+                return Ok(());
+            }
+            if r < before && self.kept.binary_search(&r).is_err() {
+                break;
+            }
+            at = parent(r);
+        }
+        if self.anchor_row.is_none() && at.is_none() {
+            return Ok(());
+        }
+        candle_core::bail!(
+            "a flowing tree's walk went to row {walk}, which does not follow row {:?}",
+            self.anchor_row
+        )
+    }
+
+    /// The inputs of kept rows `rows` (ascending), gathered in that order.
+    pub(super) fn inputs_of(
+        &self,
+        rows: &[usize],
+        device: &Device,
+    ) -> CandleResult<Option<SsmRows>> {
+        let (Some(inputs), false) = (&self.inputs, rows.is_empty()) else {
+            return Ok(None);
+        };
+        let at: Vec<u32> =
+            rows.iter()
+                .map(|r| {
+                    self.kept.binary_search(r).map(|i| i as u32).map_err(|_| {
+                        candle_core::Error::Msg(format!("flowing row {r} was not kept"))
+                    })
+                })
+                .collect::<CandleResult<_>>()?;
+        let at = Tensor::from_vec(at, rows.len(), device)?;
+        let pick = |t: &Tensor| t.index_select(&at, 1);
+        Ok(Some(SsmRows {
+            mixed: pick(&inputs.mixed)?,
+            qk: pick(&inputs.qk)?,
+            v: pick(&inputs.v)?,
+            g: pick(&inputs.g)?,
+            beta: pick(&inputs.beta)?,
+        }))
+    }
+
+    /// A forward's new rows (`parents` as tree rows, the first at tree row
+    /// `before`) as one tree from the anchor: each live row's line back to it,
+    /// through kept rows and rows of this forward.
+    pub(super) fn lines(&self, before: usize, parents: &[Option<usize>]) -> FlowLines {
+        let mut live = vec![false; parents.len()];
+        let mut earlier = std::collections::BTreeSet::new();
+        for (i, slot) in live.iter_mut().enumerate() {
+            let mut on_line = Vec::new();
+            let mut at = parents[i];
+            let reached = loop {
+                match at {
+                    None => break self.anchor_row.is_none(),
+                    Some(r) if Some(r) == self.anchor_row => break true,
+                    Some(r) if r >= before => at = parents[r - before],
+                    Some(r) if self.kept.binary_search(&r).is_ok() => {
+                        on_line.push(r);
+                        at = self.parents[r];
+                    }
+                    Some(_) => break false,
+                }
+            };
+            if reached {
+                *slot = true;
+                earlier.extend(on_line);
+            }
+        }
+        let earlier: Vec<usize> = earlier.into_iter().collect();
+        let ahead = earlier.len();
+        let index_of = |r: usize| -> Option<usize> {
+            if Some(r) == self.anchor_row {
+                return None;
+            }
+            match r.checked_sub(before) {
+                Some(i) => Some(ahead + i),
+                None => earlier.binary_search(&r).ok(),
+            }
+        };
+        let mut ext: Vec<Option<usize>> = earlier
+            .iter()
+            .map(|&r| self.parents[r].and_then(index_of))
+            .collect();
+        ext.extend(
+            parents
+                .iter()
+                .zip(&live)
+                .map(|(p, &live)| if live { p.and_then(index_of) } else { None }),
+        );
+        FlowLines {
+            earlier,
+            parents: ext,
+            live,
+        }
+    }
+
+    /// Keeps a forward's rows: every row's parent, and the inputs of the rows
+    /// following the anchor (`live`).
+    pub(super) fn keep(
+        &mut self,
+        before: usize,
+        parents: &[Option<usize>],
+        live: &[bool],
+        rows: SsmRows,
+    ) -> CandleResult<()> {
+        debug_assert_eq!(before, self.read);
+        self.parents.extend_from_slice(parents);
+        self.read = before + parents.len();
+        let picked: Vec<u32> = (0..live.len() as u32)
+            .filter(|&i| live[i as usize])
+            .collect();
+        if picked.is_empty() {
+            return Ok(());
+        }
+        self.kept
+            .extend(picked.iter().map(|&i| before + i as usize));
+        let rows = if picked.len() == live.len() {
+            rows
+        } else {
+            let at = Tensor::from_vec(picked.clone(), picked.len(), rows.mixed.device())?;
+            let pick = |t: &Tensor| t.index_select(&at, 1);
+            SsmRows {
+                mixed: pick(&rows.mixed)?,
+                qk: pick(&rows.qk)?,
+                v: pick(&rows.v)?,
+                g: pick(&rows.g)?,
+                beta: pick(&rows.beta)?,
+            }
+        };
+        self.inputs = Some(match self.inputs.take() {
+            None => rows,
+            Some(held) => {
+                let join = |a: &Tensor, b: &Tensor| Tensor::cat(&[a, b], 1);
+                SsmRows {
+                    mixed: join(&held.mixed, &rows.mixed)?,
+                    qk: join(&held.qk, &rows.qk)?,
+                    v: join(&held.v, &rows.v)?,
+                    g: join(&held.g, &rows.g)?,
+                    beta: join(&held.beta, &rows.beta)?,
+                }
+            }
+        });
+        Ok(())
+    }
+
+    /// Moves the anchor down the walk's line as far as rows are kept — to the
+    /// walk's row once it has been read — replaying their inputs from the
+    /// anchor with the step's own kernel ([`replay_rows`]), so the anchor is
+    /// bit for bit the state a chain read of the reply reaches; then keeps
+    /// only the rows following the new anchor.
+    pub(super) fn advance_to(&mut self, walk: usize) -> CandleResult<()> {
+        let mut path = Vec::new();
+        let mut at = Some(walk);
+        while let Some(r) = at {
+            if Some(r) == self.anchor_row {
+                break;
+            }
+            path.push(r);
+            at = self.parents.get(r).copied().flatten();
+        }
+        path.reverse();
+        let reach = path
+            .iter()
+            .take_while(|r| self.kept.binary_search(r).is_ok())
+            .count();
+        if reach == 0 {
+            return Ok(());
+        }
+        let path = &path[..reach];
+        let device = self.anchor.recurrent_state.device().clone();
+        let rows = self
+            .inputs_of(path, &device)?
+            .expect("a path of kept rows has inputs");
+        let before = if reach > 1 {
+            replay_rows(&self.anchor, &rows, reach - 1, None)?
+        } else {
+            self.anchor.clone()
+        };
+        let last = |t: &Tensor| t.narrow(1, reach - 1, 1);
+        let anchor = replay_rows(
+            &before,
+            &SsmRows {
+                mixed: last(&rows.mixed)?,
+                qk: last(&rows.qk)?,
+                v: last(&rows.v)?,
+                g: last(&rows.g)?,
+                beta: last(&rows.beta)?,
+            },
+            1,
+            None,
+        )?;
+        let row = path[reach - 1];
+        self.before_anchor = before;
+        self.anchor = anchor;
+        self.anchor_row = Some(row);
+        let still: Vec<usize> = self
+            .kept
+            .iter()
+            .copied()
+            .filter(|&r| r != row && self.follows(r, Some(row)))
+            .collect();
+        self.inputs = self.inputs_of(&still, &device)?;
+        self.kept = still;
+        Ok(())
+    }
 }
 
 /// The gated delta rule, token by token (`build_delta_net_autoregressive`),
@@ -3267,6 +3802,232 @@ mod tests {
                 0.0
             );
         }
+    }
+
+    /// A tree that FLOWS (`docs/plans/recurrent_flow.md` stage 1): rows sent
+    /// over several forwards, each forward's rows with parents in earlier
+    /// ones, the walk moving down the tree between them — onto a row of the
+    /// forward that carries it, too (a missed draw's row) — then a rebase that
+    /// cuts the layer back to the tree's start and reads the walk's path again,
+    /// and a forward of the rebased tree. Every row the walk can still reach
+    /// writes what its line read alone as a chain writes, 0.0 apart, and the
+    /// anchor after each forward is the walk's line's state; the cuts land on
+    /// the starts' states; a walk that went back up the tree is refused.
+    #[test]
+    fn a_flowing_trees_rows_are_their_lines_read_alone() {
+        use crate::inference::draft_tree::DraftTree;
+        let device = Device::Cpu;
+        let w = weights_of(&device, true);
+        let pool = exact(Tensor::randn(0f32, 1.0, (1, 32, 8), &device).unwrap(), 8.0);
+        let row_of = |i: usize| pool.narrow(1, i, 1).unwrap();
+        let prompt = || {
+            let mut s = None;
+            w.forward_deltanet_into(&pool.narrow(1, 0, 3).unwrap(), &mut s, 0, false)
+                .unwrap();
+            s
+        };
+        // A line's inputs read alone after the prompt: its last row's output
+        // and the state after it.
+        let alone = |line: &[usize]| {
+            let mut s = prompt();
+            let rows: Vec<Tensor> = line.iter().map(|&i| row_of(i)).collect();
+            let out = w
+                .forward_deltanet_into(&Tensor::cat(&rows, 1).unwrap(), &mut s, 3, false)
+                .unwrap();
+            (out.narrow(1, line.len() - 1, 1).unwrap(), s.unwrap())
+        };
+        // A tree: its start, the inputs before it past the prompt, each row's
+        // parent and input.
+        struct Epoch {
+            base: usize,
+            prefix: Vec<usize>,
+            parents: Vec<Option<usize>>,
+            inputs: Vec<usize>,
+        }
+        impl Epoch {
+            fn line(&self, row: usize) -> Vec<usize> {
+                let mut rows = vec![row];
+                while let Some(p) = self.parents[*rows.last().unwrap()] {
+                    rows.push(p);
+                }
+                let mut line = self.prefix.clone();
+                line.extend(rows.iter().rev().map(|&r| self.inputs[r]));
+                line
+            }
+        }
+        // Sends tree rows `rows` of `tree` with the walk on `walk`; checks each
+        // row in `live` against its line read alone.
+        let send = |held: &mut Option<SsmState>,
+                    tree: &Epoch,
+                    rows: std::ops::Range<usize>,
+                    walk: usize,
+                    live: &[usize]|
+         -> CandleResult<()> {
+            let shape = DraftTree::new(
+                tree.base,
+                tree.parents[..rows.end]
+                    .iter()
+                    .map(|p| p.map(|p| p as u16))
+                    .collect(),
+            )
+            .unwrap();
+            let index_pos = tree.base + rows.start;
+            let (positions, seen) = shape.rows_for(index_pos, rows.len()).unwrap();
+            let x: Vec<Tensor> = rows.clone().map(|r| row_of(tree.inputs[r])).collect();
+            let out = {
+                let _flow =
+                    super::super::RowPositions::for_flowing_tree(positions, seen, walk as u32);
+                w.forward_deltanet_into(&Tensor::cat(&x, 1).unwrap(), held, index_pos, false)?
+            };
+            for &row in live {
+                let (want, _) = alone(&tree.line(row));
+                assert_eq!(
+                    max_abs_diff(&out.narrow(1, row - rows.start, 1).unwrap(), &want),
+                    0.0,
+                    "row {row}, its line {:?}",
+                    tree.line(row)
+                );
+            }
+            Ok(())
+        };
+        let anchor_is = |held: &Option<SsmState>, line: &[usize], what: &str| {
+            let (_, want) = alone(line);
+            let anchor = &held.as_ref().unwrap().flow.as_ref().unwrap().anchor;
+            assert_eq!(
+                max_abs_diff(&anchor.recurrent_state, &want.current().recurrent_state),
+                0.0,
+                "{what}: the anchor's state"
+            );
+            assert_eq!(
+                max_abs_diff(&anchor.conv_state, &want.current().conv_state),
+                0.0,
+                "{what}: the anchor's window"
+            );
+        };
+
+        let first = Epoch {
+            base: 3,
+            prefix: Vec::new(),
+            parents: vec![
+                None,
+                Some(0),
+                Some(1),
+                Some(0),
+                Some(3),
+                Some(2),
+                Some(4),
+                Some(5),
+                Some(1),
+                Some(7),
+                Some(9),
+                Some(5),
+                Some(6),
+                Some(5),
+                Some(13),
+                Some(13),
+            ],
+            inputs: (3..19).collect(),
+        };
+        let mut held = prompt();
+        send(&mut held, &first, 0..5, 0, &[0, 1, 2, 3, 4]).unwrap();
+        anchor_is(&held, &first.line(0), "after the first forward");
+        // Rows from both branches below the walk's row are read again ahead
+        // of the new ones (1→2 and 3→4).
+        send(&mut held, &first, 5..9, 0, &[5, 6, 7, 8]).unwrap();
+        // The walk went 0 → 1 → 2: rows 3, 4, 6 and 8 no longer follow it,
+        // and row 12 (under 6) is read from the anchor, never compared.
+        send(&mut held, &first, 9..13, 2, &[9, 10, 11]).unwrap();
+        anchor_is(&held, &first.line(2), "after the walk reached row 2");
+        {
+            let mut back = held.clone();
+            let refused = send(&mut back, &first, 13..16, 1, &[]);
+            assert!(refused.is_err(), "a walk back up the tree is refused");
+        }
+        // Row 2's draw kept 5, whose draw no row carries: the walk is on the
+        // missed draw's row, 13, sent in the forward that carries it.
+        send(&mut held, &first, 13..16, 13, &[13, 14, 15]).unwrap();
+        anchor_is(&held, &first.line(13), "on a row of the forward itself");
+
+        // The rebase (`FlowTree::rebase`): the walk's path 0 1 2 5 becomes the
+        // reply, its row 13 the first of a tree from 7 with 14 and 15.
+        let path: Vec<usize> = [0, 1, 2, 5].iter().map(|&r| first.inputs[r]).collect();
+        let rebase = Epoch {
+            base: 3,
+            prefix: Vec::new(),
+            parents: vec![None, Some(0), Some(1), Some(2), Some(3), Some(4), Some(4)],
+            inputs: path
+                .iter()
+                .copied()
+                .chain([13, 14, 15].iter().map(|&r| first.inputs[r]))
+                .collect(),
+        };
+        {
+            let h = held.as_mut().unwrap();
+            assert!(
+                !h.can_rewind_to(first.base + 5),
+                "only a start is a cut a flow takes"
+            );
+            assert!(h.rewind_to(3).unwrap());
+            let (got, want) = (h.current(), prompt().unwrap());
+            assert_eq!(
+                max_abs_diff(&got.recurrent_state, &want.current().recurrent_state),
+                0.0
+            );
+        }
+        send(&mut held, &rebase, 0..7, 4, &[0, 1, 2, 3, 4, 5, 6]).unwrap();
+        anchor_is(&held, &rebase.line(4), "after the rebase's forward");
+
+        let second = Epoch {
+            base: 7,
+            prefix: path.clone(),
+            parents: vec![None, Some(0), Some(0), Some(1), Some(2), Some(3)],
+            inputs: vec![
+                first.inputs[13],
+                first.inputs[14],
+                first.inputs[15],
+                19,
+                20,
+                21,
+            ],
+        };
+        // The walk went 13 → 14: row 4 (under 15) is gone; row 5 reads on
+        // from row 3 of the same forward.
+        send(&mut held, &second, 3..6, 1, &[3, 5]).unwrap();
+        anchor_is(&held, &second.line(1), "after the rebased tree's forward");
+
+        let next = row_of(30);
+        assert!(
+            w.forward_deltanet_into(&next, &mut held.clone(), 10, false)
+                .is_err(),
+            "nothing reads on from a flowing tree's state"
+        );
+        // A failed flow cuts to the last start every segment answered: the
+        // rebased tree's, or the one before it.
+        let mut earlier = held.clone();
+        assert!(earlier.as_mut().unwrap().rewind_to(3).unwrap());
+        let h = held.as_mut().unwrap();
+        assert!(!h.can_rewind_to(9));
+        assert!(h.rewind_to(7).unwrap());
+        let (_, want) = alone(&path);
+        let got = held.as_ref().unwrap();
+        assert_eq!(got.positions(), 7);
+        assert_eq!(
+            max_abs_diff(
+                &got.current().recurrent_state,
+                &want.current().recurrent_state
+            ),
+            0.0,
+            "the rebased tree's start"
+        );
+        let mut want = Some(want);
+        assert_eq!(
+            max_abs_diff(
+                &w.forward_deltanet_into(&next, &mut held, 7, false).unwrap(),
+                &w.forward_deltanet_into(&next, &mut want, 7, false).unwrap()
+            ),
+            0.0,
+            "the reply reads on from the start as from the path read alone"
+        );
     }
 
     /// A tree check on a card (#437) — the convolution and the delta rule

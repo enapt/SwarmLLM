@@ -1,6 +1,7 @@
 # A tree that flows through recurrent layers (Qwen 3.5 / 3.6 / 3.8) — plan, 2026-11-22
 
-Status: PLAN. Nothing below is built. Figures are MEASURED (our records), READ (a header or source) or DERIVED.
+Status: stage 1 BUILT (2026-11-22, processor layer + test; nothing sets a flowing scope outside the test until stage
+3). Stages 2-5 are PLAN. Figures are MEASURED (our records), READ (a header or source) or DERIVED.
 
 ## Why
 
@@ -120,6 +121,33 @@ state a chain read of the reply would reach.
    cards hold their share whole), the 0.8B drafting on this card, against the n-gram loop with the file's guess
    head. **Kill**: under 1.5× the one-check loop's tok/s on that link, or replies parting from the one-check loop's
    anywhere but at near ties. Then Qwen3.8-27B all-card (here + AU + US, `run_allcard_rig.sh`'s shares).
+
+## Stage 1 as built (2026-11-22)
+
+`layers::qwen35::FlowRows` (on `SsmState::flow`) and `DeltaNetWeights::forward_flowing`, entered where the forward's
+scope carries the walk's row (`TreeScope::flow_walk`, `RowPositions::for_flowing_tree`, `layers::flow_walk_now`);
+parents across forwards read off the visibility (`RowVisibility::parents_across_forwards`). What the build settled:
+
+- **The extended forward**: the kept rows on the new rows' lines (`FlowLines::earlier`, ascending — a parent is always
+  a smaller row) then the new rows, read as ONE tree from the anchor by the step's own `causal_conv_along` and
+  `delta_rule_into`. Earlier rows are never projected again: their q/k/v/g/β are kept; only the convolution re-reads
+  their `mixed` (their outputs are not used).
+- **The walk's row may be a row of the forward carrying it** (a missed draw's row, pushed and walked onto at once):
+  the anchor moves as far as kept rows reach BEFORE the forward (fewer rows read again) and again AFTER it.
+- **A row whose line leaves the anchor's subtree** — sent before the walk moved past its branch — is read from the
+  anchor (finite, never walked) and kept by nothing.
+- **A rebase** is `truncate` to the tree's start (`SsmState::rewind_to` → `FlowRows::state_at`), then one forward
+  holding its whole tree (the path as a chain, then the kept rows) whose walk is the path's end; the next forward's
+  `from` is past it, and the layer renumbers from there (`FlowRows::rebase_onto`) — valid only where the walk's row
+  IS that start's first row and its line the chain before it. The state there is the anchor's `before_anchor` (the
+  state after the walk row's parent), so no row's inputs are kept for it.
+- **Two starts are kept** (`FlowRows::starts`): a failed flow cuts to `dsd_flow`'s `settled_base` — the current
+  start, or with a rebase unanswered the one before it.
+- **Test** `a_flowing_trees_rows_are_their_lines_read_alone`: 16 rows over four forwards (both branches below the
+  walk read again, the walk onto a row of its own forward, a walk back up refused), a rebase, a forward of the
+  rebased tree; every reachable row and each anchor 0.0 from its line read alone; both cuts land on their starts.
+  Red (checked): earlier rows replayed as one chain (row 6), parents in earlier forwards ignored (row 5), the anchor's
+  path replay cut to its last row (row 9).
 
 ## Not in this plan
 
