@@ -4461,8 +4461,9 @@ kill ladder).
 #### #492 — The standing ring: one reply faster than the same model run whole, on a short ring of cards
 
 `P1` · speed · **CONCEPT 2026-11-21 (its counters released in v0.3.305); kill ladder steps 1 and 4 MEASURED — the verdict delay is the law's; a shorter
-loop pays (1.54× on one card, 100 → 0 ms) but through rows kept, not fewer misses; step 3 (the schedule model) does not
-calibrate yet; step 5 (the pacer) cannot run on today's computers (2026-11-22)** · plan: `docs/plans/standing_ring.md`
+loop pays (1.54× on one card, 100 → 0 ms) but through rows kept, not fewer misses; step 5 (the pacer) cannot run on
+today's computers; steps 2-3 (2026-11-22): real drafter ranks pass (prose m 0.22 < 0.25) and fix the model's misses, and no
+row policy moves prose on today's pair** · plan: `docs/plans/standing_ring.md`
 
 The owner's ask (2026-11-21): past prior art, our own design, faster than local, for thousands of cards. Six agents
 in turn produced it: the fewest cards that hold a model, chosen close together, a drafter that never stops guessing
@@ -4483,8 +4484,14 @@ step 4's rise in tokens a forward below 40 ms (−17% at 0 ms), so its pacer fig
 today's computers.** It needs a card that holds no slice. Beside the head's layers on this card it was already a
 measured loss (two processes time-slice one card, gotcha #759). On this computer's processor the 0.5B drafts ~3×
 slower than the head's forward. The far card runs only releases and holds a slice. No third card sits near the tail.
-Its predicted gain on this pair was code only, under +10%. **Next**: step 2 (drafter ranks against the 14B, offline),
-then step 3 recalibrated on those ranks to price what moves prose here: fewer misses, more rows kept a forward.
+Its predicted gain on this pair was code only, under +10%.
+**Steps 2-3, 2026-11-22 (plan § 11)**: the 0.5B's ranks against the 14B, dumped offline on the rigs' own saved replies,
+read prose m(8, deep) 0.221 (kill line 0.25) and code 0.08. Replayed through the schedule model with nothing fitted, they
+match every arm's misses (14B pair prose 18.5 against 18-21, one-card loops 5.8-8 against 5-12). Speed comes within
+−12..+16%, and the tree's growth still caps tokens a forward at short loops (1.62 against 1.86 at 0 ms). Row policies
+priced at the pair's loop move prose by −5..+5%, and the sim underprices the few winners (more levels a call). Checked
+against the 11-15 arms, it has the right direction and a third to a half of the loss. **Next**: a stronger prose drafter
+(the 1.5B instruct) priced the same way — its ranks on these replies, its card time a level.
 
 Prior art: none taken as the design, by the owner's direction; the debate checked each idea against our own
 measured kills instead (lanes, twins, a drafter guild, verdict taps, scout-and-stitch: the plan's appendix), and

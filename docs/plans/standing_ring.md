@@ -17,7 +17,8 @@ that delay are under half of a prose token's time and none of a code token's, an
 part: on one card a shorter loop bought 1.54× (100 → 0 ms, 21.6 → 33.2 tok/s) at the SAME miss count, through more
 of each forward's rows landing on the reply. The head stays busy 98-100% at every loop, so past a short loop the
 pacer is the lever — unmeasured, and **not measurable on today's computers (§ 10)**: it needs a card that holds no
-slice.
+slice. **§ 11** (real drafter ranks): the model now matches every arm's misses. On today's pair no row policy moves
+prose by more than a few percent; the next prose lever to price is a stronger drafter.
 
 ## Summary
 
@@ -325,7 +326,7 @@ layers, far 24-46 ms a forward, 130 ms, 0.15 ms a row; 40 seeds, 160 tokens), an
 - **Indicative only** (the rule withholds a ruling): on the 14B pair today's shape at a 20 ms loop reads 30.9 prose
   / 61.0 code (§ 9's slope gave ~29-33 prose), and the pacer there 32.3 / 92.9 (35.3 / 95.8 with the far's queue
   merged) — ~1.05× prose, ~1.5× code over the same loop without it; most of a prose gain is the short loop.
-  Scripts in the night's scratch folder (`step3/`: `ring_sim3.py`, `fitall.py`, `evalcal.py`, `grid.py`,
+  Scripts in `~/swarmllm-gate/deep/step3/` (moved out of the night's scratch folder 11-22: `ring_sim3.py`, `fitall.py`, `evalcal.py`, `grid.py`,
   `pacerA.py`), kept out of the repo until step 4's shape is reproduced.
 
 ## 9. Kill ladder step 4 — a shorter loop on one card, MEASURED (2026-11-21)
@@ -396,7 +397,84 @@ leaves `near_ms` ~24.5 a forward, against the far's 22-27 on its own card, so th
 46-48 measured since (§ 7). That is under +10%, on the reply kind already over the 20-30 bar. The pacer's case is a
 ring with a spare card beside the tail (step 7's shape), not this pair. On this pair, prose moves only through fewer
 misses or more of each forward's rows kept (§ 9). Step 2's real ranks against the 14B are what step 3 needs to price
-those (§ 8: its ranks were drawn from fixed shares). **Next: step 2, then step 3 recalibrated on its ranks.**
+those (§ 8: its ranks were drawn from fixed shares). **Next: step 2, then step 3 recalibrated on its ranks.** (Done: § 11.)
+
+## 11. Kill ladder steps 2 and 3 — real ranks fix the misses; no row policy moves prose on today's pair (2026-11-22)
+
+**Step 2, MEASURED offline** (the processor, llama.cpp through `llama_cpp` 0.3.16; the 14B and the 0.5B instruct
+drafter rebuilt from this node's shards for the run and deleted after):
+
+- Two dumps are in `~/swarmllm-ref/spec/`, both in `gumbeldump.py`'s layout:
+  - `greedydump.py` holds the 14B's own greedy replies to the rig's prompts and `gumbeldump.py`'s six.
+  - `replaydump.py` holds the rigs' saved replies, with both models teacher-forced over them. The target's own
+    top word is the reply's word at 151-158 of 160 positions.
+- Where the 14B's word sits among the drafter's guesses (first, second, third, fourth; absent from its top 8):
+
+  | | positions | 1st | 2nd | 3rd | 4th | absent from top 8 |
+  |---|---|---|---|---|---|---|
+  | prose | 1,792 | 0.622 | 0.151 | 0.063 | 0.033 | 0.079 |
+  | code | 400 | 0.845 | 0.095 | 0.028 | — | 0.005 |
+
+- **m(8, deep)**, the chance a level loses the target's word from an 8-row beam:
+  - prose 0.221, which **passes** the 0.25 kill line, though it is above the law's 0.177;
+  - code 0.075-0.080.
+
+  The 70B has no file here and is not measured.
+- The fitted ranks were wrong exactly where they mattered:
+  - The 14B's code first-guess share was fitted at 0.936; the real figure is 0.845.
+  - The one-card rig's absent share was fitted at 0.001; the real figure is 0.064.
+  - Step 4's rig asked another prompt (household appliance notes). There the drafter's first guess is right 71-73%
+    of the time, against 57-61% on the 14B pair's story.
+
+**Step 3, replayed on the rigs' OWN replies** (`~/swarmllm-gate/deep/step3/cal5.py`; ring_sim3's tree with
+ReplayTruth; nothing fitted):
+
+| arm | tok/s, sim vs measured | tokens a forward, sim vs measured | misses, sim vs measured | `L`, sim vs measured |
+|---|---|---|---|---|
+| 14B pair, prose | 21.29 vs 18.65-20.35 (+9%) | 0.82 vs 0.77-0.79 | 18.5 vs 18-21 | 176 vs 178-185 |
+| 14B pair, code | 53.33 vs 46.33-48.31 (+13%) | 2.05 vs 1.76-1.82 | 1 vs 0 | 176 vs 180 |
+| one card, 100 ms | 23.26 vs 21.27-21.90 (+8%) | 1.30 vs 1.23-1.26 | 8.0 vs 7-8 | 185 vs 188-191 |
+| one card, 40 ms | 29.07 vs 25.46-25.90 (+13%) | 1.62 vs 1.42-1.47 | 6.5 vs 5-6 | 125 vs 140 |
+| one card, 20 ms | 29.33 vs 23.86-26.62 (+16%) | 1.63 vs 1.50-1.51 | 5.8 vs 8-12 | 105 vs 134-139 |
+| one card, 0 ms | 29.13 vs 32.96-33.57 (−12%) | 1.62 vs 1.84-1.88 | 7.0 vs 8 | 85 vs 76-78 |
+
+- **Misses now match at every point**, so the made-up ranks were their whole error.
+- **What is left is the tree's growth.** The sim's tokens a forward stop at ~1.62 from 40 ms down, where the rig's
+  reach 1.86 at 0 ms, and it reads 4-16% high elsewhere.
+- **Ruled out: the drafter's ratings off the reply.** One step off the path, the drafter's top word has probability
+  0.636 after its first wrong guess and 0.625 after its second (796 positions each, `offpath.py`), against 0.648
+  on the path; its top-8 mass is the same. So ring_sim3's use of the on-path ratings there holds on average.
+- **Still candidates**: the rebases at the row cap, and the copied rows (§ 8).
+
+**Row policies priced at the 14B pair's loop** (`pol5.py`, same replies; change against the default 8 rows × 3
+levels, which reads prose 21.3 / code 53.3):
+
+| policy | prose | code |
+|---|---|---|
+| 4 rows | −4% | −6% |
+| 6 rows | −1% | −3% |
+| 12 rows | −2% | −5% |
+| 16 rows | −1% | −9% |
+| 2 levels | −5% | −19% |
+| 4 levels | +4% | +5% |
+| 5 levels | +5% | +9% |
+| 64 live rows | −1% | −12% |
+| 256 live rows | 0 | 0 |
+
+**Checked against the 11-15 arms' measured order (§ 8), the sim gets the direction and a third to a half of the size:**
+
+- **4 rows**: measured about −18% on prose.
+- **16 rows**: measured about −10% on prose and −23% on code.
+
+The sim prices a row at 0.15 ms and a call's drafting at a fixed 14 ms whatever its levels. So its only winners,
++4-5% on prose from more levels a call, are exactly the policies it underprices. And the 11-15 4-levels arm measured
+no gain: 16.85-19.38, against 17.61-19.93 for the default.
+
+**Ruling.** On today's 14B pair no row policy moves prose by more than a few percent. Prose moves with the loop
+(§ 9: ~0.144 ms a token per ms of verdict delay) and with the drafter's misses. Code is already over the bar. The
+next prose lever this pair can test is **a stronger prose drafter**, priced the same way: its ranks on these replies
+(`replaydump.py`) and its card time per level. The open question is whether fewer misses pay for a slower level.
+**Next**: the 1.5B instruct drafter against the 14B.
 
 ## Appendix — every concept raised
 
