@@ -6710,6 +6710,25 @@ rows. So the next factor has to come from E itself: a drafter that guesses bette
 copied text where the reply repeats (§ copied runs: 2× on an edit), or a shorter round trip (near
 chains). Not from rows, levels or the window.
 
+*Levels on the recurrent 9B, captured: two beat three* (2026-11-23 21:50-22:23Z, `real_link9b.sh` flowc, TAG
+rf9b11 then rf9b12, binary rf10 = main c763fce1c's code under `SWARMLLM_FLOW_GRAPH=1`, Qwen3.5-9B parts 0-4
+[0, 17) here and 5-9 + the head on the Australian card, Qwen3.5-0.8B Q8_0 drafting on this card, 160-token
+greedy replies, the client's decode_tok_s; ABCCBA twice; 0 refusals of any kind in 12 arms):
+
+| levels a call | prose tok/s | code tok/s | here a forward: drafting + layers (ms) |
+|---|---|---|---|
+| 1 (`SWARMLLM_FLOW_LEVELS=1`, rf9b12 only) | 15.79, 14.98 | 28.27, 27.53 | 9.0-9.8 + 14.2-14.9 |
+| **2 (the default for a walk-carrying flow since)** | 14.65, 15.19; 15.41, 14.54 | 25.88, 24.90; 27.95, 25.04 | 17.1-17.9 + 19.3-20.5 |
+| 3 (before) | 14.38, 13.94; 14.24, 13.31 | 23.60, 23.13; 25.28, 24.39 | 25.0-27.1 + 21.5-23.8 |
+| 4 (rf9b11 only) | 13.93, 14.00 | 22.04, 22.12 | 34.4-37.8 + 25.7-28.4 |
+
+Unlike the 14B's (above), this node is the slower side by far — the far end never waited for (`waiting_ms` 0) — and
+a captured drafter level costs ~8.5 ms of a ~48 ms forward, so a level fewer is ~23% of the forward for ~17% of
+its tokens. One level reads best in its one sitting, within two's spread; its forward is cheaper still in this
+node's layers (14 against 19-20 ms: 8 rows may be a captured step there, unchecked) and its forwards half again as
+many across the link, which a slower far end would pay — measure it against two where the far end is the slower
+side before moving the default (FUTURE_WORK #228). Another family's flow keeps three (`dsd_flow::levels_by_default`).
+
 *The drafter, on the same link* (02:44-03:11Z, `~/swarmllm-318/flowdraft.sh` then `flowfmt.sh`,
 main's build, arms by the one drafter H holds, alternating; every DSD line named that drafter with
 `drafter_on_card=true`). 400-token replies:

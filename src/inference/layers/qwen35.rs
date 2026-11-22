@@ -1279,9 +1279,12 @@ impl FlowRows {
 
     /// Rows of inputs a forward of `rows` new rows may newly allocate, a kind:
     /// none where the store has room for them, else the rows by which
-    /// [`Self::make_room`] grows it — the store it replaces is already counted
-    /// as held (`tensors`), and is let go a kind at a time as each new one
-    /// takes its place. Claimed whole on top of the old, a full store's growth
+    /// [`Self::make_room`] grows it, the store it replaces being counted as
+    /// held already (`tensors`). That one forward holds both: the forward's
+    /// rollback copy (`SsmState::flow_begun`) keeps the old store until the
+    /// next forward begins, so its peak is above the claim by the old store —
+    /// inside the budget's margin in every arm measured (2026-11-23), and
+    /// FUTURE_WORK #228's residual. Claimed whole on top of the old, a full store's growth
     /// was refused on the drafter at 268 + 65 MB of a 308 MB budget and on the
     /// 9B's head at 308 + 184 of 491, and the reply went on at a third of its
     /// speed (2026-11-23, TH↔AU). Joined anew (the A/B arms), the rows written

@@ -27,7 +27,8 @@ any WAN round trip; with a flow it has the 14B's shape. This plan is the flow fo
 
 ## What a flow asks of a recurrent layer
 
-A flow grows ONE tree, a few rows a forward (`levels_a_call` 3 × `rows_a_level` 8), each forward's rows the tree's
+A flow grows ONE tree, a few rows a forward (`levels_a_call` × `rows_a_level` 8 — two levels for a recurrent
+target since 2026-11-23, three for another family, `dsd_flow::levels_by_default`), each forward's rows the tree's
 LAST (`LayerForward::draft_tree_from`; `draft_parents` names every row from the tree's base), while the coordinator
 walks the draws that come back (`FlowTree::walk`). Rows from earlier forwards stay in each segment's cache; a
 forward's rows have their PARENTS in earlier forwards. Lost branches stay until a rebase (≤ `MAX_TREE_ROWS` 512).
@@ -359,8 +360,9 @@ followers in the same tree read whole; red (checked) without the walk: the secon
   when a message came just after its last graph — then nothing was left to record, so every tree shape stayed "left
   to the recording" for the worker's life, and whether a sitting captured anything was message timing
   (`record_check_widths` now asks whether a shape is done before whether to stop; gotcha #1164); (2) **a full store's
-  claim is its growth**, not a whole new store on top of the old one already counted (`rows_a_forward_may_allocate`),
-  and the store grows by half, not twice: claimed whole, a growth was refused on the drafter at 268 + 65 MB of a
+  claim is its growth**, not a whole new store on top of the old one already counted (`rows_a_forward_may_allocate`;
+  ⚠ the growing forward's rollback copy holds the old store until the next forward, so that forward's peak is the
+  claim plus the old store — FUTURE_WORK #228), and the store grows by half, not twice: claimed whole, a growth was refused on the drafter at 268 + 65 MB of a
   308 MB budget and on the 9B's head at 308 + 184 of 491, and the reply lost its drafter or its flow.
 - **A flowing forward refused for memory keeps its conversation** (the same sitting's first arm: Australia's card had
   no room, `budget 0 MB`, the flow failed over to the rounds — and the rounds' first check was answered "no longer

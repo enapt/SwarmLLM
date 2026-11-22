@@ -6208,7 +6208,10 @@ width keeps +36% (the 11-18 processor measure). Now the layer reads the whole tr
   place until the buffer is full (`FlowRows::make_room` gathers the kept rows to the front of a larger
   one). The bytes a flowing forward claims are what the store may newly make — nothing while it has
   room, the rows it GROWS by when full (`FlowRows::rows_a_forward_may_allocate`): the store it replaces
-  is already counted held, and goes a kind at a time as each new one takes its place. Claimed whole on
+  is already counted held. ⚠ That one forward holds BOTH — its rollback copy (`SsmState::flow_begun`)
+  keeps the old store until the next forward begins — so its peak is above the claim by the old store;
+  inside the budget's margin in every arm measured (0 refusals, no card refusal, `real_link_rf9b9`-`11`),
+  and FUTURE_WORK #228's residual (pre-release review, 2026-11-23). Claimed whole on
   top of the old, at twice the rows kept, a growth was refused on the drafter (268 + 65 MB of a 308 MB
   budget) and on the 9B's head (308 + 184 of 491), the flow's drafter or the flow itself lost and the
   reply 7.5-8 tok/s (`real_link_rf9b7_1123/`, `real_link_rf9b8_1123/` arm 5). A level 705 → 644 launches (`copy2d_f32` 202 → 137);

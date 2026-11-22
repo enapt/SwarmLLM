@@ -91,10 +91,37 @@ fn rows_a_level() -> u32 {
 /// (`split::FlowStep::levels`). At one, the walk advanced 0.63-0.74 tokens a
 /// call whatever the rows a call (8, 16 or 32; `flow318.sh` on the card,
 /// 2026-10-22): a branch grew one row deeper a call, and the walk can go no
-/// deeper than the drafter has. `SWARMLLM_FLOW_LEVELS` (1-8).
-fn levels_a_call() -> u32 {
-    static N: OnceLock<u32> = OnceLock::new();
-    *N.get_or_init(|| knob("SWARMLLM_FLOW_LEVELS", 3, 1, 8))
+/// deeper than the drafter has. `SWARMLLM_FLOW_LEVELS` (1-8) sets every
+/// flow's; else [`levels_by_default`].
+fn levels_a_call(with_the_walk: bool) -> u32 {
+    static SET: OnceLock<Option<u32>> = OnceLock::new();
+    SET.get_or_init(|| {
+        std::env::var("SWARMLLM_FLOW_LEVELS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .map(|v| v.clamp(1, 8))
+    })
+    .unwrap_or_else(|| levels_by_default(with_the_walk))
+}
+
+/// Three levels a call, two where the flow carries the walk (a recurrent
+/// target, Qwen 3.5). The 14B's sweep kept three: a level fewer saved ~4.5 ms
+/// of a 40 ms forward and cost 17% of prose and 27% of code a forward
+/// (2026-11-15, `docs/invariants/scheduling.md`). On the 9B with its drafter's
+/// levels captured a level costs ~8.5 ms of drafting and ~2.5 of this node's
+/// layers in a ~48 ms forward, so two levels pay: prose 14.65 / 15.19 and code
+/// 25.88 / 24.90 tok/s against three's 14.38 / 13.94 and 23.60 / 23.13, four's
+/// 13.93 / 14.00 and 22.04 / 22.12 (TH↔AU, `real_link_rf9b11_1123/`,
+/// ABCCBA); a second sitting (`real_link_rf9b12_1123/`) the same: two 15.41 /
+/// 14.54 and 27.95 / 25.04, three 14.24 / 13.31 and 25.28 / 24.39. One level
+/// read 15.79 / 14.98 and 28.27 / 27.53 there, within two's spread in one
+/// sitting, at half again the forwards across the link — kept as the next
+/// question (FUTURE_WORK #228).
+fn levels_by_default(with_the_walk: bool) -> u32 {
+    match with_the_walk {
+        true => 2,
+        false => 3,
+    }
 }
 
 /// Live rows (the walk's row and those following it) past which the drafter
@@ -1509,7 +1536,7 @@ impl PipelineExecutor {
             near_ms = format_args!("{:.0}", run.near_ms),
             waiting_ms = format_args!("{:.0}", run.waiting_ms),
             rows_a_level = rows_a_level(),
-            levels = levels_a_call(),
+            levels = levels_a_call(run.with_the_walk),
             live_most = live_most(),
             guard = run.guard.guarded,
             guard_at_start = format_args!("{}x{}", guard_at_start.width, guard_at_start.live),
@@ -1611,7 +1638,7 @@ impl FlowRun<'_, '_> {
         {
             return Ok(false);
         }
-        let (rows, levels) = (guard.width, levels_a_call());
+        let (rows, levels) = (guard.width, levels_a_call(self.with_the_walk));
         if self.flow.len() + (rows * levels) as usize + 1 > MAX_TREE_ROWS
             || self.flow.tree().depth(self.flow.at()) >= REBASE_PATH_ROWS
         {
@@ -2767,6 +2794,14 @@ mod tests {
 
     fn at(t0: Instant, ms: u64) -> Instant {
         t0 + Duration::from_millis(ms)
+    }
+
+    /// A recurrent target's flow grows two levels a drafter call, another
+    /// family's three (`levels_by_default`).
+    #[test]
+    fn a_flow_carrying_the_walk_grows_two_levels_a_call_and_another_three() {
+        assert_eq!(levels_by_default(true), 2, "a recurrent target's flow");
+        assert_eq!(levels_by_default(false), 3, "another family's flow");
     }
 
     /// The reply's line reports the median wait of a kept guess and of a lost
