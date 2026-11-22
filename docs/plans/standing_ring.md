@@ -387,7 +387,10 @@ A pacer is worth something only on a device that is not busy with a slice, and t
 The single-card levers on the head's ~39 ms forward are spent too. The drafter's tree levels are already captured as
 graphs (−26%, `docs/invariants/inference.md` § "A tree level on a card"). Fewer layers on the head (`flow23`/`flow20`,
 2026-11-16) gained nothing (FUTURE_WORK #411: at a ~130 ms link the flow runs at its tokens a round trip, not its
-slowest stage's forward).
+slowest stage's forward). Capturing the head's own ~25-row forward (vLLM's and SGLang's padded verify graphs) would
+hide nothing. Its launches are issued in ~6 ms (`forward_ms` of the 11-21 sitting's 24-row forwards over 26 layers:
+the host's side, before any copy-out), while the card needs at least ~17 ms to read those layers' 4.7 GB. That
+leaves `near_ms` ~24.5 a forward, against the far's 22-27 on its own card, so the card itself sets the pace.
 
 **What it means.** The plan's own step-5 prediction for today's pair was prose flat and code ~51 tok/s, against the
 46-48 measured since (§ 7). That is under +10%, on the reply kind already over the 20-30 bar. The pacer's case is a
