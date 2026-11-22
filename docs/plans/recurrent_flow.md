@@ -308,7 +308,7 @@ followers in the same tree read whole; red (checked) without the walk: the secon
   and the gathers 98 of a drafter level (54%), 297 and 93 of the target's (64%) — every recurrent layer gathered its
   earlier rows, joined them to the new ones, and joined the new ones to the held ones apart — and 55 of the 59 copies
   were three tables every recurrent layer uploaded again (parents, walks, gather rows; each pageable copy waits for
-  the stream to drain). Now one join and one gather a kind (`FlowRows::keep_joined`, `rows_the_lines_read`), the
+  the stream to drain). Now one join and one gather a kind (`FlowRows::put` since the store, `rows_the_lines_read`), the
   tables uploaded once while their content stands (`qwen35::rows_on`), and the walk's replay in two launches
   (`FlowRows::advance_to` hands `cuda::replay` buffers of its own). A/B `SWARMLLM_FLOW_ROWS=per-layer`
   (+ `SWARMLLM_SSM_REPLAY=composed`).
@@ -320,6 +320,37 @@ followers in the same tree read whole; red (checked) without the walk: the secon
   rows to the new ones (two copies a kind) and the lines' gather (one a kind), every recurrent layer. Next: an
   append-only store a kind (one copy of the new rows, never the held ones) and the two kernels reading rows through
   a table (no gather).
+- **The store** (2026-11-23, `real_link_rf9b5_1123/`, same rig, ten arms in the order store, joined, 2B, 2B, joined,
+  store, store, 2B, joined, store + count): each kind's rows in a buffer made for twice the rows kept (half as many
+  again since the memory refusals below), a forward's
+  new rows copied once after the rows written (`FlowRows::put`), a row the walk left kept in place until the buffer
+  is full (`FlowRows::make_room`); the joined arm is `SWARMLLM_FLOW_ROWS=joined`. Drafting a flowing forward with
+  Qwen3.5-0.8B Q8_0: store **36.9-38.5 ms** (prose 37.7-38.5, code 36.9-37.7) against joined 38.4-40.5; tok/s within
+  the runs' spread — store prose 12.89, 14.00, 14.14, code 22.73, 23.36, 27.26; joined prose 12.77, 13.05, 13.47,
+  code 22.46, 25.52, 26.68. The count arm: a level **705 → 644 launches** (`copy2d_f32` 202 → 137), the head's 17
+  layers 466 → 440. **Qwen3.5-2B Q8_0 drafting** (store; fetched to this node for the arm): 46.9-48.4 ms a prose
+  forward, 42.6-46.4 code, but a 160-token prose reply took 150-162 forwards against the 0.8B's 190-207 — prose
+  13.99, 14.28, 14.74, code 22.51, 28.89, 29.47.
+- **Captured levels** (2026-11-23, `real_link_rf9b6/7/8/9_1123/`): a flowing level staged before the capture — the
+  walk's replay, its row tables, a scratch pair, room in a full store (`layers::stage_flowing_states`) and its memory
+  claim (`claim_room_for_forward`; inside, the claim's synchronize broke the capture, gotcha #1163) — and always
+  gathering its lines' rows, so every level records one topology (with none read the update was refused at every
+  level, 588 in an arm). On the card alone it holds: `flowing_levels_pace_captured_and_op_by_op`, 40 drafter levels of
+  Qwen3.5-0.8B, **9.6-9.8 ms a level captured against 13.1-13.2** op by op, 1 graph made and 38 updated in place,
+  logits bit-equal (`a_captured_flowing_level_reads_as_the_ordinary_one`). On the TH↔AU link it does NOT yet: with
+  the drafter's recording finished (below), most captures were refused inside (`q35_deltanet:
+  CUDA_ERROR_INVALID_VALUE`, 25 in an arm), and the captured arms met memory refusals the uncaptured ones did not —
+  prose 4.81 and 8.36, code 7.71 and 7.74 tok/s, against the store uncaptured 14.04, 12.56 / 22.04, 25.94 and joined
+  13.13, 13.37 / 26.24, 19.65 (`real_link_rf9b9_1123/`, arms captured, joined, store, store, joined, captured). So
+  it is OFF (`SWARMLLM_FLOW_GRAPH=1` turns it on) until the refusal and the graphs' memory are understood; an
+  earlier sitting where most levels were captured drafted at 27.2-28.3 ms a forward against 37.3-39.0
+  (`real_link_rf9b7_1123/`). Found on the way, and kept: (1) **the drafter's idle recording was never marked done**
+  when a message came just after its last graph — then nothing was left to record, so every tree shape stayed "left
+  to the recording" for the worker's life, and whether a sitting captured anything was message timing
+  (`record_check_widths` now asks whether a shape is done before whether to stop; gotcha #1164); (2) **a full store's
+  claim is its growth**, not a whole new store on top of the old one already counted (`rows_a_forward_may_allocate`),
+  and the store grows by half, not twice: claimed whole, a growth was refused on the drafter at 268 + 65 MB of a
+  308 MB budget and on the 9B's head at 308 + 184 of 491, and the reply lost its drafter or its flow.
 - **A flowing forward refused for memory keeps its conversation** (the same sitting's first arm: Australia's card had
   no room, `budget 0 MB`, the flow failed over to the rounds — and the rounds' first check was answered "no longer
   holds the conversation", because the refusal had cleared the request as a request-ending refusal does). The tree
@@ -331,5 +362,5 @@ followers in the same tree read whole; red (checked) without the walk: the secon
 
 The chain stream (`dsd_stream`) and a recurrent drafter's own γ-step chains: one-position steps run as captured
 graphs, whose writes go to fixed addresses, so keeping their inputs across steps is a different piece of work
-(#228 (5)). The flow's forwards are several rows, never captured on a recurrent model
+(#228 (5)). A flowing level IS captured (§ Stage 5, "Captured levels"); a tree check that does not flow is not
 (`SplitModel::tree_steps_may_be_captured`).

@@ -3283,11 +3283,58 @@ impl SsmState {
     /// its inputs — since a captured step must allocate nothing
     /// (`KvCacheStore::every_cache_holds`). An ordinary step makes what is
     /// missing.
+    /// Why [`Self::holds_a_step_to`] says no, in words (a DIAG line's).
+    pub(crate) fn why_no_step_to(&self, positions: usize) -> String {
+        let rows = positions.saturating_sub(self.at);
+        match &self.flow {
+            Some(flow) => format!("flowing: {}", flow.why_no_level_of(rows)),
+            None if self.previous.is_none() => "no second state pair".into(),
+            None => format!("no rows kept for a step of {rows}"),
+        }
+    }
+
     pub(crate) fn holds_a_step_to(&self, positions: usize) -> bool {
         let rows = positions.saturating_sub(self.at);
-        self.flow.is_none()
-            && self.previous.is_some()
+        // A flowing level: its store made; room in it and the rest are made
+        // before the capture (`stage_flowing_level`).
+        if let Some(flow) = &self.flow {
+            return flow.holds_a_level();
+        }
+        self.previous.is_some()
             && (rows < 2 || self.rows.as_ref().is_some_and(|r| r.capacity() >= rows))
+    }
+
+    /// Readies a flowing forward of `rows` new rows (`parents`, the first at
+    /// tree row `before`, the tree from `base`) at cache position `index_pos`
+    /// to be CAPTURED, before the capture: the flow begun as the forward
+    /// begins it ([`Self::flow_from`] — its rollback copy then holds what is
+    /// made here), the anchor moved to the walk's row with the replay that
+    /// takes, and the rest `qwen35::FlowRows::stage_level` makes. Inside the
+    /// capture the forward finds each done. False (nothing captured) where
+    /// no flow is under way or the forward would still make something.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn stage_flowing_level(
+        &mut self,
+        base: usize,
+        index_pos: usize,
+        walk: usize,
+        before: usize,
+        parents: &[Option<usize>],
+        rows: usize,
+        device: &Device,
+    ) -> CandleResult<bool> {
+        if self.flow.is_none() {
+            tracing::debug!(
+                index_pos,
+                "DIAG: a flowing level runs uncaptured: its flow has not begun"
+            );
+            return Ok(false);
+        }
+        self.flow_from(base, index_pos)?;
+        let flow = self.flow.as_mut().expect("kept by flow_from");
+        flow.check_walk(walk, before, parents)?;
+        flow.advance_to(walk)?;
+        flow.stage_level(walk, before, parents, rows, device)
     }
 
     /// Takes the buffers the next step writes into, if kept. The step about to
@@ -3408,16 +3455,16 @@ impl SsmState {
     }
 
     /// What a flowing forward of `rows` new rows may newly hold on this layer's
-    /// device, at most: the rows the flow keeps gathered again with the new
-    /// ones (`qwen35::FlowRows::keep` joins them whole, `advance_to` gathers
-    /// the rows still following the walk), and the two states the walk's
-    /// checkpoint moves to. A kept row is its convolution's inputs and
-    /// outputs (`channels` each) and its gates (two a value head) — on a
-    /// 27B-class layer ~80 KB, far past its attention cache. An upper bound:
-    /// what the last flowing forward began from (`flow_begun`) and the rows
-    /// the walk leaves are let go during the forward. The forward's head-room
-    /// claim adds it (`executor`, security review 2026-11-22: unclaimed, a
-    /// tree of 512 rows grew a segment's card memory past its budget).
+    /// device, at most: the rows of inputs its store may newly allocate
+    /// (`qwen35::FlowRows::rows_a_forward_may_allocate` — none where the store
+    /// has room, the rows it grows by where it is full), and the two states the walk's
+    /// checkpoint moves to. A row is its convolution's inputs and outputs
+    /// (`channels` each) and its gates (two a value head) — on a 27B-class
+    /// layer ~80 KB, far past its attention cache. An upper bound: what the
+    /// last flowing forward began from (`flow_begun`) and a full store's old
+    /// tensors are let go during the forward. The forward's head-room claim
+    /// adds it (`executor`, security review 2026-11-22: unclaimed, a tree of
+    /// 512 rows grew a segment's card memory past its budget).
     pub(crate) fn bytes_a_flowing_forward_may_add(&self, rows: usize) -> u64 {
         let slot = &self.current;
         let bytes = |t: &Tensor| t.elem_count() as u64 * t.dtype().size_in_bytes() as u64;
@@ -3425,8 +3472,8 @@ impl SsmState {
         let heads = slot.recurrent_state.dims().get(1).copied().unwrap_or(0);
         let row =
             (2 * channels + 2 * heads) as u64 * slot.conv_state.dtype().size_in_bytes() as u64;
-        let kept = self.flow.as_ref().map_or(0, qwen35::FlowRows::rows_kept);
-        (kept + rows) as u64 * row + 2 * (bytes(&slot.conv_state) + bytes(&slot.recurrent_state))
+        let allocated = qwen35::FlowRows::rows_a_forward_may_allocate(self.flow.as_ref(), rows);
+        allocated as u64 * row + 2 * (bytes(&slot.conv_state) + bytes(&slot.recurrent_state))
     }
 
     /// The memory this layer's state lives in.
@@ -4195,6 +4242,60 @@ pub(crate) fn tree_scope_now() -> Option<TreeScope> {
 /// whether this forward's tree flows, without copying the scope.
 pub(crate) fn flow_walk_now() -> Option<u32> {
     ROW_POSITIONS.with(|p| p.borrow().as_ref().and_then(|t| t.flow_walk))
+}
+
+/// Readies a flowing forward of `rows` rows at `index_pos` to be CAPTURED, its
+/// tree's scope set on this thread ([`RowPositions::for_tree_walked`]): every
+/// recurrent layer's state ([`SsmState::stage_flowing_level`]) — the row
+/// tables uploaded, the walk's replay run and the scratch made BEFORE the
+/// capture, where an upload is replayed from the host address (gotcha #758)
+/// and memory made inside is a later step's remap (#295). False where any
+/// layer would still make something inside it: the forward then runs the
+/// ordinary way, and makes what it needs itself.
+///
+/// Prior art: vLLM and SGLang capture a speculative verify step only with
+/// its inputs in buffers set up before the capture (positions, block tables,
+/// the tree's mask), copied into the same addresses each step.
+pub(crate) fn stage_flowing_states(
+    states: &mut [Option<SsmState>],
+    index_pos: usize,
+    rows: usize,
+    device: &Device,
+) -> CandleResult<bool> {
+    let Some(walk) = flow_walk_now() else {
+        return Ok(false);
+    };
+    let Some(seen) = tree_scope_now().and_then(|scope| scope.visibility) else {
+        return Ok(false);
+    };
+    let Ok((before, parents)) = seen.parents_across_forwards() else {
+        return Ok(false);
+    };
+    if parents.len() != rows || seen.base + before != index_pos {
+        tracing::debug!(
+            rows,
+            parents = parents.len(),
+            base = seen.base,
+            before,
+            index_pos,
+            "DIAG: a flowing level runs uncaptured: its tree is not the forward's"
+        );
+        return Ok(false);
+    }
+    for state in states.iter_mut().flatten() {
+        if !state.stage_flowing_level(
+            seen.base,
+            index_pos,
+            walk as usize,
+            before,
+            &parents,
+            rows,
+            device,
+        )? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// The positions [`RowPositions`] has set on this thread, if any.

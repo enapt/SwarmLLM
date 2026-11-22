@@ -1338,15 +1338,27 @@ impl SplitModel {
     /// off the host per call (`DeltaNetWeights::causal_conv_along`), which a capture
     /// would not see.
     fn tree_steps_may_be_captured(&self) -> bool {
+        use crate::inference::decode_attn::card_kernel_covers;
+        // Qwen 3.5's layers only in a tree that FLOWS: its recurrent layers'
+        // tables are staged before the capture (`layers::stage_flowing_states`);
+        // a tree check that does not flow uploads its parents inside.
+        let flows = self.flow_walk.is_some();
         crate::inference::cuda_graph::tree_steps_requested()
             && crate::inference::decode_attn::tree_kernel_enabled()
             && self.device.is_cuda()
             && self.layer_devices.is_empty()
-            && self.layers.iter().all(|layer| {
-                matches!(layer, LayerVariant::Dense(lw)
-                if lw.attn_sinks.is_none() && crate::inference::decode_attn::card_kernel_covers(
-                    lw.n_head, lw.n_kv_head, lw.head_dim,
-                ))
+            && self.layers.iter().all(|layer| match layer {
+                LayerVariant::Dense(lw) => {
+                    lw.attn_sinks.is_none()
+                        && card_kernel_covers(lw.n_head, lw.n_kv_head, lw.head_dim)
+                }
+                LayerVariant::Qwen35Attn { weights, .. } => {
+                    flows && card_kernel_covers(weights.n_head, weights.n_kv_head, weights.head_dim)
+                }
+                LayerVariant::Qwen35Ssm { weights, .. } => {
+                    flows && weights.flowing_level_may_be_captured()
+                }
+                LayerVariant::DeepSeek { .. } => false,
             })
     }
 
@@ -1548,6 +1560,14 @@ impl SplitModel {
                 self.slot_keeps_no_cache(slot)
             });
         let not_ready = template.is_some() && !caches_ready;
+        if not_ready && tracing::enabled!(tracing::Level::DEBUG) {
+            let why = kv_cache_store.why_a_cache_does_not_hold(
+                &cache_key,
+                index_pos + positions,
+                |slot| self.slot_keeps_no_cache(slot),
+            );
+            tracing::debug!(index_pos, positions, follows, %why, "DIAG: a step to capture was not ready");
+        }
         let ready = template.filter(|_| caches_ready);
         // A shape with no graph yet is left to the idle recording, never made
         // inside a reply (FUTURE_WORK #357 (d)).
@@ -1601,14 +1621,55 @@ impl SplitModel {
                     .iter()
                     .filter_map(|layer| match layer {
                         LayerVariant::Dense(lw) => Some((&lw.cos, &lw.sin)),
+                        LayerVariant::Qwen35Attn { weights, .. } => {
+                            Some((&weights.cos, &weights.sin))
+                        }
                         _ => None,
                     })
                     .collect();
-                if !crate::inference::layers::stage_tree_forward(&self.device, &tables)
-                    .map_err(SwarmError::internal)?
-                {
-                    // Nothing to stage it with (`SWARMLLM_TREE_ROPE=per-call`):
-                    // the ordinary way.
+                let mut staged =
+                    crate::inference::layers::stage_tree_forward(&self.device, &tables)
+                        .map_err(SwarmError::internal)?;
+                // A flowing tree's recurrent layers: their row tables, the
+                // walk's replay and their scratch, made here
+                // (`stage_flowing_states`). A refusal — or a failure, which the
+                // ordinary forward meets and reports itself — runs it the
+                // ordinary way. The room for the rows it keeps is claimed here
+                // too, outside the capture (`claim_room_for_forward`).
+                if staged && self.flow_walk.is_some() && self.carries_recurrent_state() {
+                    let kv_reserve = kv_cache_store
+                        .reserved_positions(request_id)
+                        .min(self.max_seq_len);
+                    self.claim_room_for_forward(
+                        kv_cache_store,
+                        &cache_key,
+                        request_id,
+                        index_pos,
+                        positions,
+                        kv_reserve,
+                        true,
+                    )?;
+                    let mut entry =
+                        kv_cache_store.get_or_create_keyed(&cache_key, self.layers.len());
+                    staged = matches!(
+                        crate::inference::layers::stage_flowing_states(
+                            &mut entry.ssm_states,
+                            index_pos,
+                            positions,
+                            &self.device,
+                        ),
+                        Ok(true)
+                    );
+                }
+                if !staged {
+                    tracing::debug!(
+                        index_pos,
+                        positions,
+                        "DIAG: a tree level was not staged: it runs uncaptured"
+                    );
+                    // Nothing to stage it with (`SWARMLLM_TREE_ROPE=per-call`), or
+                    // a flowing level that would make something inside the
+                    // capture: the ordinary way.
                     drop(scope);
                     let (out, caught) = self.forward_inner_body(
                         input,
@@ -1787,6 +1848,189 @@ impl SplitModel {
         Ok((out, caught))
     }
 
+    /// Head-Room Admission: refuse before claiming GPU memory we do not
+    /// have, rather than letting `Tensor::cat` OOM part-way through a
+    /// conversation.
+    ///
+    /// Only runs on the forwards that actually grow the cache — a
+    /// conversation claims memory when it crosses a quantum boundary and at
+    /// no other time — so the store walk below costs nothing on the
+    /// per-token path. A tree that FLOWS through recurrent layers grows it
+    /// on every forward (the rows the flow keeps,
+    /// `SsmState::bytes_a_flowing_forward_may_add`), so each of those
+    /// claims too.
+    ///
+    /// `ServiceUnavailable`, not `Validation`: the request is well-formed
+    /// and THIS server cannot serve it right now. That is a 503, which is
+    /// what lets a coordinator route it to a peer that can — the reason a
+    /// swarm can refuse where vLLM has to preempt and recompute.
+    ///
+    /// Every memory this segment's caches live in is asked — the card's,
+    /// and a card/processor split's machine memory too, each with its own
+    /// layers' bytes (#262).
+    ///
+    /// `count_flowing_rows`: false where the rows a FLOWING forward keeps were
+    /// claimed already — by `decode_step_with_graph` before a captured level's
+    /// capture. The claim reads the card's free memory after a synchronize
+    /// (`kv_budget::device_free_and_total_bytes`), and a synchronize inside a
+    /// capture invalidates it: every captured flowing level was refused that
+    /// way until the claim moved out (2026-11-23).
+    #[allow(clippy::too_many_arguments)]
+    fn claim_room_for_forward(
+        &self,
+        kv_cache_store: &KvCacheStore,
+        cache_key: &str,
+        request_id: &str,
+        index_pos: usize,
+        seq_len: usize,
+        kv_reserve: usize,
+        count_flowing_rows: bool,
+    ) -> Result<(), SwarmError> {
+        let total_seq = index_pos + seq_len;
+        let mut claiming_once: Option<usize> = None;
+        for home in self.kv_homes() {
+            let (Some(load_time_budget), _) = self.kv_budget(home) else {
+                continue;
+            };
+            // Positions this forward newly ALLOCATES — zero for almost every
+            // decode step, and a whole prompt's worth on a prefill; the old
+            // arithmetic, from `index_pos`, charged a reply at every quantum
+            // boundary inside memory it already had.
+            let claiming = *claiming_once.get_or_insert_with(|| {
+                self.kv_positions_a_forward_adds(kv_cache_store, cache_key, kv_reserve, total_seq)
+            });
+            let flowing = if count_flowing_rows && self.flow_walk.is_some() {
+                kv_cache_store.bytes_a_flowing_forward_may_add(cache_key, seq_len, home)
+            } else {
+                0
+            };
+            if claiming > 0 || flowing > 0 {
+                // What this forward's caches newly allocate here.
+                let claim = self
+                    .kv_bytes_a_forward_adds(
+                        kv_cache_store,
+                        cache_key,
+                        index_pos,
+                        seq_len,
+                        claiming,
+                        home,
+                    )
+                    .saturating_add(flowing);
+                // A forward that allocates nothing here needs no room — a
+                // windowed cache reaching the end of its buffer slides in
+                // place — so it is never refused, nor its conversation cleared,
+                // for memory other programs took since.
+                if claim == 0 {
+                    continue;
+                }
+                // The budget as the device can honour it at this moment — the
+                // load-time figure capped by what the device actually has
+                // left (`kv_budget_now`). Asked only here, at a growth
+                // boundary, so the device query stays off the per-token path.
+                let occ = kv_cache_store.occupancy();
+                let budget = self
+                    .kv_budget_now(home, occ.allocated_in(home), occ.external_in(home))
+                    .0
+                    .unwrap_or(load_time_budget);
+                // Live caches PLUS the prefix cache's snapshots: the same
+                // device memory, and charged nowhere until gotcha #440 —
+                // and evictable, which `claim_room` does before refusing.
+                if let Err(refused) = kv_cache_store.claim_room(home, budget, claim, request_id) {
+                    let in_use = refused.in_use_bytes;
+                    // Whether OTHER conversations hold the room this one needs
+                    // — read before `clear_request` below takes this request's
+                    // own entry away. The two causes need opposite advice
+                    // (`docs/FUTURE_WORK.md` #122): an over-long conversation
+                    // is helped by a shorter one, one that met other live
+                    // chats only by waiting.
+                    let own = kv_cache_store.allocated_bytes_of(cache_key, home);
+                    let others = refused.live_bytes.saturating_sub(own);
+                    let wanted = own.saturating_add(claim);
+                    let busy = others > 0 && wanted <= budget;
+                    // Decomposed, because the total is store-wide and reads as
+                    // if it were this request's. `entries > 1` says outright
+                    // that it is not — the absence of that is what left ~1 GB
+                    // recorded as an unexplained wander (FUTURE_WORK item 11).
+                    tracing::warn!(
+                        request_id,
+                        total_seq,
+                        claiming_positions = claiming,
+                        flowing_rows_mb = flowing / (1024 * 1024),
+                        in_use_mb = in_use / (1024 * 1024),
+                        live_caches_mb = refused.live_bytes / (1024 * 1024),
+                        snapshots_mb = refused.external_bytes / (1024 * 1024),
+                        live_entries = refused.entries,
+                        budget_mb = budget / (1024 * 1024),
+                        graphs_reserved_mb =
+                            crate::inference::cuda_graph::graph_memory_reserved_mb(&self.device),
+                        memory = ?home,
+                        "DIAG: refusing to grow the KV cache past this worker's budget"
+                    );
+                    // Give back what THIS request already took.
+                    //
+                    // A long prompt is prefilled in chunks and claims a quantum
+                    // whenever it crosses one, so a request refused here has
+                    // usually allocated several already. Leaving them behind
+                    // makes a refusal a RATCHET: the request fails, its cache
+                    // survives until the session expires ten minutes later, and
+                    // the next attempt starts from a higher `in_use`. Measured
+                    // on this node 2026-08-25 — refusals at 1152, then 2304,
+                    // then 3456 MB against a 1166 MB budget, in exact
+                    // one-quantum steps, until the card was at 97% and decode
+                    // had fallen from 29 tok/s to 1.0 (gotcha #387).
+                    //
+                    // Freeing here is safe because the request is over: we are
+                    // returning an error, no later forward will reuse this
+                    // cache, and a retry rebuilds it from the prompt.
+                    //
+                    // Except a FLOWING forward's: that refusal ends the tree, not
+                    // the reply. The coordinator finishes it in tree rounds from
+                    // the tree's start (`dsd_flow::rounds_may_finish`,
+                    // `rounds_take_over`), which allocate nothing here — so the
+                    // conversation stays as the flow found it (nothing of this
+                    // forward was claimed). Cleared, the take-over's first check
+                    // was answered "no longer holds the conversation" and a 9B
+                    // reply TH↔AU failed outright (2026-11-22). A reply that ends
+                    // anyway is released at its end (`router::release_request_on_peers`).
+                    // Prior art: llama.cpp's server sizes a draft to the room its
+                    // slot has left (`get_n_draft_max`) and with none decodes on
+                    // unspeculated, the slot kept.
+                    if self.flow_walk.is_none() {
+                        kv_cache_store.clear_request(&self.kv_model_key, request_id);
+                    }
+                    // This node's own budget refused it, which is a different
+                    // fact from "this server cannot serve" — see
+                    // `SwarmError::LocalMemoryUnavailable`. The router re-plans
+                    // it, and the re-plan is barred from handing this node the
+                    // whole model again; a request that has already streamed is
+                    // excluded by `should_retry_after`, so a refusal mid-reply
+                    // still ends the reply rather than restarting it.
+                    let mb = |b: u64| b / (1024 * 1024);
+                    return Err(SwarmError::LocalMemoryUnavailable(if busy {
+                        format!(
+                            "Not enough free memory on this node to continue this conversation \
+                             right now: other conversations on this node are using {} MB of the \
+                             {} MB budget. It fits once they finish, so try again in a moment; a \
+                             shorter conversation will not help.",
+                            mb(others),
+                            mb(budget),
+                        )
+                    } else {
+                        format!(
+                            "Not enough free memory on this node to continue this conversation \
+                             ({} MB of KV cache already in use, budget {} MB). Shorter \
+                             conversations still work; free memory on this node (close other \
+                             programs, or raise its memory budget) to raise this.",
+                            mb(in_use),
+                            mb(budget),
+                        )
+                    }));
+                }
+            }
+        }
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn forward_inner_body(
         &mut self,
@@ -1912,165 +2156,18 @@ impl SplitModel {
             ));
         }
 
-        // Head-Room Admission: refuse before claiming GPU memory we do not
-        // have, rather than letting `Tensor::cat` OOM part-way through a
-        // conversation.
-        //
-        // Only runs on the forwards that actually grow the cache — a
-        // conversation claims memory when it crosses a quantum boundary and at
-        // no other time — so the store walk below costs nothing on the
-        // per-token path. A tree that FLOWS through recurrent layers grows it
-        // on every forward (the rows the flow keeps,
-        // `SsmState::bytes_a_flowing_forward_may_add`), so each of those
-        // claims too.
-        //
-        // `ServiceUnavailable`, not `Validation`: the request is well-formed
-        // and THIS server cannot serve it right now. That is a 503, which is
-        // what lets a coordinator route it to a peer that can — the reason a
-        // swarm can refuse where vLLM has to preempt and recompute.
-        //
-        // Every memory this segment's caches live in is asked — the card's,
-        // and a card/processor split's machine memory too, each with its own
-        // layers' bytes (#262).
-        let mut claiming_once: Option<usize> = None;
-        for home in self.kv_homes() {
-            let (Some(load_time_budget), _) = self.kv_budget(home) else {
-                continue;
-            };
-            // Positions this forward newly ALLOCATES — zero for almost every
-            // decode step, and a whole prompt's worth on a prefill; the old
-            // arithmetic, from `index_pos`, charged a reply at every quantum
-            // boundary inside memory it already had.
-            let claiming = *claiming_once.get_or_insert_with(|| {
-                self.kv_positions_a_forward_adds(kv_cache_store, &cache_key, kv_reserve, total_seq)
-            });
-            let flowing = if self.flow_walk.is_some() {
-                kv_cache_store.bytes_a_flowing_forward_may_add(&cache_key, seq_len, home)
-            } else {
-                0
-            };
-            if claiming > 0 || flowing > 0 {
-                // What this forward's caches newly allocate here.
-                let claim = self
-                    .kv_bytes_a_forward_adds(
-                        kv_cache_store,
-                        &cache_key,
-                        index_pos,
-                        seq_len,
-                        claiming,
-                        home,
-                    )
-                    .saturating_add(flowing);
-                // A forward that allocates nothing here needs no room — a
-                // windowed cache reaching the end of its buffer slides in
-                // place — so it is never refused, nor its conversation cleared,
-                // for memory other programs took since.
-                if claim == 0 {
-                    continue;
-                }
-                // The budget as the device can honour it at this moment — the
-                // load-time figure capped by what the device actually has
-                // left (`kv_budget_now`). Asked only here, at a growth
-                // boundary, so the device query stays off the per-token path.
-                let occ = kv_cache_store.occupancy();
-                let budget = self
-                    .kv_budget_now(home, occ.allocated_in(home), occ.external_in(home))
-                    .0
-                    .unwrap_or(load_time_budget);
-                // Live caches PLUS the prefix cache's snapshots: the same
-                // device memory, and charged nowhere until gotcha #440 —
-                // and evictable, which `claim_room` does before refusing.
-                if let Err(refused) = kv_cache_store.claim_room(home, budget, claim, request_id) {
-                    let in_use = refused.in_use_bytes;
-                    // Whether OTHER conversations hold the room this one needs
-                    // — read before `clear_request` below takes this request's
-                    // own entry away. The two causes need opposite advice
-                    // (`docs/FUTURE_WORK.md` #122): an over-long conversation
-                    // is helped by a shorter one, one that met other live
-                    // chats only by waiting.
-                    let own = kv_cache_store.allocated_bytes_of(&cache_key, home);
-                    let others = refused.live_bytes.saturating_sub(own);
-                    let wanted = own.saturating_add(claim);
-                    let busy = others > 0 && wanted <= budget;
-                    // Decomposed, because the total is store-wide and reads as
-                    // if it were this request's. `entries > 1` says outright
-                    // that it is not — the absence of that is what left ~1 GB
-                    // recorded as an unexplained wander (FUTURE_WORK item 11).
-                    tracing::warn!(
-                        request_id,
-                        total_seq,
-                        claiming_positions = claiming,
-                        flowing_rows_mb = flowing / (1024 * 1024),
-                        in_use_mb = in_use / (1024 * 1024),
-                        live_caches_mb = refused.live_bytes / (1024 * 1024),
-                        snapshots_mb = refused.external_bytes / (1024 * 1024),
-                        live_entries = refused.entries,
-                        budget_mb = budget / (1024 * 1024),
-                        memory = ?home,
-                        "DIAG: refusing to grow the KV cache past this worker's budget"
-                    );
-                    // Give back what THIS request already took.
-                    //
-                    // A long prompt is prefilled in chunks and claims a quantum
-                    // whenever it crosses one, so a request refused here has
-                    // usually allocated several already. Leaving them behind
-                    // makes a refusal a RATCHET: the request fails, its cache
-                    // survives until the session expires ten minutes later, and
-                    // the next attempt starts from a higher `in_use`. Measured
-                    // on this node 2026-08-25 — refusals at 1152, then 2304,
-                    // then 3456 MB against a 1166 MB budget, in exact
-                    // one-quantum steps, until the card was at 97% and decode
-                    // had fallen from 29 tok/s to 1.0 (gotcha #387).
-                    //
-                    // Freeing here is safe because the request is over: we are
-                    // returning an error, no later forward will reuse this
-                    // cache, and a retry rebuilds it from the prompt.
-                    //
-                    // Except a FLOWING forward's: that refusal ends the tree, not
-                    // the reply. The coordinator finishes it in tree rounds from
-                    // the tree's start (`dsd_flow::rounds_may_finish`,
-                    // `rounds_take_over`), which allocate nothing here — so the
-                    // conversation stays as the flow found it (nothing of this
-                    // forward was claimed). Cleared, the take-over's first check
-                    // was answered "no longer holds the conversation" and a 9B
-                    // reply TH↔AU failed outright (2026-11-22). A reply that ends
-                    // anyway is released at its end (`router::release_request_on_peers`).
-                    // Prior art: llama.cpp's server sizes a draft to the room its
-                    // slot has left (`get_n_draft_max`) and with none decodes on
-                    // unspeculated, the slot kept.
-                    if self.flow_walk.is_none() {
-                        kv_cache_store.clear_request(&self.kv_model_key, request_id);
-                    }
-                    // This node's own budget refused it, which is a different
-                    // fact from "this server cannot serve" — see
-                    // `SwarmError::LocalMemoryUnavailable`. The router re-plans
-                    // it, and the re-plan is barred from handing this node the
-                    // whole model again; a request that has already streamed is
-                    // excluded by `should_retry_after`, so a refusal mid-reply
-                    // still ends the reply rather than restarting it.
-                    let mb = |b: u64| b / (1024 * 1024);
-                    return Err(SwarmError::LocalMemoryUnavailable(if busy {
-                        format!(
-                            "Not enough free memory on this node to continue this conversation \
-                             right now: other conversations on this node are using {} MB of the \
-                             {} MB budget. It fits once they finish, so try again in a moment; a \
-                             shorter conversation will not help.",
-                            mb(others),
-                            mb(budget),
-                        )
-                    } else {
-                        format!(
-                            "Not enough free memory on this node to continue this conversation \
-                             ({} MB of KV cache already in use, budget {} MB). Shorter \
-                             conversations still work; free memory on this node (close other \
-                             programs, or raise its memory budget) to raise this.",
-                            mb(in_use),
-                            mb(budget),
-                        )
-                    }));
-                }
-            }
-        }
+        let tree_staged = recording.as_ref().is_some_and(|r| r.tree_staged);
+        // A captured flowing level's rows were claimed before its capture
+        // (`decode_step_with_graph`): the claim synchronizes the stream.
+        self.claim_room_for_forward(
+            kv_cache_store,
+            &cache_key,
+            request_id,
+            index_pos,
+            seq_len,
+            kv_reserve,
+            !tree_staged,
+        )?;
 
         let num_layers = self.layers.len();
         // How many times a cache grew by concatenation during THIS forward —
@@ -2153,7 +2250,6 @@ impl SplitModel {
             .then(|| crate::inference::attn_kernel::ForceStandardAttnGuard::new(true));
         // A captured level of a tree: its scope is set and staged already
         // (`decode_step_with_graph`), the same rows as these.
-        let tree_staged = recording.as_ref().is_some_and(|r| r.tree_staged);
         if tree_staged {
             let staged = crate::inference::layers::tree_scope_now().map(|s| s.positions);
             if staged.as_ref() != tree_rows.as_ref().map(|(positions, _)| positions) {

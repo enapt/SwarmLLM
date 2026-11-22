@@ -362,6 +362,19 @@ pub(crate) fn trim_idle_graph_memory(device: &Device) -> Option<(u64, u64)> {
     None
 }
 
+/// The card memory CUDA graphs hold reserved right now, in megabytes — what a
+/// refusal for memory says beside the caches' figures, since the budget is
+/// read from the card's free memory and graph allocations come from a pool of
+/// their own. `None` off a card or where the driver will not say.
+pub(crate) fn graph_memory_reserved_mb(device: &Device) -> Option<u64> {
+    #[cfg(feature = "candle-cuda")]
+    if let Device::Cuda(dev) = device {
+        return cuda::graph_reserved(dev.cuda_stream().context().cu_device()).map(|b| b >> 20);
+    }
+    let _ = device;
+    None
+}
+
 fn device_says_no(device: &Device) -> Option<&'static str> {
     #[cfg(feature = "candle-cuda")]
     if let Device::Cuda(dev) = device {
@@ -601,6 +614,14 @@ impl DecodeGraph {
     #[cfg(all(test, feature = "candle-cuda"))]
     pub(crate) fn launches(&self) -> (u64, u64) {
         (self.stats.launched, self.stats.refused)
+    }
+
+    /// Captures that made their graph (instantiated it, or rebuilt one the
+    /// driver would not update) and captures updated in place — what a card
+    /// test reads to know a step's graph stays the same graph.
+    #[cfg(all(test, feature = "candle-cuda"))]
+    pub(crate) fn made_and_updated(&self) -> (u64, u64) {
+        (self.stats.instantiated, self.stats.updated)
     }
 
     /// Forwards that cost more than their shape will from now on: the first
@@ -1268,7 +1289,7 @@ mod cuda {
             .join(", ")
     }
 
-    fn graph_reserved(device: sys::CUdevice) -> Option<u64> {
+    pub(super) fn graph_reserved(device: sys::CUdevice) -> Option<u64> {
         let mut value: u64 = 0;
         // SAFETY: RESERVED_MEM_CURRENT is a `cuuint64_t`.
         unsafe {

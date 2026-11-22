@@ -6803,11 +6803,18 @@ pub(crate) fn record_check_widths(
         let mut at = PROMPT;
         for &shape in widths {
             for _ in 0..TRIES {
-                if !keep_going() {
-                    return Ok(false);
-                }
+                // A shape whose graph is made is done before any message is
+                // asked about: asked first, a message coming just after the
+                // last shape's graph left the recording unfinished with
+                // nothing left to record, so it was never marked done and
+                // every shape a reply had left to it ran uncaptured for good —
+                // a drafter's tree levels, 38-39 ms a forward against 27-28
+                // (Qwen3.5-0.8B, TH↔AU, 2026-11-23).
                 if model.has_step_graph(shape) {
                     break;
+                }
+                if !keep_going() {
+                    return Ok(false);
                 }
                 let input = model.tensor_from_ids(&vec![0; shape.positions])?;
                 if shape.tree {

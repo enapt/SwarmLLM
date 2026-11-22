@@ -6187,13 +6187,13 @@ width keeps +36% (the 11-18 processor measure). Now the layer reads the whole tr
   `TreeLines::for_flow`) — a line 35 deep read by the tree kernel was 0.11 off (of 1.38) on the
   RTX 3070, by the flow kernel within 1e-4 (`a_flowing_tree_on_the_card_is_the_processors`,
   2026-11-22).
-- **A flowing forward's bookkeeping is one join and one gather a kind, its row tables uploaded once
-  while their content stands** (2026-11-22, `docs/plans/recurrent_flow.md` § Stage 5). A kernel count
+- **A flowing forward's bookkeeping is one gather a kind, its row tables uploaded once while their
+  content stands** (2026-11-22, `docs/plans/recurrent_flow.md` § Stage 5). A kernel count
   (`SWARMLLM_COUNT_KERNELS=1`) of the 0.8B drafter's level on the RTX 3070 under WSL2 put 369 of 870
   launches in copies and 98 in gathers — every recurrent layer gathered its earlier rows, joined them
   to the new ones and the new ones to the held ones apart — and 55 of 59 host-to-card copies in three
   tables (parents, walks, gather rows) uploaded again a layer; a pageable copy waits for the stream to
-  drain. Now `FlowRows::keep_joined` joins each kind once, `rows_the_lines_read` gathers the lines'
+  drain. Then a join of each kind once (`SWARMLLM_FLOW_ROWS=joined`), `rows_the_lines_read` gathers the lines'
   rows from that, `qwen35::rows_on` keeps a table on the card while its content stands (the
   content-keyed cache `CudaDevice::layout_params` set the pattern; llama.cpp fills
   `llm_graph_input_*::set_input` once a graph), and the walk's replay runs in two launches with
@@ -6201,6 +6201,27 @@ width keeps +36% (the 11-18 processor measure). Now the layer reads the whole tr
   drafter's call 43-45 → 39-42 ms a forward on the TH↔AU link. Copies and gathers only: bit for bit on
   the processor (both arms of `a_flowing_tree_through_a_recurrent_model_reads_each_rows_path`) and
   the three card tests pass in both arms. A/B `SWARMLLM_FLOW_ROWS=per-layer`.
+  **Then a store a kind** (2026-11-23): the join copied the held rows again every forward (two copies a
+  kind a layer); now each kind's rows sit in a buffer made for half as many again as the rows kept
+  (twice until the memory refusals below), a forward's new rows
+  copied ONCE after the rows written (`FlowRows::put`, a `slice_set`) and a row the walk left kept in
+  place until the buffer is full (`FlowRows::make_room` gathers the kept rows to the front of a larger
+  one). The bytes a flowing forward claims are what the store may newly make — nothing while it has
+  room, the rows it GROWS by when full (`FlowRows::rows_a_forward_may_allocate`): the store it replaces
+  is already counted held, and goes a kind at a time as each new one takes its place. Claimed whole on
+  top of the old, at twice the rows kept, a growth was refused on the drafter (268 + 65 MB of a 308 MB
+  budget) and on the 9B's head (308 + 184 of 491), the flow's drafter or the flow itself lost and the
+  reply 7.5-8 tok/s (`real_link_rf9b7_1123/`, `real_link_rf9b8_1123/` arm 5). A level 705 → 644 launches (`copy2d_f32` 202 → 137);
+  the drafter's call 38.4-40.5 → 36.9-38.5 ms a forward on the TH↔AU link, tok/s within the runs'
+  spread (`real_link_rf9b5_1123/`). The joined arm stays the A/B: `SWARMLLM_FLOW_ROWS=joined`.
+  **And a level may be captured, OFF** (2026-11-23, `SWARMLLM_FLOW_GRAPH=1`): everything a level makes
+  outside a kernel — replay, tables, scratch pair, room, the memory claim — is made before the capture,
+  and a captured level always gathers its lines' rows (one topology, or every update is refused).
+  Bit-equal and 26% faster a drafter level on the card alone; refused inside most captures on the
+  TH↔AU link (`q35_deltanet: CUDA_ERROR_INVALID_VALUE`), so off. What a change must keep: nothing
+  that synchronizes, asks the card, or uploads from the host inside the captured body (gotcha #1163),
+  and the same kernels whatever the level reads. → `docs/plans/recurrent_flow.md` § Stage 5,
+  "Captured levels".
 - **On a card the convolution is ONE launch too** (`ssm_conv_silu_tree_f32_k4`): a thread a
   channel builds each row's window up its line, then the read window, rounding as the chain's
   kernel does — bit for bit `causal_conv_along`. The parents reach the card once a step for both
@@ -6211,8 +6232,9 @@ width keeps +36% (the 11-18 processor measure). Now the layer reads the whole tr
   takes it back. The take-back is the replay that already exists: the settle keeps the kept
   guesses at consecutive rows in place (`TreeOutcome::rows_in_place`, a chain) and re-reads the
   rest, so `rewind_to` replays a PREFIX of the step's kept rows — no gather.
-- **Never captured** (`tree_steps_may_be_captured` takes dense layers only): the parents reach
-  the layer from the host per call.
+- **A tree check is never captured on Qwen 3.5; a FLOWING level is** (`tree_steps_may_be_captured`):
+  a check that does not flow uploads its parents inside the call; a flowing level's tables, replay,
+  scratch and room are staged before the capture (`stage_flowing_states`, below).
 
 Prior art: Twig (arXiv 2608.01651) — the convolution's inputs are the root-to-node path, found by
 parent links; the delta rule in closed form over an ancestor mask to keep no state per node; the

@@ -726,3 +726,45 @@ fn a_tree_that_does_not_fit_the_cache_is_refused_and_the_cache_kept() {
         PROMPT.len()
     );
 }
+
+/// A recording stopped by a message just after its LAST shape's graph was
+/// made is finished, not stopped: the next idle moment finds nothing left to
+/// record and never asks again, so a recording reported stopped there was
+/// never marked done, and every shape left to it — a drafter's tree levels —
+/// ran uncaptured for the worker's life (38-39 ms a forward against 27-28,
+/// Qwen3.5-0.8B on the TH↔AU link, 2026-11-23). One shape: the recording's
+/// first forward of it runs the ordinary way and its second makes the graph;
+/// a message is waiting from then on.
+///
+/// ⚠ Gated as above.
+#[cfg(feature = "candle-cuda")]
+#[test]
+fn a_recording_whose_last_graph_is_made_is_finished_though_a_message_came() {
+    let card = match Device::new_cuda(0) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("SKIPPED recording stopped after its last graph: no CUDA device ({e})");
+            return;
+        }
+    };
+    let mut model = whole_model_on(&card);
+    let kv = KvCacheStore::new(std::time::Duration::from_secs(60));
+    let step = StepShape::chain(1);
+    assert!(
+        model.widths_to_record().contains(&step),
+        "the recording names the step"
+    );
+    let asked = std::cell::Cell::new(0);
+    let keep_going = || {
+        asked.set(asked.get() + 1);
+        asked.get() <= 2
+    };
+    let finished =
+        crate::inference::model_worker::record_check_widths(&mut model, &kv, &[step], &keep_going)
+            .unwrap();
+    assert!(model.has_step_graph(step), "the recording made no graph");
+    assert!(
+        finished,
+        "the recording made its last graph and was still reported stopped"
+    );
+}

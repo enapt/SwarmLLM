@@ -1830,6 +1830,49 @@ impl KvCacheStore {
     /// Gemma 4 E2B/E4B layer attending an earlier layer's cache
     /// (`SplitModel::slot_keeps_no_cache`, #295); read as a cache yet to be
     /// built, it kept every step of those models from being captured.
+    /// Why [`Self::every_cache_holds`] says no — the first layer that does not
+    /// hold `positions`, in words. Asked only where a step to capture was not
+    /// ready, for a DIAG line (`decode_step_with_graph`).
+    pub(crate) fn why_a_cache_does_not_hold(
+        &self,
+        key: &str,
+        positions: usize,
+        keeps_no_cache: impl Fn(usize) -> bool,
+    ) -> String {
+        let Some(entry) = self.caches.get(key) else {
+            return "no cache for the request".into();
+        };
+        if entry.layers.is_empty() {
+            return "the request's cache has no layers".into();
+        }
+        for (i, layer) in entry.layers.iter().enumerate() {
+            match layer {
+                Some(kv) => {
+                    for c in kv.all_caches() {
+                        if c.all_data().is_none() {
+                            return format!("layer {i}: its cache holds no buffer");
+                        }
+                        if c.reach() < positions {
+                            return format!(
+                                "layer {i}: its cache reaches {} of {positions}",
+                                c.reach()
+                            );
+                        }
+                    }
+                }
+                None if keeps_no_cache(i) => {}
+                None => match entry.ssm_states.get(i).and_then(Option::as_ref) {
+                    None => return format!("layer {i}: no recurrent state"),
+                    Some(s) if !s.holds_a_step_to(positions) => {
+                        return format!("layer {i}: {}", s.why_no_step_to(positions));
+                    }
+                    Some(_) => {}
+                },
+            }
+        }
+        "every cache holds it".into()
+    }
+
     pub(crate) fn every_cache_holds(
         &self,
         key: &str,

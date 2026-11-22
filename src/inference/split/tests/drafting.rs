@@ -1121,3 +1121,240 @@ fn a_flowing_forward_refused_for_memory_keeps_the_conversation() {
         "the conversation read on from the tree's start is not the one that never flowed"
     );
 }
+
+/// A flowing level of a recurrent drafter captured as a CUDA graph reads what
+/// the same level read op by op does — and WAS captured, the decode graph's own
+/// count says so. Seven levels of 8 rows from a real Qwen 3.5 file on the card,
+/// each row a child of a row of the level before: the first level is a shape's
+/// first forward and the walk stands on one of its own rows (both run the
+/// ordinary way), the fifth finds its store full and is given room before its
+/// capture (`FlowRows::make_room` in `stage_level`), and
+/// at the fourth the walk moves down a row the levels before kept, so its
+/// replay runs before the capture (`SsmState::stage_flowing_level`). Every
+/// other level reads rows of earlier ones on its lines through tables staged
+/// ahead of the capture; a table missed there refuses the capture
+/// (`qwen35::rows_on`), which `refused` counts. The seventh reads none, and
+/// its graph is still the one the others updated in place (`made`).
+///
+/// Needs a real file, a card and the capture switched on (it is off by
+/// default, `qwen35::flowing_levels_captured`): `SWARMLLM_FLOW_GRAPH=1
+/// SWARMLLM_GUESS_TEST_GGUF=~/swarmllm-ref/qwen35/Qwen3.5-0.8B-Q8_0.gguf
+/// cargo test --features cuda --lib captured_flowing_level -- --ignored --nocapture --test-threads=1`.
+#[cfg(feature = "candle-cuda")]
+#[test]
+#[ignore = "needs a GGUF in SWARMLLM_GUESS_TEST_GGUF and a card"]
+fn a_captured_flowing_level_reads_as_the_ordinary_one() {
+    use crate::inference::cuda_graph::{DecodeGraphSlot, MAX_POSITIONS as LEVEL};
+    use crate::inference::draft_tree::DraftTree;
+    let Ok(path) = std::env::var("SWARMLLM_GUESS_TEST_GGUF") else {
+        eprintln!("SKIPPED captured flowing level: SWARMLLM_GUESS_TEST_GGUF not set");
+        return;
+    };
+    assert_eq!(
+        std::env::var("SWARMLLM_FLOW_GRAPH").as_deref(),
+        Ok("1"),
+        "a flowing level is captured only under SWARMLLM_FLOW_GRAPH=1: run with it set"
+    );
+    // A refused capture says why only at `info!` (`DecodeGraph::step`).
+    if let Ok(filter) = std::env::var("SWARMLLM_GUESS_TEST_LOG") {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
+            .with_writer(std::io::stderr)
+            .try_init();
+    }
+    let mut model =
+        SplitModel::load_from_gguf(std::path::Path::new(&path), 0, 999, true, true, false)
+            .expect("load the file");
+    if !model.device.is_cuda() {
+        eprintln!("SKIPPED captured flowing level: the model is not on a card");
+        return;
+    }
+    assert!(model.carries_recurrent_state(), "the file is not recurrent");
+    let context = model.encode_ids("The tide came in over the flats while the gulls");
+    let p = context.len();
+    // Level 0: row 0 then its seven children; each later level's row i a
+    // child of the level before's row i. The walk stands on row 0, then from
+    // the fourth level on row 9 (level 1's child of row 1). The last level's
+    // rows are all children of row 41 (row 9's line, level 5) with the walk
+    // there: they read no earlier row, and their graph must still be the
+    // others' (five gathers a layer fewer refused every update, 2026-11-23).
+    const LEVELS: usize = 7;
+    let mut parents: Vec<Option<u16>> = Vec::new();
+    for i in 0..LEVEL {
+        parents.push((i > 0).then_some(0));
+    }
+    for level in 1..LEVELS - 1 {
+        for i in 0..LEVEL {
+            parents.push(Some(((level - 1) * LEVEL + i) as u16));
+        }
+    }
+    parents.extend(std::iter::repeat_n(Some(41), LEVEL));
+    let walk_at = |level: usize| match level {
+        0..3 => 0,
+        6 => 41,
+        _ => 9,
+    };
+    let run = |model: &mut SplitModel, rid: &str| -> Vec<Vec<f32>> {
+        let kv = KvCacheStore::new(std::time::Duration::from_secs(600));
+        let prompt = model.tensor_from_ids(&context).unwrap();
+        model
+            .forward_verify_all_positions(&prompt, 0, &kv, rid)
+            .unwrap();
+        let mut rows = Vec::new();
+        for level in 0..LEVELS {
+            let sent = level * LEVEL..(level + 1) * LEVEL;
+            let tokens: Vec<u32> = sent.clone().map(|i| (i * 37 % 900 + 11) as u32).collect();
+            let shape = DraftTree::new(p, parents[..sent.end].to_vec()).unwrap();
+            let input = model.tensor_from_ids(&tokens).unwrap();
+            let out = model
+                .with_draft_tree(shape, Some(walk_at(level)), |m| {
+                    m.forward_verify_all_positions(&input, p + sent.start, &kv, rid)
+                })
+                .unwrap()
+                .unwrap();
+            let out = out.to_device(&Device::Cpu).unwrap();
+            rows.extend(out.squeeze(0).unwrap().to_vec2::<f32>().unwrap());
+        }
+        rows
+    };
+    model.decode_graph = DecodeGraphSlot::Off;
+    let ordinary = run(&mut model, "op-by-op");
+    model.decode_graph = DecodeGraphSlot::Unchecked;
+    let _ = model.widths_to_record();
+    model.set_recording_widths(true);
+    let captured = run(&mut model, "captured");
+    model.set_recording_widths(false);
+    let DecodeGraphSlot::On(graph) = &model.decode_graph else {
+        panic!("the card model's decode steps were not to be captured");
+    };
+    let (launched, refused) = graph.launches();
+    let (made, updated) = graph.made_and_updated();
+    eprintln!(
+        "captured flowing levels: {launched} launched, {refused} refused, \
+         {made} graphs made, {updated} updated in place"
+    );
+    assert_eq!(refused, 0, "a captured flowing level was refused");
+    assert_eq!(made, 1, "a captured flowing level's graph was made again");
+    assert!(
+        launched >= 3,
+        "the flow's later levels were not captured ({launched} launched)"
+    );
+    assert_eq!(ordinary.len(), captured.len());
+    let mut worst_of_all = 0f32;
+    for (i, (a, b)) in ordinary.iter().zip(&captured).enumerate() {
+        let worst = a
+            .iter()
+            .zip(b)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0f32, f32::max);
+        assert!(worst < 1e-3, "row {i}: captured differs by {worst}");
+        worst_of_all = worst_of_all.max(worst);
+    }
+    eprintln!("captured flowing levels: worst logit difference {worst_of_all}");
+}
+
+/// What a flowing level of a recurrent drafter costs on the card captured
+/// against op by op, over a flow long enough to fill its store several times:
+/// eight lines of 8-row levels, the walk one row down a line each level, as a
+/// drafter's flow keeps one row a level. Prints each run's milliseconds a level
+/// (median and the slowest) and the decode graph's counts; asserts nothing
+/// about speed. Same file, card and switch as the test above.
+#[cfg(feature = "candle-cuda")]
+#[test]
+#[ignore = "a timing probe: needs a GGUF in SWARMLLM_GUESS_TEST_GGUF and a card"]
+fn flowing_levels_pace_captured_and_op_by_op() {
+    use crate::inference::cuda_graph::{DecodeGraphSlot, MAX_POSITIONS as LEVEL};
+    use crate::inference::draft_tree::DraftTree;
+    let Ok(path) = std::env::var("SWARMLLM_GUESS_TEST_GGUF") else {
+        eprintln!("SKIPPED flowing levels pace: SWARMLLM_GUESS_TEST_GGUF not set");
+        return;
+    };
+    assert_eq!(
+        std::env::var("SWARMLLM_FLOW_GRAPH").as_deref(),
+        Ok("1"),
+        "a flowing level is captured only under SWARMLLM_FLOW_GRAPH=1: run with it set"
+    );
+    if let Ok(filter) = std::env::var("SWARMLLM_GUESS_TEST_LOG") {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
+            .with_writer(std::io::stderr)
+            .try_init();
+    }
+    let mut model =
+        SplitModel::load_from_gguf(std::path::Path::new(&path), 0, 999, true, true, false)
+            .expect("load the file");
+    if !model.device.is_cuda() {
+        eprintln!("SKIPPED flowing levels pace: the model is not on a card");
+        return;
+    }
+    let context = model.encode_ids("The tide came in over the flats while the gulls");
+    let p = context.len();
+    let levels: usize = std::env::var("SWARMLLM_PACE_LEVELS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(40);
+    let mut parents: Vec<Option<u16>> = (0..LEVEL).map(|i| (i > 0).then_some(0)).collect();
+    for level in 1..levels {
+        for i in 0..LEVEL {
+            parents.push(Some(((level - 1) * LEVEL + i) as u16));
+        }
+    }
+    // The walk: row 0, then one row down line 1 each level, two levels behind.
+    let walk_at = |level: usize| match level {
+        0..3 => 0,
+        _ => ((level - 2) * LEVEL + 1) as u32,
+    };
+    let run = |model: &mut SplitModel, rid: &str| -> Vec<f64> {
+        let kv = KvCacheStore::new(std::time::Duration::from_secs(600));
+        let prompt = model.tensor_from_ids(&context).unwrap();
+        model
+            .forward_verify_all_positions(&prompt, 0, &kv, rid)
+            .unwrap();
+        let mut ms = Vec::new();
+        for level in 0..levels {
+            let sent = level * LEVEL..(level + 1) * LEVEL;
+            let tokens: Vec<u32> = sent.clone().map(|i| (i * 37 % 900 + 11) as u32).collect();
+            let shape = DraftTree::new(p, parents[..sent.end].to_vec()).unwrap();
+            let input = model.tensor_from_ids(&tokens).unwrap();
+            let began = std::time::Instant::now();
+            let out = model
+                .with_draft_tree(shape, Some(walk_at(level)), |m| {
+                    m.forward_verify_all_positions(&input, p + sent.start, &kv, rid)
+                })
+                .unwrap()
+                .unwrap();
+            let _ = out.to_device(&Device::Cpu).unwrap();
+            ms.push(began.elapsed().as_secs_f64() * 1e3);
+        }
+        ms
+    };
+    let say = |name: &str, ms: &[f64]| {
+        let mut sorted = ms[4..].to_vec();
+        sorted.sort_by(f64::total_cmp);
+        let list: Vec<String> = ms.iter().map(|m| format!("{m:.1}")).collect();
+        eprintln!(
+            "flowing levels pace {name}: median {:.2} ms, slowest {:.2} ms a level (after 4); each: {}",
+            sorted[sorted.len() / 2],
+            sorted[sorted.len() - 1],
+            list.join(" ")
+        );
+    };
+    for round in 0..2 {
+        model.decode_graph = DecodeGraphSlot::Off;
+        let ordinary = run(&mut model, &format!("op-by-op-{round}"));
+        say("op by op", &ordinary);
+        model.decode_graph = DecodeGraphSlot::Unchecked;
+        let _ = model.widths_to_record();
+        model.set_recording_widths(true);
+        let captured = run(&mut model, &format!("captured-{round}"));
+        model.set_recording_widths(false);
+        say("captured", &captured);
+        if let DecodeGraphSlot::On(graph) = &model.decode_graph {
+            let (launched, refused) = graph.launches();
+            let (made, updated) = graph.made_and_updated();
+            eprintln!(
+                "flowing levels pace: {launched} launched, {refused} refused, {made} made, {updated} updated in place"
+            );
+        }
+    }
+}
