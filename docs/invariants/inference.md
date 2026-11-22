@@ -6214,13 +6214,18 @@ width keeps +36% (the 11-18 processor measure). Now the layer reads the whole tr
   reply 7.5-8 tok/s (`real_link_rf9b7_1123/`, `real_link_rf9b8_1123/` arm 5). A level 705 → 644 launches (`copy2d_f32` 202 → 137);
   the drafter's call 38.4-40.5 → 36.9-38.5 ms a forward on the TH↔AU link, tok/s within the runs'
   spread (`real_link_rf9b5_1123/`). The joined arm stays the A/B: `SWARMLLM_FLOW_ROWS=joined`.
-  **And a level may be captured, OFF** (2026-11-23, `SWARMLLM_FLOW_GRAPH=1`): everything a level makes
+  **And a level is captured** (2026-11-23, A/B `SWARMLLM_FLOW_GRAPH=0`): everything a level makes
   outside a kernel — replay, tables, scratch pair, room, the memory claim — is made before the capture,
   and a captured level always gathers its lines' rows (one topology, or every update is refused).
   Bit-equal and 26% faster a drafter level on the card alone; refused inside most captures on the
-  TH↔AU link (`q35_deltanet: CUDA_ERROR_INVALID_VALUE`), so off. What a change must keep: nothing
-  that synchronizes, asks the card, or uploads from the host inside the captured body (gotcha #1163),
-  and the same kernels whatever the level reads. → `docs/plans/recurrent_flow.md` § Stage 5,
+  TH↔AU link (`q35_deltanet: CUDA_ERROR_INVALID_VALUE`) until a staged begin kept its pre-stage copy
+  through the capture (`SsmState::flow_from`): replaced inside, that copy dropped the last hold on
+  buffers the staging replaced, a free of memory made outside the capture, refused and leaked
+  (gotcha #1165). Since, the drafter's call 25.7-28.4 against 37.3-40.2 ms a forward on the link,
+  prose 13.9-14.9 / code 24.2-31.7 tok/s against 12.6-14.1 / 22.7-22.9 (`real_link_rf9b10_1123/`).
+  What a change must keep: nothing that synchronizes, asks the card, uploads from the host, or lets
+  go of memory made before the capture inside the captured body (gotchas #1163, #1165), and the same
+  kernels whatever the level reads. → `docs/plans/recurrent_flow.md` § Stage 5,
   "Captured levels".
 - **On a card the convolution is ONE launch too** (`ssm_conv_silu_tree_f32_k4`): a thread a
   channel builds each row's window up its line, then the read window, rounding as the chain's

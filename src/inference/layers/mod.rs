@@ -3406,11 +3406,26 @@ impl SsmState {
     /// rebase made the walk's row the tree's first (`qwen35::FlowRows`), or a
     /// new one from this state where the tree starts here. Anything else is a
     /// conversation this layer does not hold, refused.
+    ///
+    /// Inside a capture, a forward staged before it ([`Self::stage_flowing_level`])
+    /// has begun here already, and its copy — the state before the staging,
+    /// the one a refusal takes back — stays. Replaced, that copy was the last
+    /// holder of the buffers the staging replaced (the anchor `advance_to`
+    /// moved, a store `make_room` gathered anew, a start a rebase let go), and
+    /// dropping them inside the capture asked the driver to free memory made
+    /// outside it, which it refuses (`cuMemFreeAsync` of an address no
+    /// allocation node returned): the error surfaced at the layer's next
+    /// driver call as `q35_deltanet: CUDA_ERROR_INVALID_VALUE`, and the memory
+    /// leaked — the drafter's pool 0.8 → 2.5-2.9 GB within seconds (TH↔AU,
+    /// 2026-11-23). PyTorch's `CUDAMallocAsyncAllocator` defers such frees
+    /// to the capture's end for the same reason.
     pub(crate) fn flow_from(&mut self, base: usize, index_pos: usize) -> CandleResult<()> {
-        let begun = FlowBegun {
+        let staged = self.flow_begun.as_ref().is_some_and(|b| b.at == index_pos)
+            && qwen35::capturing(self.current.conv_state.device());
+        let begun = (!staged).then(|| FlowBegun {
             at: index_pos,
             flow: self.flow.clone().map(Box::new),
-        };
+        });
         match &mut self.flow {
             Some(flow) => {
                 let fits = (if base > flow.base() {
@@ -3432,7 +3447,10 @@ impl SsmState {
                 // rebase onto its start is undone, so a later forward of the
                 // same conversation reads on (security review 2026-11-22).
                 if let Err(refused) = fits {
-                    self.flow = begun.flow.map(|flow| *flow);
+                    // Staged, the refusal's rewind takes the staged copy back.
+                    if let Some(begun) = begun {
+                        self.flow = begun.flow.map(|flow| *flow);
+                    }
                     return Err(refused);
                 }
             }
@@ -3450,7 +3468,9 @@ impl SsmState {
                 self.rows_held = 0;
             }
         }
-        self.flow_begun = Some(begun);
+        if let Some(begun) = begun {
+            self.flow_begun = Some(begun);
+        }
         Ok(())
     }
 

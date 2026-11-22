@@ -1136,9 +1136,9 @@ fn a_flowing_forward_refused_for_memory_keeps_the_conversation() {
 /// (`qwen35::rows_on`), which `refused` counts. The seventh reads none, and
 /// its graph is still the one the others updated in place (`made`).
 ///
-/// Needs a real file, a card and the capture switched on (it is off by
-/// default, `qwen35::flowing_levels_captured`): `SWARMLLM_FLOW_GRAPH=1
-/// SWARMLLM_GUESS_TEST_GGUF=~/swarmllm-ref/qwen35/Qwen3.5-0.8B-Q8_0.gguf
+/// Needs a real file and a card, the capture not switched off
+/// (`SWARMLLM_FLOW_GRAPH=0`, `qwen35::flowing_levels_captured`):
+/// `SWARMLLM_GUESS_TEST_GGUF=~/swarmllm-ref/qwen35/Qwen3.5-0.8B-Q8_0.gguf
 /// cargo test --features cuda --lib captured_flowing_level -- --ignored --nocapture --test-threads=1`.
 #[cfg(feature = "candle-cuda")]
 #[test]
@@ -1150,10 +1150,10 @@ fn a_captured_flowing_level_reads_as_the_ordinary_one() {
         eprintln!("SKIPPED captured flowing level: SWARMLLM_GUESS_TEST_GGUF not set");
         return;
     };
-    assert_eq!(
+    assert_ne!(
         std::env::var("SWARMLLM_FLOW_GRAPH").as_deref(),
-        Ok("1"),
-        "a flowing level is captured only under SWARMLLM_FLOW_GRAPH=1: run with it set"
+        Ok("0"),
+        "a flowing level is never captured under SWARMLLM_FLOW_GRAPH=0: run without it"
     );
     // A refused capture says why only at `info!` (`DecodeGraph::step`).
     if let Ok(filter) = std::env::var("SWARMLLM_GUESS_TEST_LOG") {
@@ -1258,7 +1258,9 @@ fn a_captured_flowing_level_reads_as_the_ordinary_one() {
 /// eight lines of 8-row levels, the walk one row down a line each level, as a
 /// drafter's flow keeps one row a level. Prints each run's milliseconds a level
 /// (median and the slowest) and the decode graph's counts; asserts nothing
-/// about speed. Same file, card and switch as the test above.
+/// about speed, only that no level was refused inside its capture — run it
+/// at `SWARMLLM_PACE_ROWS=4` too, where a refusal surfaces. Same file, card
+/// and switch as the test above.
 #[cfg(feature = "candle-cuda")]
 #[test]
 #[ignore = "a timing probe: needs a GGUF in SWARMLLM_GUESS_TEST_GGUF and a card"]
@@ -1269,10 +1271,10 @@ fn flowing_levels_pace_captured_and_op_by_op() {
         eprintln!("SKIPPED flowing levels pace: SWARMLLM_GUESS_TEST_GGUF not set");
         return;
     };
-    assert_eq!(
+    assert_ne!(
         std::env::var("SWARMLLM_FLOW_GRAPH").as_deref(),
-        Ok("1"),
-        "a flowing level is captured only under SWARMLLM_FLOW_GRAPH=1: run with it set"
+        Ok("0"),
+        "a flowing level is never captured under SWARMLLM_FLOW_GRAPH=0: run without it"
     );
     if let Ok(filter) = std::env::var("SWARMLLM_GUESS_TEST_LOG") {
         let _ = tracing_subscriber::fmt()
@@ -1293,16 +1295,24 @@ fn flowing_levels_pace_captured_and_op_by_op() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(40);
-    let mut parents: Vec<Option<u16>> = (0..LEVEL).map(|i| (i > 0).then_some(0)).collect();
+    // Rows a level (`SWARMLLM_PACE_ROWS`, 2-8): the link's drafter runs levels
+    // of 1-8 rows, and a refusal inside the capture surfaced only below the
+    // quantized matmul's 7-row line (2026-11-23).
+    let width: usize = std::env::var("SWARMLLM_PACE_ROWS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(LEVEL)
+        .clamp(2, LEVEL);
+    let mut parents: Vec<Option<u16>> = (0..width).map(|i| (i > 0).then_some(0)).collect();
     for level in 1..levels {
-        for i in 0..LEVEL {
-            parents.push(Some(((level - 1) * LEVEL + i) as u16));
+        for i in 0..width {
+            parents.push(Some(((level - 1) * width + i) as u16));
         }
     }
     // The walk: row 0, then one row down line 1 each level, two levels behind.
     let walk_at = |level: usize| match level {
         0..3 => 0,
-        _ => ((level - 2) * LEVEL + 1) as u32,
+        _ => ((level - 2) * width + 1) as u32,
     };
     let run = |model: &mut SplitModel, rid: &str| -> Vec<f64> {
         let kv = KvCacheStore::new(std::time::Duration::from_secs(600));
@@ -1312,7 +1322,7 @@ fn flowing_levels_pace_captured_and_op_by_op() {
             .unwrap();
         let mut ms = Vec::new();
         for level in 0..levels {
-            let sent = level * LEVEL..(level + 1) * LEVEL;
+            let sent = level * width..(level + 1) * width;
             let tokens: Vec<u32> = sent.clone().map(|i| (i * 37 % 900 + 11) as u32).collect();
             let shape = DraftTree::new(p, parents[..sent.end].to_vec()).unwrap();
             let input = model.tensor_from_ids(&tokens).unwrap();
@@ -1354,6 +1364,13 @@ fn flowing_levels_pace_captured_and_op_by_op() {
             let (made, updated) = graph.made_and_updated();
             eprintln!(
                 "flowing levels pace: {launched} launched, {refused} refused, {made} made, {updated} updated in place"
+            );
+            // A level whose staging replaced a buffer (the walk moved) once
+            // freed it inside the capture; below 7 rows the refusal surfaced
+            // (`SsmState::flow_from`, 2026-11-23).
+            assert_eq!(
+                refused, 0,
+                "a flowing level of {width} rows was refused inside its capture"
             );
         }
     }

@@ -388,7 +388,7 @@ impl DeltaNetWeights {
     /// (`SplitModel::tree_steps_may_be_captured`): its convolution and delta
     /// rule are the card's kernels, reading tables staged before the capture
     /// (`FlowRows::stage_level`) — the composed convolution uploads its own.
-    /// Only under `SWARMLLM_FLOW_GRAPH=1` ([`flowing_levels_captured`]).
+    /// Never under `SWARMLLM_FLOW_GRAPH=0` ([`flowing_levels_captured`]).
     pub(crate) fn flowing_level_may_be_captured(&self) -> bool {
         #[cfg(feature = "candle-cuda")]
         {
@@ -2096,7 +2096,7 @@ fn rows_on(ids: Vec<u32>, device: &Device) -> CandleResult<Tensor> {
 
 /// Is `device`'s stream being captured into a CUDA graph right now? False
 /// off a card, and in a build without CUDA.
-fn capturing(device: &Device) -> bool {
+pub(super) fn capturing(device: &Device) -> bool {
     #[cfg(feature = "candle-cuda")]
     {
         stream_is_capturing(device)
@@ -2121,19 +2121,18 @@ fn stream_is_capturing(device: &Device) -> bool {
     )
 }
 
-/// `SWARMLLM_FLOW_GRAPH=1` → a flowing level is captured
-/// (`SplitModel::tree_steps_may_be_captured`, [`SsmState::stage_flowing_level`]).
-/// OFF by default: on the card alone a captured drafter level reads bit for
-/// bit as the ordinary one and costs 9.6-9.8 ms against 13.1-13.2
-/// (`flowing_levels_pace_captured_and_op_by_op`), but on the TH↔AU link
-/// most captures of the drafter's levels were refused inside the capture
-/// (`q35_deltanet: CUDA_ERROR_INVALID_VALUE`), each level then run again,
-/// and the reply fell to 4.8-7.7 tok/s (2026-11-23, `real_link_rf9b9_1123/`
-/// arm 1). Read once.
+/// `SWARMLLM_FLOW_GRAPH=0` → a flowing level is never captured
+/// (`SplitModel::tree_steps_may_be_captured`, [`SsmState::stage_flowing_level`]):
+/// the A/B switch. On by default since 2026-11-23: a captured drafter level
+/// reads bit for bit as the ordinary one at 6.1-8.3 ms against 11.0-14.2 on
+/// the card alone (`flowing_levels_pace_captured_and_op_by_op` at 2, 4 and
+/// 8 rows); on the TH↔AU link wrote prose at 13.9-14.9 and code at 24.2-31.7 tok/s against 12.6-14.1 and 22.7-22.9 uncaptured, the drafter's call 25.7-28.4 against 37.3-40.2 ms a forward, no refusal in three arms each (`real_link_rf9b10_1123/`). It was off
+/// while a staged level freed memory inside its capture (gotcha #1165,
+/// `SsmState::flow_from`). Read once.
 #[cfg(feature = "candle-cuda")]
 fn flowing_levels_captured() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("SWARMLLM_FLOW_GRAPH").as_deref() == Ok("1"))
+    *ON.get_or_init(|| std::env::var("SWARMLLM_FLOW_GRAPH").as_deref() != Ok("0"))
 }
 
 /// How many distinct tables [`rows_on`] keeps: a flowing forward hands its

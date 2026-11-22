@@ -342,7 +342,18 @@ followers in the same tree read whole; red (checked) without the walk: the secon
   CUDA_ERROR_INVALID_VALUE`, 25 in an arm), and the captured arms met memory refusals the uncaptured ones did not —
   prose 4.81 and 8.36, code 7.71 and 7.74 tok/s, against the store uncaptured 14.04, 12.56 / 22.04, 25.94 and joined
   13.13, 13.37 / 26.24, 19.65 (`real_link_rf9b9_1123/`, arms captured, joined, store, store, joined, captured). So
-  it is OFF (`SWARMLLM_FLOW_GRAPH=1` turns it on) until the refusal and the graphs' memory are understood; an
+  it was turned OFF until the refusal was understood. **The
+  refusal, found the same night** (gotcha #1165): staging replaced flow buffers and left the pre-stage copy their
+  last holder; the forward's own `flow_from` inside the capture overwrote it, freeing memory made outside the
+  capture there — refused by the driver and LEAKED (the drafter's pool 0.8 → 2.5-2.9 GB, hence the memory refusals
+  too); the error surfaced only on 1-6-row levels, a capture-status check swallowing it at 7-8. A staged begin now
+  keeps its copy through the capture (`SsmState::flow_from`); the probe at 2, 4 and 8 rows, 0 refused: 6.1, 7.2,
+  8.3 ms a level captured against 11.0, 11.5-11.8, 14.2 (red at 4 rows without it). On the
+  link, captured against the store uncaptured (`real_link_rf9b10_1123/`, arms G S S G G S): prose 13.95, 14.90,
+  14.72 and code 24.18, 24.27, 31.65 tok/s against 12.55, 13.69, 14.07 and 22.90, 22.89, 22.67; the drafter's call
+  25.7-28.4 ms a forward against 37.3-40.2 (pace 47.4-52.6 against 59.3-62.7); no refusal of any kind in six arms,
+  the drafter's pool flat in both (2.7 → 2.9-3.0 GB, a peak 52 MB higher captured). **ON by default since**
+  (`SWARMLLM_FLOW_GRAPH=0` turns it off). An
   earlier sitting where most levels were captured drafted at 27.2-28.3 ms a forward against 37.3-39.0
   (`real_link_rf9b7_1123/`). Found on the way, and kept: (1) **the drafter's idle recording was never marked done**
   when a message came just after its last graph — then nothing was left to record, so every tree shape stayed "left
