@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.3.307-alpha] — 2026-11-23
+
+**Qwen 3.5, 3.6 and 3.8 models split across computers now guess ahead in a tree that flows through the pipeline, by
+default.** Before, a split reply from these models checked one guess per round trip. Now the computer holding the
+first layers grows a tree of guesses with a small model of the same family on its card, and keeps it flowing to the
+far end and back. Measured between this computer and one in Australia (Qwen3.5-9B, a card each end, Qwen3.5-0.8B
+guessing): prose 14.4-15.8 tok/s against 5.7-6.9, code 24.8-28.3 against 5.5-6.9. The planner leaves room for that
+small model and the download pass fetches one, so a computer that never held one gets the speed-up too.
+`SWARMLLM_RECURRENT_FLOW=0` turns it off.
+
+**The tree's bookkeeping costs a fraction of what it did.** Each recurrent layer keeps every row of the tree it might
+still need. It used to copy them again, and upload its row tables again, on every layer and every forward: on the
+small guessing model that was more than half of a level's 870 card launches. Each kind of kept row is now written
+once into a buffer of its own, and each table is uploaded once while its content stands. A level of the guessing
+model now takes 644 launches, and the guessing model's call went from 43-45 to 37-39 ms a forward on the link above. Its
+levels then go to the card as one CUDA graph each, which brings that call down to 26-28 ms a forward
+(`SWARMLLM_FLOW_GRAPH=0` turns the graph off). The graph was first refused on that link, and leaked card memory as
+it went, because a buffer made before each capture was freed inside it. That is fixed. With each level that cheap, the tree
+now grows two levels a call instead of three, which is faster for both prose and code
+(`SWARMLLM_FLOW_LEVELS` sets it).
+
+**A computer short of memory no longer cuts the tree short.** A peer whose card was too full for the tree's extra
+rows failed the reply; it is now finished one token per round. A buffer of kept rows that has to grow now grows by
+half instead of doubling, and asks for room only for what it grows by. Asking for a whole new buffer was refused
+partway through replies, which took away the guessing model or the tree; in the link runs above, nothing was
+refused.
+
+**Step graphs recorded while a computer is idle are no longer lost to bad timing.** A computer records the graphs its
+card replays for each shape of step while it has nothing else to do, stopping when a request arrives. A request
+that arrived just after the last graph was made left the recording looking unfinished with nothing left to
+record, and every shape it was meant to cover ran without a graph until the worker restarted.
+
+**Laptop graphics cards advertise their own memory speed.** Peers price a computer they have not measured by the
+memory bandwidth its card's name implies. The table had no laptop parts, no RTX 50 series and no RTX 4050, so an
+RTX 5080 Laptop priced about three times slower than it is and an RTX 4050 Laptop about 1.6 times faster. Laptop
+cards now read their own figures, and the RTX 50 desktop cards, the 4070 Ti SUPER and the 3050 have rows of their
+own.
+
 ## [0.3.306-alpha] — 2026-11-22
 
 **A split reply now picks a guessing model that runs on the graphics card over a larger one that would run in system
