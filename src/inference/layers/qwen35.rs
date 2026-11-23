@@ -1593,6 +1593,39 @@ impl FlowRows {
         }))
     }
 
+    /// The walk's path's inputs for [`Self::advance_to`]: where the path's
+    /// rows sit one after another in the store (one row, the usual walk, is
+    /// such a run), each kind's run read in place — a view, no table and no
+    /// gather; otherwise gathered by [`Self::inputs_of`]. The same values
+    /// either way. Five gathers and a table a recurrent layer were 1.3-1.4 ms
+    /// of a 0.8B level's ~2 ms staging (pace probe marks, 2026-11-23). Only
+    /// the walk's replay reads them, outside any capture: inside one, a
+    /// level reads its rows through a table (`rows_the_lines_read`).
+    fn path_inputs(&self, path: &[usize], device: &Device) -> CandleResult<Option<SsmRows>> {
+        let [Some(mixed), Some(qk), Some(v), Some(g), Some(beta)] = &self.store.kinds else {
+            return Ok(None);
+        };
+        let slots = self.slots_of(path)?;
+        let Some(&first) = slots.first() else {
+            return Ok(None);
+        };
+        let in_a_run = slots
+            .iter()
+            .enumerate()
+            .all(|(i, &s)| s as usize == first as usize + i);
+        if !in_a_run || path_inputs_gathered() {
+            return self.inputs_of(path, device);
+        }
+        let run = |t: &Tensor| t.narrow(1, first as usize, slots.len());
+        Ok(Some(SsmRows {
+            mixed: run(mixed)?,
+            qk: run(qk)?,
+            v: run(v)?,
+            g: run(g)?,
+            beta: run(beta)?,
+        }))
+    }
+
     /// Where kept rows `rows` are in the store.
     fn slots_of(&self, rows: &[usize]) -> CandleResult<Vec<u32>> {
         rows.iter()
@@ -1814,7 +1847,7 @@ impl FlowRows {
         let path = &path[..reach];
         let device = self.anchor.recurrent_state.device().clone();
         let rows = self
-            .inputs_of(path, &device)?
+            .path_inputs(path, &device)?
             .expect("a path of kept rows has inputs");
         // On a card each replay is handed buffers of its own, so it takes the
         // two-launch replay (`cuda::replay` takes only a target): without one
@@ -2257,6 +2290,14 @@ enum FlowRowsMode {
     /// and joined to the new ones apart, every table uploaded again a layer
     /// ([`rows_on`]).
     PerLayer,
+}
+
+/// Whether the walk's path is always gathered (`SWARMLLM_FLOW_PATH=gathered`,
+/// the A/B inside one binary) rather than read in place where its rows run
+/// one after another ([`FlowRows::path_inputs`]). Read once.
+fn path_inputs_gathered() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SWARMLLM_FLOW_PATH").as_deref() == Ok("gathered"))
 }
 
 fn flow_rows_mode() -> FlowRowsMode {

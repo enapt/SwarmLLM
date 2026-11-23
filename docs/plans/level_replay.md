@@ -149,3 +149,27 @@ op by op 37.5-37.9 ms, captured (since `cuda_graph::MAX_TREE_POSITIONS`) 35.0-35
 with 29 of 29 outputs bit-identical (the card already at 76 °C and 1,560 MHz of 1,755 in that arm, so a floor no
 lower than this). The capture took a third of the host's share; a replay would take the rest — on the near half
 (layers [0, 17), 17 of the 9B's 32) ~3.5-4 ms more a forward, beside the drafter's ~9-10.
+
+## Measured against the floor (2026-11-23 night)
+
+Stages A-D were built and run on the card outside main (`~/swarmllm-gate/deep/fr/stageD_1123/`, `stageDm_1123/`):
+a level whose key matched the last of its shape was launched again with no forward, its host side written beside
+it. Every replayed level's logits were the ordinary forward's bit for bit (0.8B, 2B, 9B; 8 rows 13 of 23 levels
+replayed, 2 rows 18 of 23). **It bought only 2-4% a level** (0.8B ~9.3 → ~8.9 ms, 2B ~13.4 → ~13.15): the card
+already ran each recorded group while the host recorded the next, so removing the recording (3.2-3.6 ms of host)
+exposed the card's own 6.5 ms (0.8B) / 10.6 ms (2B) after the launch. The floor above was the graph alone; a level
+is its STAGING, then the card.
+
+Marks through a level (test-only, `relaunch_probe`) then split the ~2 ms of staging: **1.3-1.4 ms of it was
+`FlowRows::advance_to`**, the walk's replay — five gathers and a slot table a recurrent layer, 18 layers, to read a
+path that is one row of the store. **Fixed on main**: `FlowRows::path_inputs` reads a run of consecutive slots in
+place (a view: candle counts a size-1 dimension as contiguous, and the card replay reads offsets), else gathers as
+before; A/B `SWARMLLM_FLOW_PATH=gathered`. `advance_to` 1.33-1.43 → 0.51-0.66 ms a level; pace (8 rows, minimum of
+the runs, `mainpath_1123/`) 0.8B captured 8.39 → 7.73 ms, op by op 13.1 → 10.9; 2B captured 13.03 → 12.14. Bit for
+bit in both arms: the card against the processor, lines read alone, a fresh read of each path, captured against
+ordinary on all three models.
+
+What is left of a level, in order: the card's own time (the next lever, kernel by kernel), the rest of
+`advance_to` (two fresh state pairs and two replays a layer), `make_room`'s growth on the levels that grow the
+store (3.6-3.9 ms against ~1.8), and the anchor copy (~0.24 ms). The replay waits until those are smaller than the
+recording it removes.
