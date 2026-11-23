@@ -1349,6 +1349,15 @@ fn flowing_levels_pace_captured_and_op_by_op() {
             list.join(" ")
         );
     };
+    // `SWARMLLM_PACE_RELAUNCH=<n>`: each captured level is launched n times
+    // more, unchanged, where it was recorded — the floor a replayed level
+    // could reach, and whether its output keeps the recorded bits
+    // (`docs/plans/level_replay.md` Stage 0 (b)(c)). Its levels' own times
+    // then include the relaunches: read the relaunch line, not "captured".
+    let relaunches: usize = std::env::var("SWARMLLM_PACE_RELAUNCH")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
     for round in 0..2 {
         model.decode_graph = DecodeGraphSlot::Off;
         let ordinary = run(&mut model, &format!("op-by-op-{round}"));
@@ -1356,9 +1365,31 @@ fn flowing_levels_pace_captured_and_op_by_op() {
         model.decode_graph = DecodeGraphSlot::Unchecked;
         let _ = model.widths_to_record();
         model.set_recording_widths(true);
+        use crate::inference::cuda_graph::relaunch_probe;
+        relaunch_probe::TIMES.store(relaunches, std::sync::atomic::Ordering::Relaxed);
+        relaunch_probe::SEEN.lock().unwrap().clear();
         let captured = run(&mut model, &format!("captured-{round}"));
+        relaunch_probe::TIMES.store(0, std::sync::atomic::Ordering::Relaxed);
         model.set_recording_widths(false);
         say("captured", &captured);
+        let seen = relaunch_probe::SEEN.lock().unwrap().clone();
+        if relaunches > 0 && seen.len() > 4 {
+            let mut ms: Vec<f64> = seen[4..].iter().map(|r| r.ms).collect();
+            let mut host: Vec<f64> = seen[4..].iter().map(|r| r.host_ms).collect();
+            ms.sort_by(f64::total_cmp);
+            host.sort_by(f64::total_cmp);
+            let identical = seen.iter().filter(|r| r.identical).count();
+            let worst = seen.iter().map(|r| r.worst).fold(0f32, f32::max);
+            eprintln!(
+                "flowing levels pace relaunched ×{relaunches}: median {:.2} ms (host {:.2}), \
+                 slowest {:.2} ms a level (after 4); {identical} of {} levels' outputs \
+                 bit-identical, worst difference {worst}",
+                ms[ms.len() / 2],
+                host[host.len() / 2],
+                ms[ms.len() - 1],
+                seen.len()
+            );
+        }
         if let DecodeGraphSlot::On(graph) = &model.decode_graph {
             let (launched, refused) = graph.launches();
             let (made, updated) = graph.made_and_updated();

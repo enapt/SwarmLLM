@@ -1814,6 +1814,12 @@ impl SplitModel {
             out.slice_set(&step, 0, 0).map_err(SwarmError::internal)
         });
         if captured.is_ok() {
+            // A card probe's relaunch of the step just recorded, while every
+            // buffer it read is still held here (`level_replay.md` Stage 0).
+            #[cfg(all(test, feature = "candle-cuda"))]
+            crate::inference::cuda_graph::relaunch_probe::after_capture(
+                graph, &device, shape, &out,
+            );
             let mut caught = HashMap::new();
             if let Some(capture) = capture_layers {
                 for (layer, kept) in kept_rows {

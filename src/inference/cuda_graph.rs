@@ -624,6 +624,26 @@ impl DecodeGraph {
         (self.stats.instantiated, self.stats.updated)
     }
 
+    /// Test only (`docs/plans/level_replay.md` Stage 0 (b)): launch the graphs
+    /// `shape`'s last capture made `times` more times, unchanged, in their
+    /// recorded order — a replayed step's floor. Answers the milliseconds one
+    /// launch of them all took on the card (synchronized either side) and the
+    /// host's share of it (the launch calls alone). The caller holds every
+    /// buffer the step read: called from the capture's own call site.
+    #[cfg(all(test, feature = "candle-cuda"))]
+    pub(crate) fn relaunch(
+        &self,
+        device: &Device,
+        shape: StepShape,
+        times: usize,
+    ) -> Result<(f64, f64), String> {
+        let Device::Cuda(dev) = device else {
+            return Err("not on a card".into());
+        };
+        let execs = self.execs.get(&shape).ok_or("no graph of this shape")?;
+        cuda::relaunch(dev, execs, times)
+    }
+
     /// Forwards that cost more than their shape will from now on: the first
     /// of a shape (run the ordinary way so a capture knows its output), one
     /// that made a graph — instantiated it, or rebuilt one the driver would
@@ -1940,6 +1960,38 @@ mod cuda {
         ))
     }
 
+    /// [`super::DecodeGraph::relaunch`]'s card half.
+    #[cfg(test)]
+    pub(super) fn relaunch(
+        dev: &candle_core::CudaDevice,
+        execs: &[Option<Exec>],
+        times: usize,
+    ) -> Result<(f64, f64), String> {
+        if execs.is_empty() || execs.iter().any(Option::is_none) {
+            return Err(format!("{} groups, not every one made", execs.len()));
+        }
+        let stream = dev.cuda_stream();
+        stream
+            .context()
+            .bind_to_thread()
+            .map_err(|e| e.to_string())?;
+        stream.synchronize().map_err(|e| e.to_string())?;
+        let times = times.max(1);
+        let began = std::time::Instant::now();
+        for _ in 0..times {
+            for x in execs.iter().flatten() {
+                // SAFETY: live execs, launched in their recorded order on the
+                // stream they were captured from.
+                unsafe { result::graph::launch(x.raw, stream.cu_stream()) }
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        let host = began.elapsed();
+        stream.synchronize().map_err(|e| e.to_string())?;
+        let each = |d: std::time::Duration| d.as_secs_f64() * 1e3 / times as f64;
+        Ok((each(began.elapsed()), each(host)))
+    }
+
     /// The parameter diff reads a captured copy as a launch named `memcpy`
     /// whose parameters name its source and destination ([`copy_of`]) — read
     /// as kernel nodes only before 2026-11-23, a copy whose source moved went
@@ -1995,6 +2047,75 @@ mod cuda {
             "the source was made before the capture"
         );
         drop(copied);
+    }
+}
+
+/// Test only (`docs/plans/level_replay.md` Stage 0 (b)(c)): where a card
+/// probe sets [`relaunch_probe::TIMES`], every captured step is launched that
+/// many times more, unchanged, from the capture's call site (which still holds
+/// every buffer the step read), and its output is read before and after:
+/// the floor a replay could reach, and whether a replayed step writes the
+/// recorded one's bits.
+#[cfg(all(test, feature = "candle-cuda"))]
+pub(crate) mod relaunch_probe {
+    use candle_core::{DType, Device, Tensor};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    /// Relaunches a captured step; 0 = none (every test but the probe).
+    pub(crate) static TIMES: AtomicUsize = AtomicUsize::new(0);
+    /// One entry a captured step, in order.
+    pub(crate) static SEEN: Mutex<Vec<Relaunched>> = Mutex::new(Vec::new());
+
+    #[derive(Debug, Clone)]
+    pub(crate) struct Relaunched {
+        /// Milliseconds one relaunch of every group took, synchronized.
+        pub(crate) ms: f64,
+        /// Of which the host's launch calls.
+        pub(crate) host_ms: f64,
+        /// The output after the relaunches is the recorded one, bit for bit.
+        pub(crate) identical: bool,
+        /// The largest difference where it is not.
+        pub(crate) worst: f32,
+    }
+
+    pub(crate) fn after_capture(
+        graph: &super::DecodeGraph,
+        device: &Device,
+        shape: super::StepShape,
+        out: &Tensor,
+    ) {
+        let times = TIMES.load(Ordering::Relaxed);
+        if times == 0 {
+            return;
+        }
+        let read = |t: &Tensor| {
+            t.flatten_all()
+                .and_then(|t| t.to_dtype(DType::F32))
+                .and_then(|t| t.to_vec1::<f32>())
+                .expect("read the step's output")
+        };
+        let before = read(out);
+        let (ms, host_ms) = graph
+            .relaunch(device, shape, times)
+            .expect("relaunch the step's graphs");
+        let after = read(out);
+        let identical = before.len() == after.len()
+            && before
+                .iter()
+                .zip(&after)
+                .all(|(a, b)| a.to_bits() == b.to_bits());
+        let worst = before
+            .iter()
+            .zip(&after)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        SEEN.lock().expect("not poisoned").push(Relaunched {
+            ms,
+            host_ms,
+            identical,
+            worst,
+        });
     }
 }
 

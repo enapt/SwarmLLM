@@ -1,6 +1,7 @@
 # Replaying a captured drafter level instead of recording it again (FUTURE_WORK #228)
 
-Status: **planned, nothing built** (2026-11-23). The staged plan below comes from reading the code at
+Status: **Stage 0 done** (2026-11-23: the oracle reads copies and sets; the floor is 5.0 ms at 8 rows and
+3.9 ms at 2, a relaunch bit-identical); stages A-D not built. The staged plan below comes from reading the code at
 `18088f87b`; every file:line in it is a pointer to check, not a fact to build on (gotcha #645).
 
 ## Why
@@ -26,6 +27,19 @@ counted).
   and pad batch sizes to captured buckets.
 
 We take all three: one fixed input block, KV padded to a bucket, rows written through an index.
+
+- **SGLang's EAGLE draft runners** (`eagle_draft_cuda_graph_runner.py`, read 2026-11-23) fix the tree's shape
+  (top-k × steps) per graph, run every draft step inside ONE capture, and before each replay rewrite static
+  `seq_lens` / `positions` / `out_cache_loc` and the KV index table in one grouped copy, with the padding rows
+  zeroed (neutral), never only masked. The attention reads the committed prefix through an index table, not a
+  length baked into a kernel argument; the host bookkeeping (`seq_lens_cpu`, the plan) still runs every step.
+- **vLLM's hybrid (Mamba / gated delta-net) graphs** (`mamba_attn.py`, `gdn_attn.py`, `causal_conv1d_update`)
+  make the recurrent state's read and write SLOT a device tensor (`state_indices_tensor`, a null sentinel for a
+  padded row) and read the convolution's history from `num_accepted_tokens - 1`: our items 9-11 are this.
+  FlashAttention under graphs takes `cache_seqlens` as a device tensor and PINS its split count
+  (`max_num_splits`), as our chunk choice must be pinned per bucket.
+- **Neither replays a TREE-shaped recurrent state**: vLLM's delta-net speculation is a chain. The `ahead`
+  reads, the anchor and the store compaction are our own design; the replay's `check` mode is their guard.
 
 ## What the plan found first
 
@@ -71,8 +85,15 @@ Each lands alone, behind its own A/B switch, with its own proof.
     `cuda_graph.rs`, compared as launches named `memcpy` / `memset`.
   - `note_moved` gives each level a verdict: EXACT means the same topology, and no parameter moved except
     inside the graph's own memory.
-  - A test-only `DecodeGraph::relaunch(shape, n)` in `flowing_levels_pace_captured_and_op_by_op`. Relaunching
-    the last level is idempotent, so its time is the replay's floor.
+  - ~~A test-only `DecodeGraph::relaunch(shape, n)` in `flowing_levels_pace_captured_and_op_by_op`.~~ DONE
+    2026-11-23 (`cuda_graph::relaunch_probe`, called at the capture's own call site in `decode_step_with_graph`
+    while every buffer the level read is held; probe switch `SWARMLLM_PACE_RELAUNCH=<n>`). **The floor, measured
+    (Windows up 3.6 h, live node stopped, `~/swarmllm-gate/deep/fr/s0_1123/`):** a relaunched 8-row level of the
+    0.8B drafter is **5.03 / 5.05 ms** (host 0.08 ms of it; two runs, 39 levels each), a 2-row level **3.89 /
+    3.91 ms**; the Qwen3.5-4B's 8-row level 14.28 / 14.48 ms against 22.1 / 22.3 op by op (llama.cpp's own
+    llama-bench on that file: pp8 25 ms, pp16 18.5 ms — our kernels are not the gap, the host is).
+    **(c) bit identity: 39 of 39 relaunched levels' outputs (all 23 of the 4B's) keep the recorded bits**, worst
+    difference 0 — a relaunch is idempotent, so a replay that holds the inputs fixed reads what a recording does.
 - **Stage A — fixed inputs** (items 1-5, host only). A/B `SWARMLLM_LEVEL_INPUTS=per-level`.
   - Proof: the captured-level test made bitwise, still one graph made; the in-place store test still passing.
 - **Stage B — scalars on the card**, in three parts:
@@ -110,7 +131,7 @@ Each lands alone, behind its own A/B switch, with its own proof.
   - drifted host state → the replayed-state test;
   - a launch failing partway → the refused-capture rollback.
 
-## Expected gain (UNVERIFIED until Stage 0's floor)
+## Expected gain (the floor measured 2026-11-23: 5.0 ms at 8 rows, 3.9 ms at 2)
 
 An 8-row level 8.8 ms → ~5.5 ms replayed (~5.7 ms counting re-recordings, ~1 level in 20); a 2-row level
 6.0-6.6 → ~4.1 ms. On the 9B ↔ AU split, drafting is ~18 of the ~38 ms this computer spends on a forward, so a
