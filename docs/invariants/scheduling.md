@@ -6750,6 +6750,27 @@ one ahead again (pace 24-26 against 38-40 ms; 382-418 forwards a prose reply aga
 this node is the slower side. Where the far end is, fewer, wider forwards serve it better (the 14B's sweep above),
 so the count wants choosing by which side is slower, not a constant (FUTURE_WORK #228).
 
+*Where the layers sit, on the same link: the shipped split is as good as any* (2026-11-23 05:07-05:32Z, `real_link9b.sh`
+flowc, `~/swarmllm-gate/deep/fr/run_rf9b_{18,19}.sh`, TAGs rf9b18_* and rf9b19_*, main bbe2e17f4's CUDA build, Qwen3.5-9B,
+the Australian RTX 3060 holding all ten parts, Qwen3.5-0.8B Q8_0 drafting on this card, 160-token greedy replies, one
+sitting per shape, orders ABBA then ABCCBA). This computer drafts AND runs its own layers in turn, so fewer layers here
+should shorten its forward; the far card has to take them:
+
+| parts here (layers) | prose tok/s | code tok/s | here a forward: near ms | waiting | far queue most / guard least |
+|---|---|---|---|---|---|
+| **0-4 [0, 17) (shipped)** | 14.65, 14.44, 14.54, 13.31 | 24.64, 23.11, 27.92, 24.19 | 21-24 | 0% | 5-53 ms / 8x128 |
+| 0-3 [0, 13) | 14.91, 14.34 | 23.89, 22.69 | 17-18 | 0-1% | 25-71 ms / 8x64-128 |
+| 0-2 [0, 9) | 14.10, 14.10 | 27.80, 27.50 | 11-13.5 | 12-19% | 113-250 ms / 8x32-43 |
+| 0-1 [0, 5) | 11.27, 13.17 | 18.72, 18.60 | 7-9.5 | 14-41% | 353-396 ms / 8x64 |
+
+The forward here shrinks as planned, but the far card's grows past it: from 0-2 its forwards queue, the guard
+cuts the tree (`FlowGuard`) and each forward carries fewer tokens (0.52 a prose forward at 0-2 against 0.59 at 0-4).
+`far_least_ms` is the far card's FASTEST forward, not its typical one — a balance worked out from it (k ≈ 7 layers
+here, ~1.35x) was wrong. Read: with a drafter on the driving card, the stages are near balance at the shipped
+split; at 0-4 the far card still has slack (no cut, queue ≤ 53 ms), so what shortens THIS computer's work — the
+drafter's levels above all — pays there, and moving layers does not. Prior art for the objective: PipeDream's
+partitioner minimises the slowest stage; SpecPipe and FlowSpec put the drafter on a device of its own.
+
 *The drafter, on the same link* (02:44-03:11Z, `~/swarmllm-318/flowdraft.sh` then `flowfmt.sh`,
 main's build, arms by the one drafter H holds, alternating; every DSD line named that drafter with
 `drafter_on_card=true`). 400-token replies:
