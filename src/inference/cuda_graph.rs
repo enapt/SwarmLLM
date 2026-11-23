@@ -1119,10 +1119,12 @@ mod cuda {
     use std::sync::Arc;
 
     /// An instantiated graph, destroyed once, and the census of the graph it
-    /// was built from ([`node_census`]).
+    /// was built from ([`node_census`]) — and, under
+    /// `SWARMLLM_GRAPH_PARAM_DIFF=1`, its kernels' launches ([`Launches`]).
     pub(super) struct Exec {
         raw: sys::CUgraphExec,
         census: String,
+        launches: Option<Launches>,
     }
 
     // SAFETY: a graph exec may be used from any thread with the context bound,
@@ -1289,6 +1291,282 @@ mod cuda {
             .join(", ")
     }
 
+    /// `SWARMLLM_GRAPH_PARAM_DIFF=1`: compare every captured group's kernel
+    /// launches with the same group's last capture and say, by kernel and
+    /// parameter, what moved — the list a step must hold still to be
+    /// REPLAYED rather than recorded again (FUTURE_WORK #228 (1): a flowing
+    /// level's card idles ~60% of it while the host records). A diagnostic:
+    /// it reads the driver between a capture's end and its launch, so never in
+    /// a timed run.
+    ///
+    /// Prior art: llama.cpp relaunches a graph with no capture where no node's
+    /// op, source addresses, shape or strides moved
+    /// (`ggml_cuda_graph_update_required`); this asks the same question one
+    /// level lower, of the captured kernel nodes themselves.
+    fn param_diff_on() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| std::env::var("SWARMLLM_GRAPH_PARAM_DIFF").as_deref() == Ok("1"))
+    }
+
+    /// A captured graph's kernel launches in node order, and the memory its
+    /// own allocation nodes hold — an address inside one is the graph's, the
+    /// same on every launch of one exec.
+    pub(super) struct Launches {
+        kernels: Vec<Launch>,
+        allocations: Vec<(u64, u64)>,
+    }
+
+    struct Launch {
+        name: String,
+        shape: [u32; 7],
+        /// Each parameter's bytes; `None` where the driver would not say.
+        params: Option<Vec<Vec<u8>>>,
+    }
+
+    impl Launches {
+        /// Where `value` falls in this graph's own allocations: (which, offset).
+        fn inside(&self, value: u64) -> Option<(usize, u64)> {
+            self.allocations
+                .iter()
+                .position(|&(at, len)| value >= at && value < at + len)
+                .map(|i| (i, value - self.allocations[i].0))
+        }
+    }
+
+    fn launches_of(graph: sys::CUgraph) -> Option<Launches> {
+        let mut count = 0usize;
+        // SAFETY: a live graph; a null array asks for the count alone.
+        unsafe { sys::cuGraphGetNodes(graph, std::ptr::null_mut(), &mut count) }
+            .result()
+            .ok()?;
+        let mut nodes: Vec<sys::CUgraphNode> = vec![std::ptr::null_mut(); count];
+        // SAFETY: room for `count` nodes; the driver writes at most that many.
+        unsafe { sys::cuGraphGetNodes(graph, nodes.as_mut_ptr(), &mut count) }
+            .result()
+            .ok()?;
+        let mut found = Launches {
+            kernels: Vec::new(),
+            allocations: Vec::new(),
+        };
+        for node in nodes.into_iter().take(count) {
+            let mut kind = std::mem::MaybeUninit::<sys::CUgraphNodeType>::uninit();
+            // SAFETY: a node of the live graph.
+            unsafe { sys::cuGraphNodeGetType(node, kind.as_mut_ptr()) }
+                .result()
+                .ok()?;
+            // SAFETY: the driver wrote it.
+            match unsafe { kind.assume_init() } {
+                sys::CUgraphNodeType::CU_GRAPH_NODE_TYPE_MEM_ALLOC => {
+                    // SAFETY: zeroed is valid for this plain C struct; the
+                    // driver fills it for an allocation node.
+                    let mut p: sys::CUDA_MEM_ALLOC_NODE_PARAMS = unsafe { std::mem::zeroed() };
+                    // SAFETY: an allocation node of the live graph.
+                    if unsafe { sys::cuGraphMemAllocNodeGetParams(node, &mut p) }
+                        .result()
+                        .is_ok()
+                    {
+                        found.allocations.push((p.dptr, p.bytesize as u64));
+                    }
+                }
+                sys::CUgraphNodeType::CU_GRAPH_NODE_TYPE_KERNEL => {
+                    found.kernels.push(launch_of(node));
+                }
+                _ => {}
+            }
+        }
+        Some(found)
+    }
+
+    fn launch_of(node: sys::CUgraphNode) -> Launch {
+        // SAFETY: zeroed is valid for this plain C struct; the driver fills it.
+        let mut p: sys::CUDA_KERNEL_NODE_PARAMS = unsafe { std::mem::zeroed() };
+        // SAFETY: a kernel node of the live graph; its parameter array lives
+        // as long as the graph, which outlives this call.
+        if unsafe { sys::cuGraphKernelNodeGetParams_v2(node, &mut p) }
+            .result()
+            .is_err()
+        {
+            return Launch {
+                name: "unknown".into(),
+                shape: [0; 7],
+                params: None,
+            };
+        }
+        let mut name_ptr: *const core::ffi::c_char = std::ptr::null();
+        // SAFETY: a function or kernel handle the driver returned just above.
+        let named = if !p.func.is_null() {
+            unsafe { sys::cuFuncGetName(&mut name_ptr, p.func) }.result()
+        } else {
+            unsafe { sys::cuKernelGetName(&mut name_ptr, p.kern) }.result()
+        };
+        let name = if named.is_ok() && !name_ptr.is_null() {
+            // SAFETY: a NUL-terminated name the driver owns.
+            unsafe { std::ffi::CStr::from_ptr(name_ptr) }
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            "unnamed".into()
+        };
+        let params = (!p.kernelParams.is_null()).then(|| {
+            let mut out = Vec::new();
+            for i in 0.. {
+                let (mut offset, mut size) = (0usize, 0usize);
+                // SAFETY: the handle the node launches; an index past its last
+                // parameter is answered with an error, which ends the walk.
+                let info = if !p.func.is_null() {
+                    unsafe { sys::cuFuncGetParamInfo(p.func, i, &mut offset, &mut size) }
+                } else {
+                    unsafe { sys::cuKernelGetParamInfo(p.kern, i, &mut offset, &mut size) }
+                };
+                if info.result().is_err() || size == 0 {
+                    break;
+                }
+                // SAFETY: `kernelParams[i]` points at parameter i's `size` bytes.
+                let bytes = unsafe {
+                    let at = *p.kernelParams.add(i) as *const u8;
+                    std::slice::from_raw_parts(at, size).to_vec()
+                };
+                out.push(bytes);
+            }
+            out
+        });
+        Launch {
+            name,
+            shape: [
+                p.gridDimX,
+                p.gridDimY,
+                p.gridDimZ,
+                p.blockDimX,
+                p.blockDimY,
+                p.blockDimZ,
+                p.sharedMemBytes,
+            ],
+            params,
+        }
+    }
+
+    /// What moved between a group's two captures, summed over the process.
+    #[derive(Default)]
+    struct Moved {
+        groups: u64,
+        kernels: u64,
+        other_topology: u64,
+        unreadable: u64,
+        /// (kernel, what) → (times, one example)
+        by_kernel: std::collections::BTreeMap<(String, String), (u64, String)>,
+    }
+
+    static MOVED: std::sync::Mutex<Option<Moved>> = std::sync::Mutex::new(None);
+
+    /// Groups compared between one summary line and the next.
+    const MOVED_REPORT_EVERY: u64 = 240;
+
+    fn note_moved(before: &Launches, now: &Launches) {
+        let Ok(mut held) = MOVED.lock() else {
+            return;
+        };
+        let Moved {
+            groups,
+            kernels,
+            other_topology,
+            unreadable,
+            by_kernel,
+        } = held.get_or_insert_with(Moved::default);
+        *groups += 1;
+        let mut note = |name: &str, what: String, example: String| {
+            by_kernel
+                .entry((name.to_string(), what))
+                .or_insert((0, example))
+                .0 += 1;
+        };
+        if before.kernels.len() != now.kernels.len()
+            || before
+                .kernels
+                .iter()
+                .zip(&now.kernels)
+                .any(|(a, b)| a.name != b.name)
+        {
+            *other_topology += 1;
+        } else {
+            for (a, b) in before.kernels.iter().zip(&now.kernels) {
+                *kernels += 1;
+                if a.shape != b.shape {
+                    note(
+                        &b.name,
+                        "launch shape".into(),
+                        format!("{:?} -> {:?}", a.shape, b.shape),
+                    );
+                }
+                let (Some(pa), Some(pb)) = (&a.params, &b.params) else {
+                    *unreadable += 1;
+                    continue;
+                };
+                for (i, (x, y)) in pa.iter().zip(pb).enumerate() {
+                    if x == y {
+                        continue;
+                    }
+                    if x.len() == 8 && y.len() == 8 {
+                        let vx = u64::from_le_bytes(x.as_slice().try_into().unwrap_or([0; 8]));
+                        let vy = u64::from_le_bytes(y.as_slice().try_into().unwrap_or([0; 8]));
+                        match (before.inside(vx), now.inside(vy)) {
+                            // The graph's own memory, at the same place in it:
+                            // one exec keeps its addresses, so a replay is unmoved.
+                            (Some(ia), Some(ib)) if ia == ib => continue,
+                            (Some(_), Some(_)) => note(
+                                &b.name,
+                                format!("param {i}: another place in the graph's memory"),
+                                format!("{vx:#x} -> {vy:#x}"),
+                            ),
+                            (None, None)
+                                if vx > u64::from(u32::MAX) || vy > u64::from(u32::MAX) =>
+                            {
+                                note(
+                                    &b.name,
+                                    format!("param {i}: an address outside the graph"),
+                                    format!("{vx:#x} -> {vy:#x}"),
+                                )
+                            }
+                            (None, None) => note(
+                                &b.name,
+                                format!("param {i}: a value (8 bytes)"),
+                                format!("{vx} -> {vy}"),
+                            ),
+                            _ => note(
+                                &b.name,
+                                format!("param {i}: in and out of the graph's memory"),
+                                format!("{vx:#x} -> {vy:#x}"),
+                            ),
+                        }
+                    } else {
+                        note(
+                            &b.name,
+                            format!("param {i}: a value ({} bytes)", y.len()),
+                            format!("{x:?} -> {y:?}"),
+                        );
+                    }
+                }
+            }
+        }
+        if *groups % MOVED_REPORT_EVERY == 0 {
+            let mut rows: Vec<_> = by_kernel.iter().collect();
+            rows.sort_by_key(|row| std::cmp::Reverse(row.1 .0));
+            let table = rows
+                .iter()
+                .take(40)
+                .map(|((name, what), (n, example))| format!("{n} × {name} {what} (e.g. {example})"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            tracing::info!(
+                groups = *groups,
+                kernels = *kernels,
+                other_topology = *other_topology,
+                unreadable = *unreadable,
+                moved = %table,
+                "DIAG: graph params that moved between a group's captures"
+            );
+        }
+    }
+
     pub(super) fn graph_reserved(device: sys::CUdevice) -> Option<u64> {
         let mut value: u64 = 0;
         // SAFETY: RESERVED_MEM_CURRENT is a `cuuint64_t`.
@@ -1440,6 +1718,12 @@ mod cuda {
                 self.execs.resize_with(self.group + 1, || None);
             }
             let slot = &mut self.execs[self.group];
+            let launches = param_diff_on().then(|| launches_of(graph.0)).flatten();
+            if let (Some(now), Some(before)) =
+                (&launches, slot.as_ref().and_then(|x| x.launches.as_ref()))
+            {
+                note_moved(before, now);
+            }
             let began = std::time::Instant::now();
             let updated = slot.as_ref().is_some_and(|x| {
                 // SAFETY: zeroed is a valid bit pattern for this plain C
@@ -1474,8 +1758,12 @@ mod cuda {
                 *slot = Some(Exec {
                     raw,
                     census: node_census(graph.0),
+                    launches: None,
                 });
                 self.all_updated = false;
+            }
+            if let (Some(x), Some(now)) = (slot.as_mut(), launches) {
+                x.launches = Some(now);
             }
             timed(Stage::GraphUpdate, began);
             let x = slot.as_ref().expect("set just above");

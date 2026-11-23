@@ -2997,7 +2997,16 @@ submission COUNT, not bandwidth".
    per group of a level, the host's time from one launch to the next, the card's idle before the
    group and its run — the card runs a group in 0.31-0.38 ms and waits 0.75-0.89 ms for the next to
    be recorded (2026-11-23): recording is the critical path, and the lever is replaying a level, not
-   overlapping it (FUTURE_WORK #228 (1)). ⚠ Build the
+   overlapping it (FUTURE_WORK #228 (1)). `level_topology.py` says whether consecutive levels run the
+   same kernels in the same order and which kernels' launch grids move (2026-11-23: one sequence over
+   78 levels; 60 of 1,027 grids move — 54 `is_u32_f32` gathers, 6 `decode_attn_f32`). **What else
+   moves**: `SWARMLLM_GRAPH_PARAM_DIFF=1` compares each group's kernel nodes with its last capture,
+   parameter by parameter (`cuGraphKernelNodeGetParams_v2` + `cuFuncGetParamInfo`), and logs every
+   240 groups `DIAG: graph params that moved between a group's captures` at info — by kernel: a
+   launch shape, a value, an address outside the graph, or another place in the graph's own memory
+   (an address at the same place in it is not a move: one exec keeps its own). A diagnostic: it reads
+   the driver between a capture's end and its launch, never in a timed run. Rig:
+   `~/swarmllm-gate/deep/fr/diff_params.sh <release test binary> 8 2`. ⚠ Build the
    probe `--release`: the test profile leaves the crate at opt-level 0, and a level read 20.7 ms
    there. ⚠ A laptop card's clocks move one run's median by ~30% (6.05 against 8.4-9.2 ms in the
    same hour) — interleave arms, never compare runs from different minutes.
