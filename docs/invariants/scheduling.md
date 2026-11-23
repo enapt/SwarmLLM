@@ -6749,6 +6749,16 @@ one 15.63 / 16.74 / 15.75 prose and 27.12 / 27.19 / 21.67 code, two 14.83 / 14.9
 one ahead again (pace 24-26 against 38-40 ms; 382-418 forwards a prose reply against 273-279), on a link where
 this node is the slower side. Where the far end is, fewer, wider forwards serve it better (the 14B's sweep above),
 so the count wants choosing by which side is slower, not a constant (FUTURE_WORK #228).
+**A third sitting, and the count stays two** (2026-11-23 07:11-07:21Z, rf9b22, `run_rf9b_22.sh` ABBA, main
+18088f87b + the reply line's `here_ms_a_forward` / `far_said_ms_median`; the choice built as `LevelChoice` — one
+level while this node waited ≤ 5% of its recent time, two from 15% — against `SWARMLLM_FLOW_LEVELS=2`). This node
+never waited, so the choice grew one level every call (444-451 of 444-451): prose 14.14 / 13.88 and code 25.24 /
+23.03 tok/s against two's 14.17 / 15.24 and 22.02 / 28.37. Over the three sittings one level averaged 15.3 prose and
+25.7 code against two's 14.9 and 25.2 — inside every sitting's spread — and it cost the FAR card more: 460 forwards a
+prose reply at a median 19 ms of its own time (`far_said_ms_median`) against 288 at 24-25 ms, ~28% more of the far
+card a reply, at 1.6× the messages. A far card serves others too, so a level fewer is not worth that for no
+measured gain: the choice was not shipped, and two stay for a walk-carrying flow. Where the far end is the slower
+side the count may want to be deeper, not shallower — unmeasured (the argmax design in FUTURE_WORK #228).
 
 *Where the layers sit, on the same link: the shipped split is as good as any* (2026-11-23 05:07-05:32Z, `real_link9b.sh`
 flowc, `~/swarmllm-gate/deep/fr/run_rf9b_{18,19}.sh`, TAGs rf9b18_* and rf9b19_*, main bbe2e17f4's CUDA build, Qwen3.5-9B,

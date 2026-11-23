@@ -115,8 +115,11 @@ fn levels_a_call(with_the_walk: bool) -> u32 {
 /// ABCCBA); a second sitting (`real_link_rf9b12_1123/`) the same: two 15.41 /
 /// 14.54 and 27.95 / 25.04, three 14.24 / 13.31 and 25.28 / 24.39. One level
 /// read 15.79 / 14.98 and 28.27 / 27.53 there, within two's spread in one
-/// sitting, at half again the forwards across the link — kept as the next
-/// question (FUTURE_WORK #228).
+/// sitting, at half again the forwards across the link. Three sittings in all
+/// (rf9b12, rf9b14, rf9b22): one level 15.3 / 25.7 tok/s on average against
+/// two's 14.9 / 25.2, inside the runs' spread, for ~28% more of the far
+/// card's time a reply (460 forwards at ~19 ms against 288 at ~24.5) — two
+/// stay (FUTURE_WORK #228).
 fn levels_by_default(with_the_walk: bool) -> u32 {
     match with_the_walk {
         true => 2,
@@ -1303,6 +1306,11 @@ struct FlowRun<'a, 'r> {
     /// Every forward names the walk's row ([`flows_with_the_walk`]: a
     /// recurrent target).
     with_the_walk: bool,
+    /// The far end's own word of how long it held each answered forward
+    /// (`LayerResult::served_us`), in ms, for the reply's line — so one line
+    /// says which side of the flow was the slower. Logged, never priced (the
+    /// guard reads it only through [`believed_served_ms`]).
+    far_said_ms: Vec<f32>,
     coupling: Option<u64>,
     io: StreamIo<'a>,
     reply: StreamReply<'r>,
@@ -1470,6 +1478,7 @@ impl PipelineExecutor {
             drafting_off: false,
             drafter_warm: false,
             with_the_walk: flows_with_the_walk(&self.shared_state, &self.request.model_id),
+            far_said_ms: Vec::new(),
             coupling,
             io,
             reply,
@@ -1577,6 +1586,11 @@ impl PipelineExecutor {
             waiting_ms = format_args!("{:.0}", run.waiting_ms),
             rows_a_level = rows_a_level(),
             levels = levels_a_call(run.with_the_walk),
+            here_ms_a_forward = format_args!(
+                "{:.1}",
+                (run.drafting_ms + run.near_ms + run.here_ms) / f64::from(run.forwards.max(1))
+            ),
+            far_said_ms_median = format_args!("{:.1}", median_of(&run.far_said_ms)),
             live_most = live_most(),
             guard = run.guard.guarded,
             guard_at_start = format_args!("{}x{}", guard_at_start.width, guard_at_start.live),
@@ -2638,6 +2652,9 @@ impl FlowRun<'_, '_> {
             self.reply
                 .check
                 .record(sent.rows as u32, delay_ms + here_ms);
+        }
+        if let Some(us) = served_us.filter(|_| self.far_said_ms.len() < Verdicts::MOST_KEPT) {
+            self.far_said_ms.push(us as f32 / 1000.0);
         }
         if sent.lead == 0 {
             // A rebase's forward carries the path too: its time is its size's.

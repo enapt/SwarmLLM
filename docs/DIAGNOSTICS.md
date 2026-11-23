@@ -1680,6 +1680,13 @@ LOST (the earliest-drafted row under the missed row), and `voided_levels` the le
 row, summed — `voided_levels / misses` is what a miss throws away. A reply's time a token is about the drafter's
 pace a level plus `misses / emitted × miss_verdict_ms`; `examples/standing_ring_ladder1.py` derives the same from
 older lines that lack these fields.
+**Which side of the flow is the slower** (2026-11-23, FUTURE_WORK #228): `here_ms_a_forward` is this computer's
+drafting plus its own layers a forward, before and after the peers' (`(drafting_ms + near_ms + here_ms) / forwards`), `far_said_ms_median` the median of
+the far end's own word of each answered forward (`served_us` — the tail's only through a chain, #497; 0 from an
+older far), and `waiting_ms` the time this computer waited with nothing to grow or send. `waiting_ms` near 0
+with `here_ms_a_forward` above `far_said_ms_median` is this computer the slower side (the 9B TH↔AU split,
+2026-11-23: 24-41 against 19-27 ms a forward). `levels` is the levels a drafter call grows;
+`SWARMLLM_FLOW_LEVELS=<n>` sets it for an A/B.
 
 **CUDA-graph decode** (on by default since 2026-09-30; `SWARMLLM_CUDA_GRAPH=0` or `SWARMLLM_CUDA_OWN_STREAM=0` turns it off; recorded in groups of `SWARMLLM_CUDA_GRAPH_GROUP` layers, default 2, `0` = one graph per step):
 
@@ -3006,7 +3013,9 @@ submission COUNT, not bandwidth".
    launch shape, a value, an address outside the graph, or another place in the graph's own memory
    (an address at the same place in it is not a move: one exec keeps its own). A diagnostic: it reads
    the driver between a capture's end and its launch, never in a timed run. Rig:
-   `~/swarmllm-gate/deep/fr/diff_params.sh <release test binary> 8 2`. ⚠ Build the
+   `~/swarmllm-gate/deep/fr/diff_params.sh <release test binary> 8 2`. ⚠ It reads KERNEL nodes
+   only (`launches_of`): a candle copy is a MEMCPY node, so a copy whose source moved is not
+   reported — the replay plan's Stage 0 widens it (`docs/plans/level_replay.md`). ⚠ Build the
    probe `--release`: the test profile leaves the crate at opt-level 0, and a level read 20.7 ms
    there. ⚠ A laptop card's clocks move one run's median by ~30% (6.05 against 8.4-9.2 ms in the
    same hour) — interleave arms, never compare runs from different minutes.
