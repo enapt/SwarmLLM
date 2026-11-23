@@ -54,6 +54,7 @@
 //
 // Built WITHOUT `-use_fast_math`, like every kernel here (`build.rs`).
 
+#include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
 __device__ __forceinline__ float warp_sum(float x) {
@@ -473,22 +474,50 @@ extern "C" __global__ void ssm_gates_f32(
 // a fixed reduction. A row's sum is the same whatever `N`, so a check's gates
 // are the gates of its rows read one at a time, bit for bit; NOT bit-identical
 // to cuBLAS's. x `[N, hidden]`, w_beta / w_alpha `[nv, hidden]`.
-template <int N>
+//
+// `Q8` reads the weights as Q8_0 blocks instead (34 bytes: an f16 scale d,
+// then 32 int8 q; a row is hidden / 32 blocks), as a file that quantized them
+// keeps them — Qwen3.5-9B's Q4_K_M upload, and the 0.8B and 2B drafters' Q8_0.
+// A weight is d · q, an f16 times an int8: 11 + 8 significant bits, exact in an
+// f32, so each weight is the dequantized f32 weight exactly and the sum is the
+// f32 kernel's over the dequantized matrix, bit for bit. Where the projections
+// ran as matmuls, each was a quantize of x to Q8_1 plus an int8 product (two
+// launches a projection, five with the gates); here x stays f32, so NOT
+// bit-identical to that path either.
+//
+// Prior art: llama.cpp's old DMMV kernels read quantized weights against f32
+// activations, dequantizing on the fly (`dequantize_mul_mat_vec`, since removed
+// for mmvq, which wins on large matrices); for these [nv, hidden] weights the
+// activation's quantize costs a launch as long as the product, and SGLang folds
+// the gating into its delta-rule update the same way (2026-11-23, #228 (1) (b)).
+template <bool Q8>
+__device__ __forceinline__ float gate_weight(const void *__restrict__ w, const int h,
+                                             const int k, const int hidden) {
+    if (Q8) {
+        const unsigned char *block = (const unsigned char *)w +
+                                     ((size_t)h * (hidden / 32) + k / 32) * 34;
+        const float d = __half2float(__ushort_as_half(*(const unsigned short *)block));
+        return d * (float)(signed char)block[2 + k % 32];
+    }
+    return ((const float *)w)[(size_t)h * hidden + k];
+}
+
+template <int N, bool Q8>
 __device__ void ssm_gates_project_body(
-    const float *__restrict__ x, const float *__restrict__ w_beta,
-    const float *__restrict__ w_alpha, const float *__restrict__ dt_bias,
+    const float *__restrict__ x, const void *__restrict__ w_beta,
+    const void *__restrict__ w_alpha, const float *__restrict__ dt_bias,
     const float *__restrict__ a, float *__restrict__ gates, const int hidden,
     const int nv) {
     const int h = blockIdx.x;
     const bool is_alpha = blockIdx.y == 1;
-    const float *w = (is_alpha ? w_alpha : w_beta) + (size_t)h * hidden;
+    const void *w = is_alpha ? w_alpha : w_beta;
     float acc[N];
 #pragma unroll
     for (int t = 0; t < N; t++) {
         acc[t] = 0.0f;
     }
     for (int k = threadIdx.x; k < hidden; k += 128) {
-        const float wk = w[k];
+        const float wk = gate_weight<Q8>(w, h, k, hidden);
 #pragma unroll
         for (int t = 0; t < N; t++) {
             acc[t] = fmaf(wk, x[(size_t)t * hidden + k], acc[t]);
@@ -524,8 +553,16 @@ __device__ void ssm_gates_project_body(
         const float *__restrict__ w_alpha, const float *__restrict__ dt_bias,      \
         const float *__restrict__ a, float *__restrict__ gates, const int hidden,  \
         const int nv) {                                                            \
-        ssm_gates_project_body<N>(x, w_beta, w_alpha, dt_bias, a, gates, hidden,   \
-                                  nv);                                             \
+        ssm_gates_project_body<N, false>(x, w_beta, w_alpha, dt_bias, a, gates,    \
+                                         hidden, nv);                              \
+    }                                                                              \
+    extern "C" __global__ void __launch_bounds__(128) ssm_gates_project_q8_0_r##N( \
+        const float *__restrict__ x, const unsigned char *__restrict__ w_beta,     \
+        const unsigned char *__restrict__ w_alpha,                                 \
+        const float *__restrict__ dt_bias, const float *__restrict__ a,            \
+        float *__restrict__ gates, const int hidden, const int nv) {               \
+        ssm_gates_project_body<N, true>(x, w_beta, w_alpha, dt_bias, a, gates,     \
+                                        hidden, nv);                               \
     }
 
 SSM_GATES_PROJECT_ENTRY(1)

@@ -6961,6 +6961,55 @@ tok/s with stalls of 1 s or more out, two runs a side):
 A story with the block drafter stays under plain steps (0.8-0.9×): plain steps
 gained as much.
 
+**Q8_0 weights read in place** (2026-11-23, FUTURE_WORK #228 (1) (b)). The 9B's
+and the 0.8B/2B drafters' uploads keep `ssm_alpha` / `ssm_beta` in Q8_0, so up
+to here they took the matmul path: a q8_1 quantize and an int8 product for each
+projection, then `ssm_gates_f32` — five launches a DeltaNet layer.
+`ssm_gates_project_q8_0_r1..r8` reads the 34-byte blocks where they lie (an f16
+scale, 32 int8; `d·q` is exact in f32), so it is bit for bit the f32 launch over
+the dequantized weights (`the_card_gates_read_q8_0_weights_as_their_f32_dequantization_bit_for_bit`,
+1..8 rows; red if the matmuls ran, whose gates sit 0.003-0.006 away: the
+activation's q8_1 rounding). Dequantizing the two weights at load was the
+alternative the design pass named; it was not taken because no budget counts an
+f32 copy (the 9B's would be 32 MB on the card). Prior art: llama.cpp's removed DMMV
+(`dequantize_mul_mat_vec`, the weight dequantized in the dot product) and
+SGLang's gating folded into its update; llama.cpp itself now runs these as
+quantize + `mmvq`, which is what the matmul path matched.
+
+Census (`SWARMLLM_COUNT_KERNELS=1`, an 8-row flowing level of the 0.8B):
+739 → 667 launches, `ssm_gates_project_q8_0_r8` 18 times, `quantize_q8_1` and
+`mul_mat_vec_q8_0_q8_1` 48 → 12 each. The level's time
+(`flowing_levels_pace_captured_and_op_by_op`, release probe, the arms
+interleaved three times, `~/swarmllm-gate/deep/fr/pace_q8g.sh`): 8 rows 8.47-8.74
+against 8.62-9.05 ms, 2 rows 6.16-6.25 against 6.25-6.32 (one 9.35-9.95 run of the
+matmuls is the card's clocks). Small because the level is HOST-bound
+(`docs/DIAGNOSTICS.md` § 3f's second reading): a launch removed saves its
+recording, not a kernel's time. The guessed reply is still the reply read one
+token at a time on the card (138 → 168 tok/s), and the captured flowing level
+reads as the ordinary one (worst logit difference 0).
+On the 9B ↔ AU link (`run_rf9b_15.sh`, ABBAAB, both ends of the split and the
+0.8B drafter taking the switch) the two arms are one band: code 21.0-24.9 against
+20.4-25.0 tok/s, prose 13.0-14.2 against 12.7-14.7, drafting 17.6-20.0 against
+16.6-21.7 ms a forward — the link's spread is wider than a 0.2 ms level.
+
+Reply check (`~/swarmllm-gate/deep/fr/refchk_q8g.sh`: llama.cpp master's greedy
+reply to the story and BST prompts, 96 tokens, teacher-forced, every reply
+position a decode step on the card, each arm twice — identical; the 0.8B
+Q8_0; decode positions only, against llama.cpp's processor pass):
+
+| | story top-1 | story cos, worst / median | code top-1 | code cos |
+|---|---|---|---|---|
+| ours, Q8_0 in place | 91/96 | 0.999205 / 0.999865 | 95/96 | 0.998820 / 0.999757 |
+| ours, through the matmuls | 93/96 | 0.999071 / 0.999869 | 94/96 | 0.998836 / 0.999762 |
+| llama.cpp's card build | 93/96 | 0.999059 / 0.999871 | 93/96 | 0.997980 / 0.999767 |
+
+Each position only the in-place path misses is one where llama.cpp parts from
+itself: story 29 (its processor by 0.008, its card by 0.005), 91 (its card
+picks a third token, by 0.002) and 118 (its card by 0.003); the matmuls' own
+misses (story 105, code 64) are likewise. The prompt positions under 0.999
+(story 22/26, code 23-30) are the same in both arms: a prompt is wider than 8
+rows and takes the matmuls either way.
+
 **Moved from `arch-inference.md` (trimmed 2026-11-17):** `delta_rule_cpu` runs a task per sequence and value head with the state updated in place; `delta_rule_cuda` is llama.cpp's `gated_delta_net_cuda`. q and k are normalised as one tensor. The card convolution + SiLU (`ssm_conv_silu_f32_k4`) writes q | k, v and the next window straight into the step's buffers (12-14 launches a layer before); a taken-back check's replay (`cuda::replay`: `conv_window_replay_f32` + `delta_rule_replay_f32_d*`, the step's own body with its outputs off) is two launches (seven before); a replay must land where the step passed. Gates: with f32 `ssm_alpha` / `ssm_beta` and <= 8 rows the projections too (`ssm_gates_project_f32_r*`), else `ssm_gates_f32` after the matmuls, bit for bit; written as the two blocks `[2, b, seq, nv]` (`Gates::stacked`); a check's rows are its rows one at a time.
 
 ## Qwen3-Next: value heads grouped by key head, put in the kernels' order at load (2026-11-01, FUTURE_WORK #390)

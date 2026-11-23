@@ -24,6 +24,15 @@
 //   update   capture every token, cudaGraphExecUpdate the exec, launch
 //            (instantiate afresh when the update is refused)    (llama.cpp)
 //   replay   capture ONCE, replay the same exec every token      (upper bound)
+//   arena    as update, but every op writes a buffer made once OUTSIDE the
+//            capture (a planned arena, ggml-alloc's way): the graph holds the
+//            kernels only, no memory nodes                  (2026-11-23, #228 (1))
+//
+// MEASURED 2026-11-23 (this RTX 3060 laptop card under WSL2, 200 tokens, two
+// runs each): 1000 launches — update 3.68-4.00 ms/token (capture 1.53-1.58,
+// update 0.50-0.57), arena 1.61-1.64 (capture 0.44-0.46, update 0.19), replay
+// 0.92-0.95; 85 launches — update 0.28, arena 0.18. The memory nodes are ~2 µs
+// a pair of recording, update and the card's own run: FUTURE_WORK #496.
 //
 // WHAT IT CANNOT TELL YOU: anything about OUR forward pass (captured allocs
 // must be freed inside the capture, no host sync inside it — § Stage 4b), or
@@ -51,6 +60,12 @@ static void one_token(cudaStream_t s, int launches, int token) {
         CK(cudaMallocAsync((void**)&buf, 4096 * sizeof(float), s));
         tiny<<<16, 256, 0, s>>>(buf, 4096, token);
         CK(cudaFreeAsync(buf, s));
+    }
+}
+
+static void one_token_arena(cudaStream_t s, int launches, int token, float** bufs) {
+    for (int k = 0; k < launches; k++) {
+        tiny<<<16, 256, 0, s>>>(bufs[k], 4096, token);
     }
 }
 
@@ -127,10 +142,53 @@ int main(int argc, char** argv) {
     for (int t = 0; t < tokens; t++) { CK(cudaGraphLaunch(e1, s)); CK(cudaStreamSynchronize(s)); }
     double replay = ms_since(t0) / tokens;
 
+    CK(cudaGraphExecDestroy(e1));
+    CK(cudaGraphDestroy(g1));
+
+    // arena: re-capture every token as `update`, the buffers made once outside
+    float** bufs = (float**)malloc(sizeof(float*) * launches);
+    for (int k = 0; k < launches; k++) CK(cudaMalloc((void**)&bufs[k], 4096 * sizeof(float)));
+    cudaGraphExec_t ea = nullptr;
+    int a_updated = 0, a_inst = 0;
+    double a_capture_ms = 0, a_update_ms = 0, a_launch_ms = 0;
+    t0 = std::chrono::steady_clock::now();
+    for (int t = 0; t < tokens; t++) {
+        auto c0 = std::chrono::steady_clock::now();
+        cudaGraph_t g;
+        CK(cudaStreamBeginCapture(s, cudaStreamCaptureModeThreadLocal));
+        one_token_arena(s, launches, t, bufs);
+        CK(cudaStreamEndCapture(s, &g));
+        a_capture_ms += ms_since(c0);
+        auto u0 = std::chrono::steady_clock::now();
+        if (ea) {
+            cudaGraphExecUpdateResultInfo info;
+            if (cudaGraphExecUpdate(ea, g, &info) == cudaSuccess) {
+                a_updated++;
+            } else {
+                cudaGetLastError();
+                CK(cudaGraphExecDestroy(ea));
+                CK(cudaGraphInstantiate(&ea, g, 0));
+                a_inst++;
+            }
+        } else {
+            CK(cudaGraphInstantiate(&ea, g, 0));
+            a_inst++;
+        }
+        a_update_ms += ms_since(u0);
+        auto l0 = std::chrono::steady_clock::now();
+        CK(cudaGraphLaunch(ea, s));
+        a_launch_ms += ms_since(l0);
+        CK(cudaStreamSynchronize(s));
+        CK(cudaGraphDestroy(g));
+    }
+    double arena = ms_since(t0) / tokens;
+
     printf("launches/token=%d tokens=%d\n", launches, tokens);
     printf("direct : %.3f ms/token (%d launches + %d alloc/free pairs, one sync)\n", direct, launches, launches);
     printf("update : %.3f ms/token (capture %.3f, update/instantiate %.3f; %d updated, %d instantiated)\n",
            update, capture_ms / tokens, update_ms / tokens, updated, reinstantiated);
     printf("replay : %.3f ms/token (upper bound: one graph launch)\n", replay);
+    printf("arena  : %.3f ms/token (capture %.3f, update %.3f, launch call %.3f; %d updated, %d instantiated)\n",
+           arena, a_capture_ms / tokens, a_update_ms / tokens, a_launch_ms / tokens, a_updated, a_inst);
     return 0;
 }

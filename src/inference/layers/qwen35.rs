@@ -902,10 +902,12 @@ impl DeltaNetWeights {
     /// −exp(A_log), so g ≤ 0) and the write strength beta = sigmoid(beta).
     /// On a card in one launch, written in the block layout the delta rule
     /// reads ([`Gates::stacked`]): the projections too where the file keeps
-    /// `ssm_alpha` and `ssm_beta` in f32 and the step is at most 8 rows (NOT
-    /// bit-identical to cuBLAS; a row's gates are the same at any width), else
-    /// after them, bit for bit the composition. `SWARMLLM_SSM_GATES=composed`
-    /// is the A/B switch.
+    /// `ssm_alpha` and `ssm_beta` in f32 — or in Q8_0, read in place (the
+    /// 9B's and the 0.8B/2B drafters' uploads) — and the step is at most 8
+    /// rows (NOT bit-identical to cuBLAS or to the quantized matmuls; a row's
+    /// gates are the same at any width), else after them, bit for bit the
+    /// composition. `SWARMLLM_SSM_GATES=composed` is the A/B switch,
+    /// `SWARMLLM_SSM_GATES=matmuls` the Q8_0 one's.
     ///
     /// Prior art: llama.cpp keeps a small batch's f32 projection off cuBLAS
     /// (`ggml-cuda/mmvf.cu`, up to 8 columns). Composed, these were ~15
@@ -1014,6 +1016,22 @@ fn gates_in_one_launch() -> bool {
         !matches!(
             std::env::var("SWARMLLM_SSM_GATES").as_deref(),
             Ok("composed")
+        )
+    })
+}
+
+/// `SWARMLLM_SSM_GATES=matmuls` → a step's gates from Q8_0 `ssm_beta` and
+/// `ssm_alpha` take the projections as matmuls (a quantize and an int8 product
+/// each) before the gates' launch, as before #228 (1) (b): the A/B switch for
+/// the one launch that reads the Q8_0 weights in place. `composed` turns it
+/// off too. Read once.
+#[cfg(feature = "candle-cuda")]
+fn gates_project_q8_0() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("SWARMLLM_SSM_GATES").as_deref(),
+            Ok("matmuls" | "composed")
         )
     })
 }
@@ -2415,6 +2433,7 @@ fn replay_in_two_launches() -> bool {
 
 #[cfg(feature = "candle-cuda")]
 mod cuda {
+    use candle_core::quantized::{GgmlDType, QTensor};
     use candle_core::{
         CpuStorage, CustomOp1, CustomOp2, CustomOp3, DType, Layout, Result, Shape, Tensor,
     };
@@ -2653,12 +2672,56 @@ mod cuda {
         "ssm_gates_project_f32_r8",
     ];
 
+    const GATES_PROJECTED_Q8_0: [&str; GATES_PROJECTED_ROWS] = [
+        "ssm_gates_project_q8_0_r1",
+        "ssm_gates_project_q8_0_r2",
+        "ssm_gates_project_q8_0_r3",
+        "ssm_gates_project_q8_0_r4",
+        "ssm_gates_project_q8_0_r5",
+        "ssm_gates_project_q8_0_r6",
+        "ssm_gates_project_q8_0_r7",
+        "ssm_gates_project_q8_0_r8",
+    ];
+
+    /// `ssm_beta` and `ssm_alpha` as Q8_0 matrices `[nv, hidden]` on the card
+    /// whose projections [`GatesProjectedQ8_0`] reads in the gates' one launch:
+    /// a step of at most [`GATES_PROJECTED_ROWS`] rows of x `[1, seq, hidden]`
+    /// on the card, `hidden` whole Q8_0 blocks, and not under
+    /// `SWARMLLM_SSM_GATES=matmuls` (the A/B switch: the projections as
+    /// matmuls). `None` otherwise.
+    fn q8_0_gate_weights(
+        w: &super::DeltaNetWeights,
+        x: &Tensor,
+    ) -> Result<Option<(std::sync::Arc<QTensor>, std::sync::Arc<QTensor>)>> {
+        let (b, seq, hidden) = x.dims3()?;
+        if !super::gates_project_q8_0()
+            || b != 1
+            || !(1..=GATES_PROJECTED_ROWS).contains(&seq)
+            || !hidden.is_multiple_of(32)
+            || x.dtype() != DType::F32
+            || !x.is_contiguous()
+            || !x.device().is_cuda()
+        {
+            return Ok(None);
+        }
+        let (Some(wb), Some(wa)) = (w.w_beta.quantized_weight(), w.w_alpha.quantized_weight())
+        else {
+            return Ok(None);
+        };
+        let fits = |q: &QTensor| {
+            q.dtype() == GgmlDType::Q8_0
+                && q.device().is_cuda()
+                && q.shape().dims() == [w.n_v_heads, hidden]
+        };
+        Ok((fits(wb) && fits(wa)).then(|| (wb.clone(), wa.clone())))
+    }
+
     /// [`super::DeltaNetWeights::gates`] on a card: the projections and the
-    /// rest in one launch where both weights are f32 on the card and the step
-    /// is one sequence of at most [`GATES_PROJECTED_ROWS`] rows, else the
-    /// projections as matmuls and the rest in one (bit for bit the
-    /// composition). `None` where `dt_bias` and `a` are not f32 `[nv]` on the
-    /// card — the caller composes.
+    /// rest in one launch where both weights are f32 on the card, or Q8_0 on
+    /// it ([`q8_0_gate_weights`]), and the step is one sequence of at most
+    /// [`GATES_PROJECTED_ROWS`] rows, else the projections as matmuls and the
+    /// rest in one (bit for bit the composition). `None` where `dt_bias` and
+    /// `a` are not f32 `[nv]` on the card — the caller composes.
     pub(super) fn gates(w: &super::DeltaNetWeights, x: &Tensor) -> Result<Option<super::Gates>> {
         let nv = w.n_v_heads;
         let (b, seq, hidden) = x.dims3()?;
@@ -2683,19 +2746,26 @@ mod cuda {
             {
                 x.apply_op3_no_bwd(wb, wa, &GatesProjected(vectors))?
             }
-            _ => {
-                let (beta, alpha) = (w.w_beta.forward(x)?, w.w_alpha.forward(x)?);
-                if !(on_card(&beta)
-                    && on_card(&alpha)
-                    && beta.dims() == [b, seq, nv]
-                    && alpha.dims() == [b, seq, nv])
-                {
-                    return Ok(Some(super::Gates::composed(
-                        &beta, &alpha, &w.dt_bias, &w.a,
-                    )?));
+            _ => match q8_0_gate_weights(w, x)? {
+                Some((w_beta, w_alpha)) => x.apply_op1_no_bwd(&GatesProjectedQ8_0 {
+                    vectors,
+                    w_beta,
+                    w_alpha,
+                })?,
+                None => {
+                    let (beta, alpha) = (w.w_beta.forward(x)?, w.w_alpha.forward(x)?);
+                    if !(on_card(&beta)
+                        && on_card(&alpha)
+                        && beta.dims() == [b, seq, nv]
+                        && alpha.dims() == [b, seq, nv])
+                    {
+                        return Ok(Some(super::Gates::composed(
+                            &beta, &alpha, &w.dt_bias, &w.a,
+                        )?));
+                    }
+                    beta.apply_op2_no_bwd(&alpha, &GatesAfterProjections(vectors))?
                 }
-                beta.apply_op2_no_bwd(&alpha, &GatesAfterProjections(vectors))?
-            }
+            },
         };
         let stacked = flat.reshape((2, b, seq, nv))?;
         Ok(Some(super::Gates {
@@ -2721,6 +2791,107 @@ mod cuda {
     /// A step's gates from its projections' outputs `[b, seq, nv]` (beta,
     /// alpha), in one launch: [g | beta], `[2, b, seq, nv]` flat.
     pub(super) struct GatesAfterProjections(GateVectors);
+
+    /// A step's gates from x `[1, seq, hidden]` and the Q8_0 weights `[nv,
+    /// hidden]` of `ssm_beta` and `ssm_alpha`, read in place, in one launch:
+    /// [g | beta], `[2, seq, nv]` flat — bit for bit [`GatesProjected`] over
+    /// the dequantized weights (each weight is an f16 times an int8, exact in
+    /// f32), where the matmuls made four launches more a layer (#228 (1) (b)).
+    pub(super) struct GatesProjectedQ8_0 {
+        vectors: GateVectors,
+        w_beta: std::sync::Arc<QTensor>,
+        w_alpha: std::sync::Arc<QTensor>,
+    }
+
+    impl CustomOp1 for GatesProjectedQ8_0 {
+        fn name(&self) -> &'static str {
+            "ssm-gates-projected-q8-0"
+        }
+
+        /// Never reached: [`gates`] runs only on a card.
+        fn cpu_fwd(&self, _: &CpuStorage, _: &Layout) -> Result<(CpuStorage, Shape)> {
+            candle_core::bail!("ssm-gates-projected-q8-0's kernel is CUDA-only")
+        }
+
+        fn cuda_fwd(
+            &self,
+            s1: &candle_core::CudaStorage,
+            l1: &Layout,
+        ) -> Result<(candle_core::CudaStorage, Shape)> {
+            use candle_core::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
+            use candle_core::cuda_backend::WrapErr;
+
+            let dev = s1.device.clone();
+            let nv = self.vectors.nv;
+            let (b, seq, hidden) = l1.shape().dims3()?;
+            let fits =
+                |q: &QTensor| q.dtype() == GgmlDType::Q8_0 && q.shape().dims() == [nv, hidden];
+            if b != 1
+                || !(1..=GATES_PROJECTED_ROWS).contains(&seq)
+                || !hidden.is_multiple_of(32)
+                || !fits(&self.w_beta)
+                || !fits(&self.w_alpha)
+            {
+                candle_core::bail!("ssm-gates-projected-q8-0: unexpected shapes");
+            }
+            let Some((xo, xe)) = l1.contiguous_offsets() else {
+                candle_core::bail!("ssm-gates-projected-q8-0: x must be contiguous");
+            };
+            let (dt_storage, dt_layout) = self.vectors.dt_bias.storage_and_layout();
+            let (a_storage, a_layout) = self.vectors.a.storage_and_layout();
+            let (candle_core::Storage::Cuda(dt), candle_core::Storage::Cuda(av)) =
+                (&*dt_storage, &*a_storage)
+            else {
+                candle_core::bail!("ssm-gates-projected-q8-0: dt_bias and a are not on the card");
+            };
+            let (Some((dto, dte)), Some((avo, ave))) = (
+                dt_layout.contiguous_offsets(),
+                a_layout.contiguous_offsets(),
+            ) else {
+                candle_core::bail!("ssm-gates-projected-q8-0: dt_bias and a must be contiguous");
+            };
+            let x = s1.as_cuda_slice::<f32>()?.slice(xo..xe);
+            // The weights' Q8_0 blocks from their first byte, read in place:
+            // the model's own, never freed while it runs.
+            let w_beta = self.w_beta.device_ptr()? as u64;
+            let w_alpha = self.w_alpha.device_ptr()? as u64;
+            let dt = dt.as_cuda_slice::<f32>()?.slice(dto..dte);
+            let a = av.as_cuda_slice::<f32>()?.slice(avo..ave);
+            let n_out = 2 * seq * nv;
+            // Every element is assigned, as `GatesProjected`'s.
+            let mut out = dev.alloc_fully_overwritten::<f32>(n_out)?;
+            let func = dev.get_or_load_custom_func(
+                GATES_PROJECTED_Q8_0[seq - 1],
+                "swarmllm_delta_rule",
+                super::DELTA_RULE_PTX,
+            )?;
+            let cfg = LaunchConfig {
+                grid_dim: (nv as u32, 2, 1),
+                block_dim: (128, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            let (hidden_i, nv_i) = (hidden as i32, nv as i32);
+            let mut builder = func.builder();
+            builder.arg(&x);
+            builder.arg(&w_beta);
+            builder.arg(&w_alpha);
+            builder.arg(&dt);
+            builder.arg(&a);
+            builder.arg(&mut out);
+            builder.arg(&hidden_i);
+            builder.arg(&nv_i);
+            // SAFETY: ffi. Shapes and contiguity are checked above: the kernel
+            // reads x [seq, hidden], each weight's nv · hidden / 32 Q8_0 blocks
+            // from its first byte (a QTensor's data starts there, padded after
+            // its end), dt_bias and a [nv] (`gates` checked them), and writes
+            // each of `out`'s 2·seq·nv elements once; `seq` names the entry.
+            unsafe { builder.launch(cfg) }.w()?;
+            Ok((
+                candle_core::CudaStorage::wrap_cuda_slice(out, dev),
+                Shape::from_dims(&[n_out]),
+            ))
+        }
+    }
 
     impl CustomOp3 for GatesProjected {
         fn name(&self) -> &'static str {
@@ -3759,21 +3930,20 @@ mod tests {
     }
 
     /// Weights with Qwen3.5-4B's gate sizes (hidden 2560, 32 value heads) on
-    /// `device`: `ssm_beta` and `ssm_alpha` dense f32, or Q8_0 when `quantized`.
+    /// `device`: `ssm_beta` and `ssm_alpha` dense f32, or quantized to `as_type`.
     #[cfg(feature = "candle-cuda")]
-    fn gate_weights(device: &Device, quantized: bool) -> DeltaNetWeights {
+    fn gate_weights(
+        device: &Device,
+        as_type: Option<candle_core::quantized::GgmlDType>,
+    ) -> DeltaNetWeights {
         let (hidden, nv) = (2560usize, 32usize);
         let r = |dims: &[usize], s: f32| Tensor::randn(0f32, s, dims, &Device::Cpu).unwrap();
-        let mm = |t: Tensor| {
-            if quantized {
-                super::super::QMatMul::from_qtensor(
-                    QTensor::quantize_onto(&t, candle_core::quantized::GgmlDType::Q8_0, device)
-                        .unwrap(),
-                )
-                .unwrap()
-            } else {
-                super::super::QMatMul::from_dense(t.to_device(device).unwrap())
-            }
+        let mm = |t: Tensor| match as_type {
+            Some(dtype) => super::super::QMatMul::from_qtensor(
+                QTensor::quantize_onto(&t, dtype, device).unwrap(),
+            )
+            .unwrap(),
+            None => super::super::QMatMul::from_dense(t.to_device(device).unwrap()),
         };
         let mut w = weights_of(device, false);
         w.w_beta = mm(r(&[nv, hidden], 0.02));
@@ -3803,7 +3973,7 @@ mod tests {
             eprintln!("SKIPPED: no card");
             return;
         };
-        let w = gate_weights(&device, false);
+        let w = gate_weights(&device, None);
         let x = Tensor::randn(0f32, 1.0, (1, 9, 2560), &device).unwrap();
         let composed = |x: &Tensor| {
             Gates::composed(
@@ -3852,30 +4022,117 @@ mod tests {
 
     /// With weights a file quantized, the gates' matmuls run as they do and
     /// the rest in one launch (`ssm_gates_f32`) is the composition bit for
-    /// bit, at a step's, a check's and a prompt chunk's widths.
+    /// bit, at a step's, a check's and a prompt chunk's widths — every width
+    /// for a type the gates' own launch does not read (Q4_0), past 8 rows for
+    /// Q8_0, which it reads up to 8 (the test below).
     #[cfg(feature = "candle-cuda")]
     #[test]
     fn the_card_gates_after_quantized_projections_are_the_composed_ones_bit_for_bit() {
+        use candle_core::quantized::GgmlDType;
         let Ok(device) = Device::new_cuda(0) else {
             eprintln!("SKIPPED: no card");
             return;
         };
-        let w = gate_weights(&device, true);
-        assert!(w.w_beta.dense_f32_weight().is_none());
-        for seq in [1usize, 2, 5, 8, 9, 37] {
-            let x = Tensor::randn(0f32, 1.0, (1, seq, 2560), &device).unwrap();
+        for (dtype, widths) in [
+            (GgmlDType::Q4_0, &[1usize, 2, 5, 8, 9, 37][..]),
+            (GgmlDType::Q8_0, &[9, 37][..]),
+        ] {
+            let w = gate_weights(&device, Some(dtype));
+            assert!(w.w_beta.dense_f32_weight().is_none());
+            the_gates_after_the_matmuls_are_composed(&w, &device, widths);
+        }
+    }
+
+    #[cfg(feature = "candle-cuda")]
+    fn the_gates_after_the_matmuls_are_composed(
+        w: &DeltaNetWeights,
+        device: &Device,
+        widths: &[usize],
+    ) {
+        for &seq in widths {
+            let x = Tensor::randn(0f32, 1.0, (1, seq, 2560), device).unwrap();
             let (beta, alpha) = (
                 w.w_beta.forward(&x).unwrap(),
                 w.w_alpha.forward(&x).unwrap(),
             );
             let want = Gates::composed(&beta, &alpha, &w.dt_bias, &w.a).unwrap();
-            let got = cuda::gates(&w, &x)
+            let got = cuda::gates(w, &x)
                 .unwrap()
                 .expect("the card took the gates");
             assert!(got.stacked.is_some(), "{seq} rows: written by the card");
             assert_eq!(max_abs_diff(&got.g, &want.g), 0.0, "{seq} rows: g");
             assert_eq!(max_abs_diff(&got.beta, &want.beta), 0.0, "{seq} rows: beta");
         }
+    }
+
+    /// Q8_0 `ssm_beta` and `ssm_alpha` read in place by the gates' one launch
+    /// (`ssm_gates_project_q8_0_r*`, #228 (1) (b)) are, bit for bit, the f32
+    /// launch over the same weights dequantized — a weight is an f16 times an
+    /// int8, exact in f32 — at every width up to 8, so each row's gates are
+    /// its gates read alone as the f32 launch's are. Against the matmuls,
+    /// which round x to Q8_1 first, they agree to that rounding. Red if the
+    /// Q8_0 weights take the matmuls: those round x, so the first comparison
+    /// differs.
+    #[cfg(feature = "candle-cuda")]
+    #[test]
+    fn the_card_gates_read_q8_0_weights_as_their_f32_dequantization_bit_for_bit() {
+        use candle_core::quantized::GgmlDType;
+        let Ok(device) = Device::new_cuda(0) else {
+            eprintln!("SKIPPED: no card");
+            return;
+        };
+        let q = gate_weights(&device, Some(GgmlDType::Q8_0));
+        let dense = |m: &super::super::QMatMul| {
+            super::super::QMatMul::from_dense(
+                m.quantized_weight()
+                    .expect("quantized")
+                    .dequantize(&device)
+                    .unwrap(),
+            )
+        };
+        let mut f = q.clone();
+        f.w_beta = dense(&q.w_beta);
+        f.w_alpha = dense(&q.w_alpha);
+        let x = Tensor::randn(0f32, 1.0, (1, 8, 2560), &device).unwrap();
+        let mut worst_against_the_matmuls = 0f32;
+        for seq in 1..=8usize {
+            let x = x.narrow(1, 0, seq).unwrap();
+            let card = |w: &DeltaNetWeights| {
+                cuda::gates(w, &x)
+                    .unwrap()
+                    .expect("the card took the gates")
+            };
+            let (got, want) = (card(&q), card(&f));
+            assert!(got.stacked.is_some(), "{seq} rows: written by the card");
+            assert_eq!(max_abs_diff(&got.g, &want.g), 0.0, "{seq} rows: g");
+            assert_eq!(max_abs_diff(&got.beta, &want.beta), 0.0, "{seq} rows: beta");
+            assert!(
+                max_abs_diff(&got.g, &got.beta) > 0.1,
+                "{seq} rows: g and beta must be told apart"
+            );
+            let matmuls = Gates::composed(
+                &q.w_beta.forward(&x).unwrap(),
+                &q.w_alpha.forward(&x).unwrap(),
+                &q.dt_bias,
+                &q.a,
+            )
+            .unwrap();
+            // The matmuls round x to Q8_1 (32-value blocks at max|x| / 127: an
+            // error of std ~0.006 an element), so a projection of std ~1 here
+            // (weights 0.02 over 2,560) is off by std ~0.006, a gate by at most
+            // a quarter of that through the sigmoid; 0.003-0.006 measured over
+            // the eight widths (2026-11-23).
+            let off = max_abs_diff(&got.g, &matmuls.g).max(max_abs_diff(&got.beta, &matmuls.beta));
+            assert!(off < 1e-2, "{seq} rows: {off} from the matmuls' gates");
+            worst_against_the_matmuls = worst_against_the_matmuls.max(off);
+        }
+        assert!(
+            worst_against_the_matmuls > 0.0,
+            "the Q8_0 weights took the matmuls: nothing rounded x"
+        );
+        eprintln!(
+            "Q8_0 gates in one launch: {worst_against_the_matmuls} from the matmuls' at most"
+        );
     }
 
     /// q and k's L2 norm in one launch on a card is the composition's to

@@ -2981,6 +2981,19 @@ submission COUNT, not bandwidth".
    union of kernels, graph runs and copies. Both traces agreeing is the known-answer check. ⚠
    `prefill_bench` runs on the PROCESSOR unless `SWARM_BENCH_DEVICE=cuda` — its first line
    `device=` says which.
+   **Second reading, 2026-11-23 (FUTURE_WORK #228 (1)): a captured FLOWING level is host-bound.**
+   `~/swarmllm-gate/deep/fr/nsys_level.sh` / `nsys_level_rel.sh` (the card probe
+   `flowing_levels_pace_captured_and_op_by_op` and `llama-bench -p 8|2 -n 0` under
+   `--cuda-graph-trace=node`) + `nsys_level_1123/level_whole.py` (a level = the run of graph
+   launches between host gaps; kernels by name over whole levels) and `level_api.py` (the CUDA API
+   calls inside a level: recording, `cuGraphExecUpdate`, launches). Qwen3.5-0.8B Q8_0, this card:
+   our kernels 5.20 ms an 8-row level (1,027 kernels in 12 graphs), llama.cpp's 5.37 (844); 2 rows
+   3.84 against 4.25 — while the untraced level is 8.4-9.2 / 6.0-6.6 ms against llama.cpp's 5.35 /
+   4.5. Every level re-records ~1,000 ops and ~900 allocations + ~900 frees (graph memory nodes)
+   on the host; the group size (`SWARMLLM_CUDA_GRAPH_GROUP` 1-4) does not move it. ⚠ Build the
+   probe `--release`: the test profile leaves the crate at opt-level 0, and a level read 20.7 ms
+   there. ⚠ A laptop card's clocks move one run's median by ~30% (6.05 against 8.4-9.2 ms in the
+   same hour) — interleave arms, never compare runs from different minutes.
 4. **Where inside a layer?** `SWARMLLM_PROFILE=1` **plus**
    `SWARMLLM_PROFILE_SYNC=1` for correct per-stage attribution on CUDA.
    ⚠ **Read the two runs for different questions.** Sync inserts a

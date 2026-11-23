@@ -411,6 +411,14 @@ item 3. If capture turns these allocations into graph memory nodes, stage 4
 removes this line too and stage 3 has no separate reason to exist. **Run that
 experiment before spending a day here.**
 
+**Corrected 2026-11-23 (FUTURE_WORK #496):** memory nodes remove the
+submissions, not the cost. A step re-captured every token RECORDS each
+allocation and free again, and the update and the card's run pay for them too:
+`examples/cuda_graph_cost_probe.cu` re-captures 1,000 kernels in 3.7-4.0 ms a
+token with an alloc/free pair beside each, 1.6 ms with the buffers made outside
+the capture. Stage 3 has its own reason again — as a caching allocator for
+captured work (PyTorch's graph-private pool), not an arena keyed on shapes.
+
 ### Stage 4 — Capture the decode step as a CUDA graph
 
 **625 launches, ~15 ms — the largest single line, and the reason the thread is
