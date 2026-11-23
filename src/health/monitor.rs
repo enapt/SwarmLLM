@@ -3663,6 +3663,7 @@ pub(crate) mod tests {
                 card_layers: None,
                 gives_way: None,
                 card_free_at_load_mb: None,
+                on_processor_because: None,
             }];
             c
         };
@@ -3744,6 +3745,7 @@ pub(crate) mod tests {
                         card_layers: None,
                         gives_way: None,
                         card_free_at_load_mb: None,
+                        on_processor_because: None,
                     })
                 }),
             ),

@@ -4769,6 +4769,22 @@ impl CpuReason {
             CpuReason::WeightFormatNeedsTheProcessor => "weight_format_needs_the_processor",
         }
     }
+
+    /// The same reason as this node states it to its peers
+    /// (`ResidentModelLayers::on_processor_because`, #498) — the wire word is
+    /// [`Self::as_str`]'s (`every_processor_reason_reaches_peers_in_its_own_words`).
+    pub fn for_peers(self) -> swarmllm_types::OnProcessorBecause {
+        use swarmllm_types::OnProcessorBecause as Wire;
+        match self {
+            CpuReason::Configured => Wire::ConfiguredCpuOnly,
+            CpuReason::GpuTooOld => Wire::GpuTooOldForThisBuild,
+            CpuReason::GpuUnavailable => Wire::GpuStoppedResponding,
+            CpuReason::NotEnoughVram => Wire::NotEnoughVram,
+            CpuReason::DriverNotAnswering => Wire::DriverNotAnswering,
+            CpuReason::CudaLibrariesMissing => Wire::CudaLibrariesMissing,
+            CpuReason::WeightFormatNeedsTheProcessor => Wire::WeightFormatNeedsTheProcessor,
+        }
+    }
 }
 
 /// Models whose workers this node keeps on the processor whatever the card has
@@ -10010,6 +10026,10 @@ impl ModelProcessPool {
                     gives_way: giving_way.get(&model_id).copied(),
                     // What its load read of the card (#3 (j13), diagnostic).
                     card_free_at_load_mb: handle.card_free_at_load_mb,
+                    // Why it runs wholly on the processor, if it does (#498,
+                    // diagnostic): a split is not a processor placement, and
+                    // records no reason.
+                    on_processor_because: handle.placed_on_cpu_because.map(CpuReason::for_peers),
                 });
             }
         }
@@ -21161,6 +21181,12 @@ mod tests {
             None,
             "a spawn that did not read the card says nothing"
         );
+        // ... and says why it runs on the processor (#498: a far computer's
+        // 47 layers at card_layers 0 beside 10 GB free said nothing more).
+        assert_eq!(
+            q.resident_model_layers()[0].on_processor_because,
+            Some(swarmllm_types::OnProcessorBecause::NotEnoughVram)
+        );
 
         // What a spawn's load read of the card reaches peers with the layers
         // it placed (#3 (j13)): a far computer's reload is then told apart
@@ -21179,6 +21205,25 @@ mod tests {
             r.resident_model_layers()[0].card_free_at_load_mb,
             Some(5_748)
         );
+        assert_eq!(
+            r.resident_model_layers()[0].on_processor_because,
+            None,
+            "a worker placed on the card states no processor reason"
+        );
+    }
+
+    /// Every reason a worker is placed on the processor reaches peers as the
+    /// word this node's own logs and admin API use (#498) — the wire enum is a
+    /// second vocabulary, and the two must not drift.
+    #[test]
+    fn every_processor_reason_reaches_peers_in_its_own_words() {
+        for reason in CpuReason::ALL {
+            assert_eq!(
+                serde_json::to_value(reason.for_peers()).unwrap(),
+                serde_json::Value::String(reason.as_str().to_string()),
+                "{reason:?}"
+            );
+        }
     }
 
     /// **A worker holding part of a model too big for the card, all of it on

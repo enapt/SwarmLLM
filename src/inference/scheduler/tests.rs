@@ -770,6 +770,7 @@ fn a_peer_running_another_model_is_a_candidate_whose_room_may_come_back() {
             card_layers: Some(30),
             gives_way,
             card_free_at_load_mb: None,
+            on_processor_because: None,
         }];
         state.peer_registry.insert(
             holder.clone(),
@@ -916,6 +917,7 @@ fn a_run_inside_a_peers_loaded_range_costs_no_load_where_it_serves_slices() {
             card_layers: Some(48),
             gives_way: None,
             card_free_at_load_mb: None,
+            on_processor_because: None,
         }];
         state.peer_registry.insert(
             peer.clone(),
@@ -1022,6 +1024,7 @@ fn a_warm_peers_card_layers_are_the_ones_its_card_runs() {
             card_layers: card_share,
             gives_way: None,
             card_free_at_load_mb: None,
+            on_processor_because: None,
         }];
         state.peer_registry.insert(
             peer.clone(),
@@ -4978,6 +4981,7 @@ fn a_peer_that_publishes_its_ranges_is_priced_by_them() {
             card_layers: None,
             gives_way: None,
             card_free_at_load_mb: None,
+            on_processor_because: None,
         }];
         state.peer_registry.insert(
             node.clone(),
@@ -5359,6 +5363,7 @@ fn a_peers_idle_workers_of_other_models_are_room_for_this_one() {
             machine_mb: 0,
         }),
         card_free_at_load_mb: None,
+        on_processor_because: None,
     }];
     let bytes_per_layer = 100 * 1_048_576;
     let bound = |model: &str| {
@@ -9995,6 +10000,7 @@ fn publish_resident(state: &SharedState, node: &NodeId, model: &ModelId, range: 
         card_layers: None,
         gives_way: None,
         card_free_at_load_mb: None,
+        on_processor_because: None,
     }];
 }
 

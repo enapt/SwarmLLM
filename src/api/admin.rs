@@ -84,6 +84,23 @@ pub(crate) async fn map_region_of_this_computer(state: &crate::daemon::SharedSta
     country_code(state.effective_region().await.as_deref()).unwrap_or_else(|| "??".into())
 }
 
+/// One model a peer says it has loaded, as `serialize_peer_to_json` shows it.
+/// Its own function: nested inside the peer's `json!` literal, the macro ran
+/// past the compiler's recursion limit.
+fn resident_entry_json(r: &crate::types::ResidentModelLayers) -> serde_json::Value {
+    serde_json::json!({
+        "model_id": r.model_id,
+        "layers": r.layers,
+        "ranges": r.ranges.iter().map(|g| [g.start, g.end]).collect::<Vec<_>>(),
+        "card_layers": r.card_layers,
+        "decode_us_per_layer": r.decode_us_per_layer,
+        // The card's free memory its load read (#3 (j13)).
+        "card_free_at_load_mb": r.card_free_at_load_mb,
+        // Why every layer runs on its processor, if they do (#498).
+        "on_processor_because": r.on_processor_because,
+    })
+}
+
 /// Serialize a peer registry entry to JSON. Used by both REST and WebSocket.
 ///
 /// When `include_addresses` is true, includes `addresses` and `last_seen` fields
@@ -275,17 +292,7 @@ pub fn serialize_peer_to_json(
         "resident": peer.capability.as_ref().map(|c| {
             c.resident_layers
                 .iter()
-                .map(|r| {
-                    serde_json::json!({
-                        "model_id": r.model_id,
-                        "layers": r.layers,
-                        "ranges": r.ranges.iter().map(|g| [g.start, g.end]).collect::<Vec<_>>(),
-                        "card_layers": r.card_layers,
-                        "decode_us_per_layer": r.decode_us_per_layer,
-                        // The card's free memory its load read (#3 (j13)).
-                        "card_free_at_load_mb": r.card_free_at_load_mb,
-                    })
-                })
+                .map(resident_entry_json)
                 .collect::<Vec<_>>()
         }),
         // Serves a run inside a range it has loaded without loading it again

@@ -1201,6 +1201,48 @@ pub struct ResidentModelLayers {
     /// the card.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub card_free_at_load_mb: Option<u64>,
+    /// Why this model's worker runs every layer on the processor, as the
+    /// worker's own placement recorded it — `Some` only for a worker placed
+    /// wholly off the card, and diagnostic only: nothing plans on it. Without
+    /// it a far computer's `card_layers: 0` beside a card with 10 GB free said
+    /// nothing a coordinator could act on (Qwen3.8-27B, the Australian
+    /// computer, 47 layers on its processor at 6.6 ms a layer, 2026-11-23,
+    /// FUTURE_WORK #498). Fixed words only ([`OnProcessorBecause`]); a word
+    /// this build does not know reads as `Unknown`, never a refused capability.
+    /// `None` from an older node, from a worker with any layer on the card,
+    /// and on a computer with no card this build can use — nothing was moved
+    /// off one ([`NodeCapability::gpu`] tells that case apart).
+    /// Prior art: a Kubernetes condition carries a machine-readable `reason`
+    /// beside its status (`meta/v1 Condition`, KEP-1623) — the status alone
+    /// says what, not why; Ollama's `ps` shows only the processor/card split.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_processor_because: Option<OnProcessorBecause>,
+}
+
+/// Why a worker runs wholly on the processor — see
+/// [`ResidentModelLayers::on_processor_because`]. The words are the node's
+/// own placement reasons (`process_pool::CpuReason::as_str`), stated by the
+/// node about itself.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OnProcessorBecause {
+    /// Its owner set the model, or the node, to the processor.
+    ConfiguredCpuOnly,
+    /// The card is too old for this build's kernels.
+    GpuTooOldForThisBuild,
+    /// The graphics stack stopped working while the node ran.
+    GpuStoppedResponding,
+    /// The card had no room for even part of the model when it was placed.
+    NotEnoughVram,
+    /// The graphics driver was not answering when it was placed.
+    DriverNotAnswering,
+    /// NVIDIA's libraries this build opens are not installed.
+    CudaLibrariesMissing,
+    /// The model's weights are in a format only the processor reads here.
+    WeightFormatNeedsTheProcessor,
+    /// A word this build does not know — a newer node's.
+    #[serde(other)]
+    Unknown,
 }
 
 /// The memory an idle worker gives back to another model's work — see
@@ -1731,6 +1773,7 @@ mod version_compat_tests {
             card_layers: None,
             gives_way,
             card_free_at_load_mb: None,
+            on_processor_because: None,
         };
         cap.resident_layers = vec![
             resident(
@@ -1803,6 +1846,7 @@ mod version_compat_tests {
                 machine_mb: 500,
             }),
             card_free_at_load_mb: None,
+            on_processor_because: None,
         }];
         assert_eq!(cap.card_room_for("m"), Some(7900 + 3000));
         assert_eq!(cap.card_room_for("idle"), Some(7900), "its own worker");
@@ -1830,6 +1874,7 @@ mod version_compat_tests {
                 card_layers: None,
                 gives_way,
                 card_free_at_load_mb: None,
+                on_processor_because: None,
             };
         // Nothing resident (also what an older build states): nothing held.
         assert!(!cap.room_held_by_other_models("planned"));
@@ -2119,10 +2164,25 @@ mod resident_ranges_tests {
                 machine_mb: 300,
             }),
             card_free_at_load_mb: Some(5_748),
+            on_processor_because: Some(OnProcessorBecause::NotEnoughVram),
         };
         let back: ResidentModelLayers =
             serde_json::from_str(&serde_json::to_string(&entry).unwrap()).unwrap();
         assert_eq!(back, entry);
+        assert!(serde_json::to_string(&entry)
+            .unwrap()
+            .contains(r#""on_processor_because":"not_enough_vram""#));
+
+        // Why a worker sits on the processor (#498): a word this build does
+        // not know is `Unknown`, never a capability refused whole.
+        let newer: ResidentModelLayers = serde_json::from_value(serde_json::json!({
+            "model_id": "glm", "layers": 3, "on_processor_because": "a_reason_from_later"
+        }))
+        .unwrap();
+        assert_eq!(
+            newer.on_processor_because,
+            Some(OnProcessorBecause::Unknown)
+        );
 
         // A worker's own decode speed (#3 (f)), its card's share (#361) and
         // what it gives way (#447): an older build's entry has none, and an
@@ -2132,11 +2192,13 @@ mod resident_ranges_tests {
         assert_eq!(old.resident_layers[0].card_layers, None);
         assert_eq!(old.resident_layers[0].gives_way, None);
         assert_eq!(old.resident_layers[0].card_free_at_load_mb, None);
+        assert_eq!(old.resident_layers[0].on_processor_because, None);
         let unmeasured = ResidentModelLayers {
             decode_us_per_layer: None,
             card_layers: None,
             gives_way: None,
             card_free_at_load_mb: None,
+            on_processor_because: None,
             ..entry
         };
         let sent = serde_json::to_string(&unmeasured).unwrap();
@@ -2144,6 +2206,7 @@ mod resident_ranges_tests {
         assert!(!sent.contains("card_layers"));
         assert!(!sent.contains("gives_way"));
         assert!(!sent.contains("card_free_at_load_mb"));
+        assert!(!sent.contains("on_processor_because"));
 
         // A range whose sender left `releasable_layers` out releases nothing —
         // the side that cannot over-credit a peer.
