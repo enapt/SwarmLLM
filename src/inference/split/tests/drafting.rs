@@ -832,10 +832,13 @@ fn a_tree_that_flows_proposes_what_a_fresh_read_of_each_path_ranks_likeliest() {
 
 /// A call grows a level past the first only while the level it last proposed
 /// is likely enough to be reached (`FlowStep::depth_floor`): asked for three
-/// levels with a floor the first level of a small random model cannot reach,
-/// it proposes that level alone — the rows an ungated call proposes first —
-/// and with a floor every level clears, all three, as ungated. Red without
-/// the gate: the floored call proposes three levels.
+/// levels with a floor no level can reach — above 1, since a level's chance
+/// of being reached is a sum of path probabilities — it proposes the first
+/// level alone (the rows an ungated call proposes first), and with a floor
+/// every level clears, all three, as ungated. Red without the gate: the
+/// floored call proposes three levels. A floor of 0.999 failed on CI: a
+/// random model's first level can carry nearly all the probability, and its
+/// weights are drawn afresh each run.
 #[test]
 fn a_flowing_call_stops_growing_where_its_last_level_is_unlikely_to_be_reached() {
     let children = super::super::draft::TREE_CHILDREN;
@@ -868,7 +871,7 @@ fn a_flowing_call_stops_growing_where_its_last_level_is_unlikely_to_be_reached()
     let every = grown(None);
     assert_eq!(every.len(), 3 * children);
     assert_eq!(
-        grown(Some(0.999)),
+        grown(Some(2.0)),
         every[..children].to_vec(),
         "a floor the first level cannot reach stops the call after it"
     );
