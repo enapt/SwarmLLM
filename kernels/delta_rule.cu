@@ -81,7 +81,7 @@ __device__ __forceinline__ float delta_rule_update(
     const int gs,
     const int nk,
     const int nv,
-    const int seq,
+    const int cap,
     const long long sv_b,
     const long long sv_t,
     const long long sv_h,
@@ -90,16 +90,18 @@ __device__ __forceinline__ float delta_rule_update(
     const int kh,
     const int col,
     const int lane,
-    const int t
+    const int t,
+    const unsigned int *__restrict__ slots
 ) {
     constexpr int R = D / 32;
-    const size_t bt = (size_t)bi * seq + t;
+    const unsigned int row = slots != nullptr ? slots[t] : (unsigned int)t;
+    const size_t bt = (size_t)bi * cap + row;
     const float *q_t = qk + (bt * 2 * nk + kh) * D;
     const float *k_t = q_t + (size_t)nk * D;
     const size_t gi = (bt * nv + h) * gs;
     const float decay = expf(g[gi]);
     const float beta = beta_in[gi];
-    const float v_col = v[bi * sv_b + t * sv_t + h * sv_h + col];
+    const float v_col = v[bi * sv_b + (long long)row * sv_t + h * sv_h + col];
 
     float kr[R], qr[R];
 #pragma unroll
@@ -146,6 +148,13 @@ __device__ __forceinline__ float delta_rule_update(
 // host — `walks[t]..walks[t + 1]` index `walks[seq + 1 + i]` — where a flowing
 // forward's lines, read from the walk's anchor, may be deeper than `line`
 // holds.
+//
+// `slots` (a flowing forward reading its rows where the flow's store keeps
+// them, `FlowRows::put`; `nullptr` otherwise): row t's inputs are row
+// `slots[t]` of sources `cap` rows a sequence — the gather each kind made
+// first, read in place (vLLM's PagedAttention reads its cache through a block
+// table the same way). The same values in the same order: the same bits.
+// Outputs and walks still name rows 0..seq.
 template <int D, bool OUT>
 __device__ void delta_rule_body(
     const float *__restrict__ qk,
@@ -159,12 +168,14 @@ __device__ void delta_rule_body(
     const int nk,
     const int nv,
     const int seq,
+    const int cap,
     const long long sv_b,
     const long long sv_t,
     const long long sv_h,
     const float scale,
     const unsigned int *__restrict__ parents,
-    const unsigned int *__restrict__ walks
+    const unsigned int *__restrict__ walks,
+    const unsigned int *__restrict__ slots
 ) {
     constexpr int R = D / 32;
     const int h = blockIdx.x;
@@ -192,8 +203,9 @@ __device__ void delta_rule_body(
             if (walks != nullptr) {
                 const unsigned int *walk = walks + seq + 1;
                 for (unsigned int i = walks[t]; i < walks[t + 1]; i++) {
-                    delta_rule_update<D>(s, qk, v, g, beta_in, gs, nk, nv, seq, sv_b,
-                                         sv_t, sv_h, bi, h, kh, col, lane, (int)walk[i]);
+                    delta_rule_update<D>(s, qk, v, g, beta_in, gs, nk, nv, cap, sv_b,
+                                         sv_t, sv_h, bi, h, kh, col, lane, (int)walk[i],
+                                         slots);
                 }
             } else {
                 int line[32];
@@ -203,13 +215,13 @@ __device__ void delta_rule_body(
                     line[n++] = (int)a;
                 }
                 for (int i = n - 1; i >= 0; i--) {
-                    delta_rule_update<D>(s, qk, v, g, beta_in, gs, nk, nv, seq, sv_b,
-                                         sv_t, sv_h, bi, h, kh, col, lane, line[i]);
+                    delta_rule_update<D>(s, qk, v, g, beta_in, gs, nk, nv, cap, sv_b,
+                                         sv_t, sv_h, bi, h, kh, col, lane, line[i], slots);
                 }
             }
         }
-        float o = delta_rule_update<D>(s, qk, v, g, beta_in, gs, nk, nv, seq, sv_b, sv_t,
-                                       sv_h, bi, h, kh, col, lane, t);
+        float o = delta_rule_update<D>(s, qk, v, g, beta_in, gs, nk, nv, cap, sv_b, sv_t,
+                                       sv_h, bi, h, kh, col, lane, t, slots);
         if constexpr (OUT) {
             o = warp_sum(o);
             if (lane == 0) {
@@ -236,8 +248,8 @@ __device__ void delta_rule_body(
         const float scale) {                                                       \
         const float *beta = gates + (size_t)gridDim.y * seq * nv;                  \
         delta_rule_body<D, true>(qk, v, gates, beta, 1, state, state_out, dst, nk, \
-                                 nv, seq, sv_b, sv_t, sv_h, scale, nullptr,        \
-                                 nullptr);                                         \
+                                 nv, seq, seq, sv_b, sv_t, sv_h, scale, nullptr,   \
+                                 nullptr, nullptr);                                \
     }                                                                              \
     extern "C" __global__ void __launch_bounds__(128) delta_rule_tree_f32_d##D(    \
         const float *__restrict__ qk, const float *__restrict__ v,                 \
@@ -248,8 +260,8 @@ __device__ void delta_rule_body(
         const float scale, const unsigned int *__restrict__ parents) {             \
         const float *beta = gates + (size_t)gridDim.y * seq * nv;                  \
         delta_rule_body<D, true>(qk, v, gates, beta, 1, state, state_out, dst, nk, \
-                                 nv, seq, sv_b, sv_t, sv_h, scale, parents,        \
-                                 nullptr);                                         \
+                                 nv, seq, seq, sv_b, sv_t, sv_h, scale, parents,   \
+                                 nullptr, nullptr);                                \
     }                                                                              \
     extern "C" __global__ void __launch_bounds__(128) delta_rule_flow_f32_d##D(    \
         const float *__restrict__ qk, const float *__restrict__ v,                 \
@@ -261,7 +273,22 @@ __device__ void delta_rule_body(
         const unsigned int *__restrict__ walks) {                                  \
         const float *beta = gates + (size_t)gridDim.y * seq * nv;                  \
         delta_rule_body<D, true>(qk, v, gates, beta, 1, state, state_out, dst, nk, \
-                                 nv, seq, sv_b, sv_t, sv_h, scale, parents, walks); \
+                                 nv, seq, seq, sv_b, sv_t, sv_h, scale, parents,   \
+                                 walks, nullptr);                                  \
+    }                                                                              \
+    extern "C" __global__ void __launch_bounds__(128) delta_rule_flow_stored_f32_d##D( \
+        const float *__restrict__ qk, const float *__restrict__ v,                 \
+        const float *__restrict__ g, const float *__restrict__ beta,               \
+        const float *__restrict__ state, float *__restrict__ state_out,            \
+        float *__restrict__ dst, const int nk, const int nv, const int seq,        \
+        const int cap, const long long sv_b, const long long sv_t,                 \
+        const long long sv_h, const float scale,                                   \
+        const unsigned int *__restrict__ parents,                                  \
+        const unsigned int *__restrict__ walks,                                    \
+        const unsigned int *__restrict__ slots) {                                  \
+        delta_rule_body<D, true>(qk, v, g, beta, 1, state, state_out, dst, nk, nv, \
+                                 seq, cap, sv_b, sv_t, sv_h, scale, parents,       \
+                                 walks, slots);                                    \
     }                                                                              \
     extern "C" __global__ void __launch_bounds__(128) delta_rule_replay_f32_d##D(  \
         const float *__restrict__ qk, const float *__restrict__ v,                 \
@@ -270,8 +297,8 @@ __device__ void delta_rule_body(
         const int nk, const int nv, const int rows,                                \
         const long long sv_t, const long long sv_h) {                              \
         delta_rule_body<D, false>(qk, v, g, beta, 1, state, state_out, nullptr,    \
-                                  nk, nv, rows, 0, sv_t, sv_h, 0.0f, nullptr,      \
-                                  nullptr);                                        \
+                                  nk, nv, rows, rows, 0, sv_t, sv_h, 0.0f, nullptr, \
+                                  nullptr, nullptr);                               \
     }
 
 DELTA_RULE_ENTRY(64)
@@ -374,7 +401,8 @@ __device__ void ssm_conv_silu_tree_body(
     const float *__restrict__ x, const float *__restrict__ prev,
     const float *__restrict__ w, float *__restrict__ out,
     float *__restrict__ state_out, const int channels, const int split,
-    const int seq, const unsigned int *__restrict__ parents) {
+    const int seq, const unsigned int *__restrict__ parents,
+    const unsigned int *__restrict__ slots) {
     const int c = blockIdx.x * blockDim.x + threadIdx.x;
     if (c >= channels) {
         return;
@@ -393,7 +421,7 @@ __device__ void ssm_conv_silu_tree_body(
 #pragma unroll
         for (int back = 0; back < K; back++) {
             if (at != NO_PARENT) {
-                win[PAD - back] = x[(size_t)at * channels + c];
+                win[PAD - back] = x[(size_t)(slots != nullptr ? slots[at] : at) * channels + c];
                 const unsigned int up = parents[at];
                 at = up < at ? up : NO_PARENT;
             } else {
@@ -417,7 +445,8 @@ __device__ void ssm_conv_silu_tree_body(
     for (int j = 0; j < PAD; j++) {
         const int idx = seq - PAD + j;
         state_out[(size_t)c * PAD + j] =
-            idx >= 0 ? x[(size_t)idx * channels + c] : prev[(size_t)c * PAD + PAD + idx];
+            idx >= 0 ? x[(size_t)(slots != nullptr ? slots[idx] : (unsigned int)idx) * channels + c]
+                     : prev[(size_t)c * PAD + PAD + idx];
     }
 }
 
@@ -426,7 +455,20 @@ extern "C" __global__ void ssm_conv_silu_tree_f32_k4(
     const float *__restrict__ w, float *__restrict__ out,
     float *__restrict__ state_out, const int channels, const int split,
     const int seq, const unsigned int *__restrict__ parents) {
-    ssm_conv_silu_tree_body<4>(x, prev, w, out, state_out, channels, split, seq, parents);
+    ssm_conv_silu_tree_body<4>(x, prev, w, out, state_out, channels, split, seq, parents,
+                               nullptr);
+}
+
+// A flowing forward's convolution reading its rows where the flow's store keeps
+// them: row t's input is row `slots[t]` of `x` (`delta_rule_body`'s `slots`).
+extern "C" __global__ void ssm_conv_silu_tree_stored_f32_k4(
+    const float *__restrict__ x, const float *__restrict__ prev,
+    const float *__restrict__ w, float *__restrict__ out,
+    float *__restrict__ state_out, const int channels, const int split,
+    const int seq, const unsigned int *__restrict__ parents,
+    const unsigned int *__restrict__ slots) {
+    ssm_conv_silu_tree_body<4>(x, prev, w, out, state_out, channels, split, seq, parents,
+                               slots);
 }
 
 // ── A step's gates: the decay g and the write strength beta ──

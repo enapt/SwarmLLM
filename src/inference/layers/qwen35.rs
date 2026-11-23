@@ -503,7 +503,7 @@ impl DeltaNetWeights {
         // (`conv_on_the_card`); `new_conv` is then `None`.
         let fused = match target.as_ref() {
             Some(t) => {
-                self.conv_on_the_card(&mixed, &read.conv_state, &t.conv_state, tree.as_ref())?
+                self.conv_on_the_card(&mixed, &read.conv_state, &t.conv_state, tree.as_ref(), None)?
             }
             None => None,
         };
@@ -543,6 +543,7 @@ impl DeltaNetWeights {
             &read.recurrent_state,
             target.as_ref().map(|t| &t.recurrent_state),
             tree.as_ref(),
+            None,
         )?; // out [b, seq, nv, vd]
         let gated = self.gated_output(&out, &z)?;
 
@@ -669,12 +670,22 @@ impl DeltaNetWeights {
                 flow.rows_the_lines_read(&lines.earlier, seq_len, capturing(device), device)?
             }
         };
-        // A kind's new rows put in the store, and what the lines read of it.
+        // On a card the convolution and the delta rule read each kind's rows
+        // where the store keeps them, through the table (`SlotTable`): the
+        // gather a kind and the gates' stack were 7 of a layer's 12 copies, 126
+        // launches of a drafter level (2026-11-23). The same values in the same
+        // order: the same bits. A/B `SWARMLLM_FLOW_ROWS=gathered`.
+        let in_place = read_rows
+            .as_ref()
+            .filter(|_| device.is_cuda() && flow_reads_in_place());
+        // A kind's new rows put in the store, and what the lines read of it:
+        // read in place, every row written; else the lines' rows gathered.
         let read = |flow: &mut FlowRows, kind: RowKind, new: &Tensor| -> CandleResult<Tensor> {
             let all = flow.put(kind, new)?;
             match (&earlier, &read_rows) {
                 (Some(earlier), _) => Tensor::cat(&[kind.of(earlier), new], 1),
-                (None, Some(at)) => all.index_select(at, 1),
+                (None, Some(_)) if in_place.is_some() => Ok(all),
+                (None, Some(at)) => at.gather(&all),
                 (None, None) => Ok(new.clone()),
             }
         };
@@ -701,9 +712,13 @@ impl DeltaNetWeights {
             (false, _) => None,
         };
         let fused = match &window {
-            Some(window) => {
-                self.conv_on_the_card(&all_mixed, &anchor.conv_state, window, Some(&tree))?
-            }
+            Some(window) => self.conv_on_the_card(
+                &all_mixed,
+                &anchor.conv_state,
+                window,
+                Some(&tree),
+                in_place,
+            )?,
             None => None,
         };
         let (qk, v) = match fused {
@@ -718,6 +733,11 @@ impl DeltaNetWeights {
                 if stream_is_capturing(device) {
                     candle_core::bail!("a captured flowing level reached the composed convolution");
                 }
+                // Read in place, the composition reads the lines' rows themselves.
+                let all_mixed = match in_place {
+                    Some(at) => at.gather(&all_mixed)?,
+                    None => all_mixed.clone(),
+                };
                 let (conv, _) =
                     self.causal_conv_along(&all_mixed, &anchor.conv_state, &lines.parents)?;
                 let conv = candle_nn::ops::silu(&conv.narrow(1, ahead, seq_len)?)?;
@@ -745,6 +765,7 @@ impl DeltaNetWeights {
             &anchor.recurrent_state,
             scratch.as_ref().map(|s| &s.recurrent_state),
             Some(&tree),
+            in_place,
         )?;
         let gated = self.gated_output(&out.narrow(1, ahead, seq_len)?, &z)?;
         flow.keep_appended(before, &parents, &lines.live);
@@ -855,12 +876,16 @@ impl DeltaNetWeights {
     /// (`ggml_cuda_op_ssm_conv` with `apply_silu`, read at `4b1a27f`); the
     /// composition made 12 launches a layer at one position — ~290 a token of
     /// Qwen3.5-4B's 24 such layers (#428, card profile, 2026-11-08).
+    ///
+    /// `slots` (a flowing forward reading its store in place, [`SlotTable`]):
+    /// `x` is the store, and row t's input its row `slots[t]`.
     fn conv_on_the_card(
         &self,
         x: &Tensor,
         prev: &Tensor,
         state_out: &Tensor,
         tree: Option<&TreeLines>,
+        slots: Option<&SlotTable>,
     ) -> CandleResult<Option<(Tensor, Tensor)>> {
         #[cfg(feature = "candle-cuda")]
         {
@@ -876,12 +901,17 @@ impl DeltaNetWeights {
                 }) => Some(p.clone()),
                 Some(_) => return Ok(None),
             };
-            let (_, seq_len, _) = x.dims3()?;
+            // Read in place, x is the flow's store and the rows the table's.
+            let seq_len = match slots {
+                Some(at) => at.rows()?,
+                None => x.dim(1)?,
+            };
             let split = 2 * self.key_dim();
             let op = cuda::ConvSilu {
                 state_out: state_out.clone(),
                 split,
                 parents,
+                slots: slots.cloned(),
             };
             if !op.takes(x, prev, &self.conv1d) {
                 return Ok(None);
@@ -893,7 +923,7 @@ impl DeltaNetWeights {
         }
         #[cfg(not(feature = "candle-cuda"))]
         {
-            let _ = (x, prev, state_out, tree);
+            let _ = (x, prev, state_out, tree, slots);
             Ok(None)
         }
     }
@@ -1100,6 +1130,11 @@ fn written_into(
 /// (`SWARMLLM_DELTA_RULE=steps`). q and k are `qk` `[b, seq, 2·nk, kd]`,
 /// L2-normalised; the scale is `1/√kd`. Returns the outputs
 /// `[b, seq, nv, vd]` and the new state.
+///
+/// `slots` (a flowing forward reading its stores in place, [`SlotTable`]):
+/// `qk`, `v` and the gates are the stores, row t's inputs their row
+/// `slots[t]` — read so only by the card's flowing kernel, gathered for any
+/// other way.
 #[allow(clippy::too_many_arguments)]
 fn delta_rule_into(
     qk: &Tensor,
@@ -1109,6 +1144,7 @@ fn delta_rule_into(
     state: &Tensor,
     into: Option<&Tensor>,
     tree: Option<&TreeLines>,
+    slots: Option<&SlotTable>,
 ) -> CandleResult<(Tensor, Tensor, bool)> {
     let (g, beta) = (&gates.g, &gates.beta);
     let (_, _, nv, vd) = v.dims4()?;
@@ -1122,10 +1158,35 @@ fn delta_rule_into(
                 Some(t) => t.clone(),
                 None => state.zeros_like()?,
             };
-            delta_rule_cuda(qk, nk, v, gates, state, &out_buffer, scale as f32, tree)?
-                .map(|out| (out, out_buffer, into.is_some()))
+            delta_rule_cuda(
+                qk,
+                nk,
+                v,
+                gates,
+                state,
+                &out_buffer,
+                scale as f32,
+                tree,
+                slots,
+            )?
+            .map(|out| (out, out_buffer, into.is_some()))
         } else {
             None
+        };
+        // A store read in place reaches only the card's flowing kernel: any
+        // other way reads the lines' rows themselves.
+        let gathered = match (&on_card, slots) {
+            (None, Some(at)) => Some((
+                at.gather(qk)?,
+                at.gather(v)?,
+                at.gather(g)?,
+                at.gather(beta)?,
+            )),
+            _ => None,
+        };
+        let (qk, v, g, beta) = match &gathered {
+            Some((qk, v, g, beta)) => (qk, v, g, beta),
+            None => (qk, v, g, beta),
         };
         let tree = tree.map(|lines| lines.parents.as_slice());
         let (q, k) = (qk.narrow(2, 0, nk)?, qk.narrow(2, nk, nk)?);
@@ -1202,6 +1263,7 @@ fn replay_rows_composed(
         &Gates::apart(first(&kept.g)?, first(&kept.beta)?),
         &read.recurrent_state,
         into.map(|t| &t.recurrent_state),
+        None,
         None,
     )?;
     written_into(into.cloned(), Some(conv_state), recurrent_state, written)
@@ -1559,14 +1621,23 @@ impl FlowRows {
         new: usize,
         captured: bool,
         device: &Device,
-    ) -> CandleResult<Option<Tensor>> {
+    ) -> CandleResult<Option<SlotTable>> {
         if earlier.is_empty() && !captured {
             return Ok(None);
         }
         let len = self.store.len;
+        let bound = len + new;
         let mut at = self.slots_of(earlier)?;
-        at.extend((len..len + new).map(|i| i as u32));
-        Ok(Some(rows_on(at, device)?))
+        at.extend((len..bound).map(|i| i as u32));
+        // A kernel reads the store through these (`SlotTable`): none may name
+        // a row past the ones the store holds once the new rows are put.
+        if let Some(past) = at.iter().find(|&&slot| slot as usize >= bound) {
+            candle_core::bail!("a flowing row's slot {past} is past the store's {bound} rows");
+        }
+        Ok(Some(SlotTable {
+            table: rows_on(at, device)?,
+            bound,
+        }))
     }
 
     /// Makes room in the store for a forward's `rows` new rows, BEFORE its
@@ -2172,8 +2243,10 @@ static ROWS_ON_CARD: std::sync::Mutex<Vec<(Vec<u32>, Device, Tensor)>> =
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FlowRowsMode {
     /// The default: a forward's new rows are copied once, in place, after the
-    /// rows written ([`FlowRows::put`]); the lines' rows are one gather a kind;
-    /// a row the walk left stays where it is until the store is full.
+    /// rows written ([`FlowRows::put`]); on a card the kernels read the lines'
+    /// rows there ([`flow_reads_in_place`]), elsewhere — and under `gathered`
+    /// — they are one gather a kind; a row the walk left stays where it is
+    /// until the store is full.
     Stored,
     /// `joined` (2026-11-22, before the store): the held rows and the new ones
     /// joined into a new tensor a kind every forward, the rows the walk left
@@ -2192,6 +2265,56 @@ fn flow_rows_mode() -> FlowRowsMode {
         Ok("joined") => FlowRowsMode::Joined,
         _ => FlowRowsMode::Stored,
     })
+}
+
+/// Whether a flowing forward's kernels read each kind's rows where the store
+/// keeps them, through a [`SlotTable`] — the default — rather than gathered
+/// out first: `SWARMLLM_FLOW_ROWS=gathered` gathers them, as before
+/// 2026-11-23. Read once.
+///
+/// Prior art: vLLM's PagedAttention (Kwon et al., SOSP 2023) reads a
+/// sequence's cache through its block table rather than copying it
+/// contiguous first; the table here names each row's slot in the store.
+fn flow_reads_in_place() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        flow_rows_mode() == FlowRowsMode::Stored
+            && !matches!(
+                std::env::var("SWARMLLM_FLOW_ROWS").as_deref(),
+                Ok("gathered")
+            )
+    })
+}
+
+/// The rows a flowing forward's lines read, as slots of the flow's store
+/// ([`FlowRows::rows_the_lines_read`]): `[rows]` u32 on the forward's device,
+/// every slot below `bound` — the rows the store holds once the forward's own
+/// are put, checked on the host. A kernel reading through it checks `bound`
+/// against the store it is handed.
+#[derive(Clone)]
+pub(super) struct SlotTable {
+    table: Tensor,
+    bound: usize,
+}
+
+impl SlotTable {
+    /// How many rows the lines read.
+    #[cfg(feature = "candle-cuda")]
+    fn rows(&self) -> CandleResult<usize> {
+        self.table.dim(0)
+    }
+
+    /// The rows themselves, gathered out of `store` (`[b, ≥ bound, …]`).
+    fn gather(&self, store: &Tensor) -> CandleResult<Tensor> {
+        if store.dim(1)? < self.bound {
+            candle_core::bail!(
+                "a store of {} rows read through slots up to {}",
+                store.dim(1)?,
+                self.bound
+            );
+        }
+        store.index_select(&self.table, 1)
+    }
 }
 
 /// `SWARMLLM_FLOW_ROWS=per-layer`: [`rows_on`] copies every table for every
@@ -2376,6 +2499,7 @@ fn delta_rule_cuda(
     state_out: &Tensor,
     scale: f32,
     tree: Option<&TreeLines>,
+    slots: Option<&SlotTable>,
 ) -> CandleResult<Option<Tensor>> {
     #[cfg(feature = "candle-cuda")]
     {
@@ -2383,6 +2507,7 @@ fn delta_rule_cuda(
             .iter()
             .any(|t| t.dtype() != DType::F32)
             || !state_out.is_contiguous()
+            || (slots.is_some() && !(gates.g.is_contiguous() && gates.beta.is_contiguous()))
         {
             return Ok(None);
         }
@@ -2397,8 +2522,17 @@ fn delta_rule_cuda(
             }) => (Some(p.clone()), walks_on_card.clone()),
             Some(_) => return Ok(None),
         };
-        let (b, seq, nv, vd) = v.dims4()?;
-        let stacked = gates.stacked()?; // [2, b, seq, nv]
+        let (b, held, nv, vd) = v.dims4()?;
+        // Read in place, the operands are the stores — g's the third, beta's
+        // beside it, never stacked — and the rows the table's.
+        let (seq, gates_operand, stored) = match slots {
+            Some(at) => (
+                at.rows()?,
+                gates.g.clone(),
+                Some((gates.beta.clone(), at.clone())),
+            ),
+            None => (held, gates.stacked()?, None), // [2, b, seq, nv]
+        };
         let op = cuda::DeltaRule {
             state: state.contiguous()?,
             state_out: state_out.clone(),
@@ -2406,13 +2540,14 @@ fn delta_rule_cuda(
             scale,
             parents,
             walks,
+            stored,
         };
-        let out = qk.contiguous()?.apply_op3_no_bwd(v, &stacked, &op)?;
+        let out = qk.contiguous()?.apply_op3_no_bwd(v, &gates_operand, &op)?;
         Ok(Some(out.reshape((b, seq, nv, vd))?))
     }
     #[cfg(not(feature = "candle-cuda"))]
     {
-        let _ = (qk, nk, v, gates, state, state_out, scale, tree);
+        let _ = (qk, nk, v, gates, state, state_out, scale, tree, slots);
         Ok(None)
     }
 }
@@ -2451,6 +2586,10 @@ mod cuda {
         /// A tree's parents (`super::TreeLines::on_card`, `[seq]` u32): each
         /// row's taps read up its own line (`ssm_conv_silu_tree_f32_k4`).
         pub(super) parents: Option<Tensor>,
+        /// A flowing forward reading its store in place (`super::SlotTable`):
+        /// `x` is the store, row t's input its row `slots[t]`
+        /// (`ssm_conv_silu_tree_stored_f32_k4`; a tree's rows only).
+        pub(super) slots: Option<super::SlotTable>,
     }
 
     /// A tree's parents as a kernel reads them: `[rows]` u32, contiguous, on
@@ -2531,19 +2670,32 @@ mod cuda {
             }) {
                 return false;
             }
-            let Ok((b, _, channels)) = x.dims3() else {
+            let Ok((b, held, channels)) = x.dims3() else {
                 return false;
+            };
+            // Read in place (a tree's rows only), x is the store, which must
+            // hold the table's bound, and the rows are the table's.
+            let rows = match &self.slots {
+                Some(at) => match at.table.dims() {
+                    [rows] => *rows,
+                    _ => return false,
+                },
+                None => held,
+            };
+            let is_table = |t: &Tensor| {
+                t.dtype() == candle_core::DType::U32
+                    && t.dims() == [rows]
+                    && t.is_contiguous()
+                    && t.device().is_cuda()
             };
             b == 1
                 && self.split < channels
                 && prev.dims() == [1, channels, 3]
                 && w.dims() == [channels, 4]
                 && self.state_out.dims() == [1, channels, 3]
-                && self.parents.as_ref().is_none_or(|p| {
-                    p.dtype() == candle_core::DType::U32
-                        && p.dims() == [x.dim(1).unwrap_or(0)]
-                        && p.is_contiguous()
-                        && p.device().is_cuda()
+                && self.parents.as_ref().is_none_or(is_table)
+                && self.slots.as_ref().is_none_or(|at| {
+                    at.bound <= held && self.parents.is_some() && is_table(&at.table)
                 })
         }
     }
@@ -2580,12 +2732,22 @@ mod cuda {
             use candle_core::cuda_backend::WrapErr;
 
             let dev = s1.device.clone();
-            let (b, seq, channels) = l1.shape().dims3()?;
+            let (b, held, channels) = l1.shape().dims3()?;
+            // Read in place, x holds the store's rows and the rows are the
+            // table's.
+            let seq = match &self.slots {
+                Some(at) => at.table.dim(0)?,
+                None => held,
+            };
             if b != 1
                 || self.split >= channels
                 || l2.shape().dims() != [1, channels, 3]
                 || l3.shape().dims() != [channels, 4]
                 || self.state_out.dims() != [1, channels, 3]
+                || self
+                    .slots
+                    .as_ref()
+                    .is_some_and(|at| at.bound > held || self.parents.is_none())
             {
                 candle_core::bail!("ssm-conv-silu: unexpected shapes");
             }
@@ -2616,11 +2778,16 @@ mod cuda {
                 None => None,
             };
             let parents = tree.as_ref().map(ParentsView::slice).transpose()?;
+            let table = match &self.slots {
+                Some(at) => Some(ParentsView::of(&at.table, seq, "ssm-conv-silu's slots")?),
+                None => None,
+            };
+            let slots = table.as_ref().map(ParentsView::slice).transpose()?;
             let func = dev.get_or_load_custom_func(
-                if parents.is_some() {
-                    "ssm_conv_silu_tree_f32_k4"
-                } else {
-                    "ssm_conv_silu_f32_k4"
+                match (parents.is_some(), slots.is_some()) {
+                    (true, true) => "ssm_conv_silu_tree_stored_f32_k4",
+                    (true, false) => "ssm_conv_silu_tree_f32_k4",
+                    (false, _) => "ssm_conv_silu_f32_k4",
                 },
                 "swarmllm_delta_rule",
                 super::DELTA_RULE_PTX,
@@ -2643,8 +2810,14 @@ mod cuda {
             if let Some(parents) = &parents {
                 builder.arg(parents);
             }
+            if let Some(slots) = &slots {
+                builder.arg(slots);
+            }
             // SAFETY: ffi. Shapes and contiguity are checked above: the kernel
-            // reads x [seq, C], prev [C, 3] and w [C, 4], writes each of `out`'s
+            // reads x [seq, C] — read in place, [held, C] at the table's slots,
+            // each below its bound (checked on the host by
+            // `FlowRows::rows_the_lines_read`) and the bound within `held`
+            // (checked above) — prev [C, 3] and w [C, 4], writes each of `out`'s
             // seq·C elements once and `state_out`'s C·3. `state_out` is the
             // step's spare pair, never `prev`'s buffer, written through a read
             // view ordered by the ONE stream per device, as `DeltaRule` writes.
@@ -3298,6 +3471,10 @@ mod cuda {
         /// A flowing forward's walks (`super::TreeLines::walks_on_card`,
         /// `super::flow_walks`), beside `parents` (`delta_rule_flow_f32_d*`).
         pub(super) walks: Option<Tensor>,
+        /// A flowing forward reading its stores in place (`super::SlotTable`):
+        /// the third operand is g's store `[b, held, nv]` and this beta's, the
+        /// rows the table's (`delta_rule_flow_stored_f32_d*`; a flow's only).
+        pub(super) stored: Option<(Tensor, super::SlotTable)>,
     }
 
     impl CustomOp3 for DeltaRule {
@@ -3332,15 +3509,27 @@ mod cuda {
             use candle_core::cuda_backend::WrapErr;
 
             let dev = s1.device.clone();
-            let (b, seq, two_nk, d) = l1.shape().dims4()?;
-            let (vb, vseq, nv, vd) = l2.shape().dims4()?;
+            let (b, held, two_nk, d) = l1.shape().dims4()?;
+            let (vb, vheld, nv, vd) = l2.shape().dims4()?;
             let vs = l2.stride();
+            // Read in place, the operands are the stores, `held` rows each —
+            // g's the third, beta's beside it — and the rows the table's.
+            let (seq, gates_dims) = match &self.stored {
+                Some((_, at)) => (at.table.dim(0)?, vec![b, held, nv]),
+                None => (held, vec![2, b, held, nv]),
+            };
             if two_nk != 2 * self.nk
-                || (vb, vseq, vd) != (b, seq, d)
+                || (vb, vheld, vd) != (b, held, d)
                 || vs[3] != 1
-                || l3.shape().dims() != [2, b, seq, nv]
+                || l3.shape().dims() != gates_dims.as_slice()
                 || self.state.dims() != [b, nv, d, d]
                 || self.state_out.dims() != [b, nv, d, d]
+                || self.stored.as_ref().is_some_and(|(beta, at)| {
+                    at.bound > held
+                        || beta.dims() != gates_dims.as_slice()
+                        || beta.dtype() != DType::F32
+                        || self.walks.is_none()
+                })
             {
                 candle_core::bail!("gated-delta-rule: unexpected shapes");
             }
@@ -3367,6 +3556,22 @@ mod cuda {
             let qk = s1.as_cuda_slice::<f32>()?.slice(qo..qe);
             let v = s2.as_cuda_slice::<f32>()?.slice(l2.start_offset()..);
             let gates = s3.as_cuda_slice::<f32>()?.slice(go..ge);
+            let beta_held = self
+                .stored
+                .as_ref()
+                .map(|(beta, _)| beta.storage_and_layout());
+            let beta = match &beta_held {
+                Some((storage, layout)) => {
+                    let candle_core::Storage::Cuda(on_card) = &**storage else {
+                        candle_core::bail!("gated-delta-rule: beta's store is not on the card");
+                    };
+                    let Some((bo, be)) = layout.contiguous_offsets() else {
+                        candle_core::bail!("gated-delta-rule: beta's store must be contiguous");
+                    };
+                    Some(on_card.as_cuda_slice::<f32>()?.slice(bo..be))
+                }
+                None => None,
+            };
             let state = st.as_cuda_slice::<f32>()?.slice(so..se);
             let state_out = st_out.as_cuda_slice::<f32>()?.slice(oo..oe);
             let n_out = b * seq * nv * d;
@@ -3387,14 +3592,21 @@ mod cuda {
                 (None, _) => None,
             };
             let walks = walked.as_ref().map(WalksView::slice).transpose()?;
+            let table = match &self.stored {
+                Some((_, at)) => Some(ParentsView::of(&at.table, seq, "gated-delta-rule's slots")?),
+                None => None,
+            };
+            let slots = table.as_ref().map(ParentsView::slice).transpose()?;
             let func = dev.get_or_load_custom_func(
-                match (d, parents.is_some(), walks.is_some()) {
-                    (64, false, _) => "delta_rule_f32_d64",
-                    (64, true, false) => "delta_rule_tree_f32_d64",
-                    (64, true, true) => "delta_rule_flow_f32_d64",
-                    (_, false, _) => "delta_rule_f32_d128",
-                    (_, true, false) => "delta_rule_tree_f32_d128",
-                    (_, true, true) => "delta_rule_flow_f32_d128",
+                match (d, parents.is_some(), walks.is_some(), slots.is_some()) {
+                    (64, true, true, true) => "delta_rule_flow_stored_f32_d64",
+                    (_, true, true, true) => "delta_rule_flow_stored_f32_d128",
+                    (64, false, _, _) => "delta_rule_f32_d64",
+                    (64, true, false, _) => "delta_rule_tree_f32_d64",
+                    (64, true, true, false) => "delta_rule_flow_f32_d64",
+                    (_, false, _, _) => "delta_rule_f32_d128",
+                    (_, true, false, _) => "delta_rule_tree_f32_d128",
+                    (_, true, true, false) => "delta_rule_flow_f32_d128",
                 },
                 "swarmllm_delta_rule",
                 super::DELTA_RULE_PTX,
@@ -3404,18 +3616,24 @@ mod cuda {
                 block_dim: (32, 4, 1),
                 shared_mem_bytes: 0,
             };
-            let (nk_i, nv_i, seq_i) = (self.nk as i32, nv as i32, seq as i32);
+            let (nk_i, nv_i, seq_i, held_i) = (self.nk as i32, nv as i32, seq as i32, held as i32);
             let (sv_b, sv_t, sv_h) = (vs[0] as i64, vs[1] as i64, vs[2] as i64);
             let mut builder = func.builder();
             builder.arg(&qk);
             builder.arg(&v);
             builder.arg(&gates);
+            if let Some(beta) = &beta {
+                builder.arg(beta);
+            }
             builder.arg(&state);
             builder.arg(&state_out);
             builder.arg(&mut dst);
             builder.arg(&nk_i);
             builder.arg(&nv_i);
             builder.arg(&seq_i);
+            if slots.is_some() {
+                builder.arg(&held_i);
+            }
             builder.arg(&sv_b);
             builder.arg(&sv_t);
             builder.arg(&sv_h);
@@ -3426,11 +3644,17 @@ mod cuda {
             if let Some(walks) = &walks {
                 builder.arg(walks);
             }
+            if let Some(slots) = &slots {
+                builder.arg(slots);
+            }
             // SAFETY: ffi. Shapes and contiguity are checked above and the
             // width by `card_delta_rule_covers` (d ∈ {64, 128}, the kernel's
             // two entry points); every read is within the views by those
             // shapes and v's strides, `dst` is sized for exactly the outputs
-            // and `state_out` is the state's shape. A flow's walks hold their
+            // and `state_out` is the state's shape. Read in place, each row is
+            // read at its slot, every slot below the table's bound (checked on
+            // the host, `FlowRows::rows_the_lines_read`) and the bound within
+            // the stores' `held` rows (checked above). A flow's walks hold their
             // `seq + 1` offsets (`WalksView::of`), each naming rows below the
             // row it walks for, as `super::flow_walks` builds them. It is
             // written through a read view, which only the ONE stream per device
@@ -3854,7 +4078,7 @@ mod tests {
             let conv = candle_nn::ops::silu(&conv).unwrap();
             let state_out = Tensor::zeros((1, channels, 3), DType::F32, &device).unwrap();
             let (qk, v) = w
-                .conv_on_the_card(&x, &prev, &state_out, None)
+                .conv_on_the_card(&x, &prev, &state_out, None, None)
                 .unwrap()
                 .expect("the one-launch convolution took the step");
             let qk = qk.reshape((1, seq, split)).unwrap();
@@ -3902,7 +4126,7 @@ mod tests {
             let state_out = Tensor::zeros((1, channels, 3), DType::F32, &device).unwrap();
             let lines = TreeLines::new(parents.clone(), &device).unwrap();
             let (qk, v) = w
-                .conv_on_the_card(&x, &prev, &state_out, Some(&lines))
+                .conv_on_the_card(&x, &prev, &state_out, Some(&lines), None)
                 .unwrap()
                 .expect("the one-launch convolution took the tree");
             let qk = qk.reshape((1, seq, split)).unwrap();
@@ -4269,7 +4493,7 @@ mod tests {
         let beta = Tensor::rand(0f32, 1.0, (1, 3, 4), &device).unwrap();
         let state = Tensor::randn(0f32, 0.3, (1, 4, 128, 128), &device).unwrap();
         let run = |gates: &Gates| {
-            delta_rule_into(&qk, 2, &v, gates, &state, None, None)
+            delta_rule_into(&qk, 2, &v, gates, &state, None, None, None)
                 .unwrap()
                 .0
         };
@@ -5201,7 +5425,7 @@ mod tests {
             Tensor::randn(0f32, 1.0, (1, on_card.conv1d.dim(0).unwrap(), 3), &device).unwrap();
         let window_out = window.zeros_like().unwrap();
         assert!(on_card
-            .conv_on_the_card(&mixed, &window, &window_out, Some(&lines))
+            .conv_on_the_card(&mixed, &window, &window_out, Some(&lines), None)
             .unwrap()
             .is_some());
         let qk = l2_norm(
@@ -5219,7 +5443,7 @@ mod tests {
         let into = state.zeros_like().unwrap();
         let gates = Gates::apart(g, beta);
         let (as_tree, _, written) =
-            delta_rule_into(&qk, 2, &v, &gates, &state, Some(&into), Some(&lines)).unwrap();
+            delta_rule_into(&qk, 2, &v, &gates, &state, Some(&into), Some(&lines), None).unwrap();
         assert!(written, "the card's tree kernel writes the state itself");
         let cpu = |t: &Tensor| t.to_device(&Device::Cpu).unwrap();
         let (on_host, _) = delta_rule_cpu(
@@ -5240,8 +5464,123 @@ mod tests {
         );
         // Null control: read as a chain, a branching row lands far off.
         let (as_chain, _, _) =
-            delta_rule_into(&qk, 2, &v, &gates, &state, Some(&into), None).unwrap();
+            delta_rule_into(&qk, 2, &v, &gates, &state, Some(&into), None, None).unwrap();
         assert!(max_abs_diff(&cpu(&as_chain), &on_host) > 1e-2);
+    }
+
+    /// A flowing forward's kernels read the store where its rows sit, through
+    /// their slots ([`SlotTable`]): rows scattered through a store and read so
+    /// are the gathered rows' bits — the convolution's outputs and window, the
+    /// delta rule's outputs and state — through the stored kernels themselves
+    /// (each call below answers `Some`, which no gathering fallback reaches),
+    /// and a table naming other slots (the null control) is not.
+    #[cfg(feature = "candle-cuda")]
+    #[test]
+    fn a_store_read_in_place_is_its_rows_gathered_bit_for_bit() {
+        let Ok(device) = Device::new_cuda(0) else {
+            eprintln!("SKIPPED: no card");
+            return;
+        };
+        let (_, on_card) = head_width_weights(&device);
+        let parents = vec![None, Some(0), Some(1), Some(0), Some(3), Some(1), None];
+        let lines = TreeLines::for_flow(parents, &device).unwrap();
+        let slots: Vec<u32> = vec![9, 2, 5, 0, 7, 3, 10];
+        let held = 11;
+        let table = |slots: &[u32]| SlotTable {
+            table: Tensor::from_vec(slots.to_vec(), slots.len(), &device).unwrap(),
+            bound: held,
+        };
+        // Row i at slot `slots[i]` of a store of `held` rows, the rest noise.
+        let scatter = |rows: &Tensor| {
+            let mut dims = rows.dims().to_vec();
+            dims[1] = held;
+            let store = Tensor::randn(0f32, 1.0, dims, &device).unwrap();
+            for (i, &slot) in slots.iter().enumerate() {
+                store
+                    .slice_set(&rows.narrow(1, i, 1).unwrap(), 1, slot as usize)
+                    .unwrap();
+            }
+            store
+        };
+        let bits = |t: &Tensor| -> Vec<u32> {
+            t.flatten_all()
+                .unwrap()
+                .to_device(&Device::Cpu)
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap()
+                .iter()
+                .map(|x| x.to_bits())
+                .collect()
+        };
+        let in_order: Vec<u32> = (0..7).collect();
+
+        let channels = on_card.conv1d.dim(0).unwrap();
+        let mixed = Tensor::randn(0f32, 1.0, (1, 7, channels), &device).unwrap();
+        let window = Tensor::randn(0f32, 1.0, (1, channels, 3), &device).unwrap();
+        let conv = |x: &Tensor, at: Option<&SlotTable>| {
+            let out = window.zeros_like().unwrap();
+            let (qk, v) = on_card
+                .conv_on_the_card(x, &window, &out, Some(&lines), at)
+                .unwrap()
+                .expect("the card's convolution takes it");
+            (bits(&qk), bits(&v), bits(&out))
+        };
+        let store = scatter(&mixed);
+        let gathered = conv(&mixed, None);
+        assert_eq!(
+            conv(&store, Some(&table(&slots))),
+            gathered,
+            "the convolution read in place"
+        );
+        assert_ne!(
+            conv(&store, Some(&table(&in_order))),
+            gathered,
+            "null control: other slots"
+        );
+
+        let qk = l2_norm(
+            &Tensor::randn(0f32, 1.0, (1, 7, 4, 128), &device).unwrap(),
+            1e-6,
+        )
+        .unwrap();
+        let v = Tensor::randn(0f32, 1.0, (1, 7, 4, 128), &device).unwrap();
+        let g = Tensor::rand(0f32, 1.0, (1, 7, 4), &device)
+            .unwrap()
+            .neg()
+            .unwrap();
+        let beta = Tensor::rand(0f32, 1.0, (1, 7, 4), &device).unwrap();
+        let state = Tensor::randn(0f32, 0.3, (1, 4, 128, 128), &device).unwrap();
+        let rule = |qk: &Tensor, v: &Tensor, g: &Tensor, beta: &Tensor, at: Option<&SlotTable>| {
+            let into = state.zeros_like().unwrap();
+            let gates = Gates::apart(g.clone(), beta.clone());
+            let out = delta_rule_cuda(
+                qk,
+                2,
+                v,
+                &gates,
+                &state,
+                &into,
+                1.0 / (128f32).sqrt(),
+                Some(&lines),
+                at,
+            )
+            .unwrap()
+            .expect("the card's delta rule takes it");
+            (bits(&out), bits(&into))
+        };
+        let (qks, vs, gs, betas) = (scatter(&qk), scatter(&v), scatter(&g), scatter(&beta));
+        let gathered = rule(&qk, &v, &g, &beta, None);
+        assert_eq!(
+            rule(&qks, &vs, &gs, &betas, Some(&table(&slots))),
+            gathered,
+            "the delta rule read in place"
+        );
+        assert_ne!(
+            rule(&qks, &vs, &gs, &betas, Some(&table(&in_order))),
+            gathered,
+            "null control: other slots"
+        );
     }
 
     /// The processor's tree pass keeps a state only while a row still has to

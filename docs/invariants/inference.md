@@ -6230,6 +6230,24 @@ width keeps +36% (the 11-18 processor measure). Now the layer reads the whole tr
   go of memory made before the capture inside the captured body (gotchas #1163, #1165), and the same
   kernels whatever the level reads. → `docs/plans/recurrent_flow.md` § Stage 5,
   "Captured levels".
+  **And the kernels read the store in place** (2026-11-23, A/B `SWARMLLM_FLOW_ROWS=gathered`): a DeltaNet
+  layer's bookkeeping was 12 launches — 5 puts, 5 gathers (`index_select` → `is_u32_f32`) and 2 copies
+  stacking g and beta for the delta rule. The convolution and the delta rule now take the store itself
+  and the lines' slot table (`qwen35::SlotTable`; `ssm_conv_silu_tree_stored_f32_k4`,
+  `delta_rule_flow_stored_f32_d*`, g and beta as two pointers): row t's inputs are row `slots[t]`,
+  the same values in the same order, so the same bits
+  (`a_store_read_in_place_is_its_rows_gathered_bit_for_bit`: rows scattered through a store read
+  through their slots are the gathered rows' bits, both kernels, a table of other slots not). The
+  slots are checked on the host below the rows the store holds once the forward's own are put
+  (`rows_the_lines_read`), and each kernel checks that bound against the store it is handed; any path
+  but the card's flowing kernels gathers (`SlotTable::gather`). Prior art: vLLM's PagedAttention
+  (Kwon et al., SOSP 2023) reads a cache through its block table instead of copying it contiguous.
+  An 8-row level of the 0.8B drafter 692 → 566 launches (`SWARMLLM_COUNT_KERNELS=1`, the 126
+  predicted); op by op 13.7-14.4 → 12.6-13.4 ms, captured 9.0-9.3 → 8.8-9.2 ms (the release test
+  `flowing_levels_pace_captured_and_op_by_op`, ABAB three times) — a captured launch removed saves
+  its recording, ~1.6 µs, as the gates' cut found. On the 9B ↔ AU link (`real_link_rf9b21_1123/`, ABBA)
+  this computer's drafting 18.4-20.0 → 17.5-20.0 and its near forward 21.0-23.4 → 19.2-22.1 ms a
+  forward; tok/s within the spread (the last in-place arm waited 736-918 ms on the far card).
 - **On a card the convolution is ONE launch too** (`ssm_conv_silu_tree_f32_k4`): a thread a
   channel builds each row's window up its line, then the read window, rounding as the chain's
   kernel does — bit for bit `causal_conv_along`. The parents reach the card once a step for both
