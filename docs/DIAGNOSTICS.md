@@ -3013,9 +3013,10 @@ submission COUNT, not bandwidth".
    launch shape, a value, an address outside the graph, or another place in the graph's own memory
    (an address at the same place in it is not a move: one exec keeps its own). A diagnostic: it reads
    the driver between a capture's end and its launch, never in a timed run. Rig:
-   `~/swarmllm-gate/deep/fr/diff_params.sh <release test binary> 8 2`. ⚠ It reads KERNEL nodes
-   only (`launches_of`): a candle copy is a MEMCPY node, so a copy whose source moved is not
-   reported — the replay plan's Stage 0 widens it (`docs/plans/level_replay.md`). ⚠ Build the
+   `~/swarmllm-gate/deep/fr/diff_params.sh <release test binary> 8 2`. It reads copy and set nodes too
+   (since 2026-11-23, as launches named `memcpy` / `memset`: extents, then source and destination
+   address, offset and pitch): a candle contiguous copy is a copy node, and before then one whose
+   source moved went unreported. ⚠ Build the
    probe `--release`: the test profile leaves the crate at opt-level 0, and a level read 20.7 ms
    there. ⚠ A laptop card's clocks move one run's median by ~30% (6.05 against 8.4-9.2 ms in the
    same hour) — interleave arms, never compare runs from different minutes.

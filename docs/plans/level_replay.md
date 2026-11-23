@@ -29,9 +29,9 @@ We take all three: one fixed input block, KV padded to a bucket, rows written th
 
 ## What the plan found first
 
-1. **The parameter diff is blind to copies.** `cuda_graph.rs` `launches_of` reads only KERNEL and MEM_ALLOC
-   nodes. Candle's contiguous copies are MEMCPY nodes (`memcpy_dtod`, vendored candle-core
-   `cuda_backend/mod.rs`), so `SWARMLLM_GRAPH_PARAM_DIFF=1` cannot see a copy whose source moved.
+1. **The parameter diff was blind to copies** (fixed the same day, Stage 0's first item). `cuda_graph.rs`
+   `launches_of` read only KERNEL and MEM_ALLOC nodes. Candle's contiguous copies are MEMCPY nodes (`memcpy_dtod`, vendored candle-core
+   `cuda_backend/mod.rs`), so `SWARMLLM_GRAPH_PARAM_DIFF=1` could not see a copy whose source moved.
 2. **Skipping a forward skips its host bookkeeping.** `qwen35.rs` `forward_flowing` updates `keep_appended`,
    `advance_to` and `note_flow_read`, and `SeqCache::append` moves `current_seq_len`. A replay must run the same
    host code; only the recording goes.
@@ -67,7 +67,8 @@ Each lands alone, behind its own A/B switch, with its own proof.
 
 - **Stage 0 — the oracle and the floor** (~90 min, a diagnostic only). Do it first: it says whether ~5.2 ms
   is reachable before anything else is built.
-  - `launches_of` reads MEMCPY and MEMSET nodes too.
+  - ~~`launches_of` reads MEMCPY and MEMSET nodes too.~~ DONE 2026-11-23: `copy_of` / `set_of` in
+    `cuda_graph.rs`, compared as launches named `memcpy` / `memset`.
   - `note_moved` gives each level a verdict: EXACT means the same topology, and no parameter moved except
     inside the graph's own memory.
   - A test-only `DecodeGraph::relaunch(shape, n)` in `flowing_levels_pace_captured_and_op_by_op`. Relaunching

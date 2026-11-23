@@ -1292,8 +1292,8 @@ mod cuda {
     }
 
     /// `SWARMLLM_GRAPH_PARAM_DIFF=1`: compare every captured group's kernel
-    /// launches with the same group's last capture and say, by kernel and
-    /// parameter, what moved — the list a step must hold still to be
+    /// launches, copies and sets with the same group's last capture and say,
+    /// by kernel and parameter, what moved — the list a step must hold still to be
     /// REPLAYED rather than recorded again (FUTURE_WORK #228 (1): a flowing
     /// level's card idles ~60% of it while the host records). A diagnostic:
     /// it reads the driver between a capture's end and its launch, so never in
@@ -1308,9 +1308,10 @@ mod cuda {
         *ON.get_or_init(|| std::env::var("SWARMLLM_GRAPH_PARAM_DIFF").as_deref() == Ok("1"))
     }
 
-    /// A captured graph's kernel launches in node order, and the memory its
-    /// own allocation nodes hold — an address inside one is the graph's, the
-    /// same on every launch of one exec.
+    /// A captured graph's kernel launches, copies and sets in node order (a
+    /// copy or set as a launch named `memcpy` / `memset`, [`copy_of`],
+    /// [`set_of`]), and the memory its own allocation nodes hold — an address
+    /// inside one is the graph's, the same on every launch of one exec.
     pub(super) struct Launches {
         kernels: Vec<Launch>,
         allocations: Vec<(u64, u64)>,
@@ -1370,6 +1371,12 @@ mod cuda {
                 }
                 sys::CUgraphNodeType::CU_GRAPH_NODE_TYPE_KERNEL => {
                     found.kernels.push(launch_of(node));
+                }
+                sys::CUgraphNodeType::CU_GRAPH_NODE_TYPE_MEMCPY => {
+                    found.kernels.push(copy_of(node));
+                }
+                sys::CUgraphNodeType::CU_GRAPH_NODE_TYPE_MEMSET => {
+                    found.kernels.push(set_of(node));
                 }
                 _ => {}
             }
@@ -1443,6 +1450,86 @@ mod cuda {
             ],
             params,
         }
+    }
+
+    /// A copy node as a launch named `memcpy`: its extents as the shape, its
+    /// source and destination — address, byte offset, pitch — as 8-byte
+    /// parameters, so a copy whose source or destination moved is reported as
+    /// a kernel's would be. A candle contiguous copy is one of these
+    /// (`memcpy_dtod`); read as kernels only, one that read a buffer that moved
+    /// was never seen (`docs/plans/level_replay.md` Stage 0).
+    fn copy_of(node: sys::CUgraphNode) -> Launch {
+        // NOT zeroed: its memory-type fields are enums with no zero value.
+        let mut p = std::mem::MaybeUninit::<sys::CUDA_MEMCPY3D>::uninit();
+        // SAFETY: a copy node of the live graph; the driver writes every field
+        // on success.
+        if unsafe { sys::cuGraphMemcpyNodeGetParams(node, p.as_mut_ptr()) }
+            .result()
+            .is_err()
+        {
+            return Launch {
+                name: "memcpy".into(),
+                shape: [0; 7],
+                params: None,
+            };
+        }
+        // SAFETY: the driver filled it, above.
+        let p = unsafe { p.assume_init() };
+        let words = [
+            p.srcDevice,
+            p.srcXInBytes as u64,
+            p.srcPitch as u64,
+            p.dstDevice,
+            p.dstXInBytes as u64,
+            p.dstPitch as u64,
+        ];
+        Launch {
+            name: "memcpy".into(),
+            shape: [
+                extent(p.WidthInBytes),
+                extent(p.Height),
+                extent(p.Depth),
+                0,
+                0,
+                0,
+                0,
+            ],
+            params: Some(words.iter().map(|w| w.to_le_bytes().to_vec()).collect()),
+        }
+    }
+
+    /// A set node as a launch named `memset`: its extents as the shape, its
+    /// destination, pitch, value and element size as 8-byte parameters.
+    fn set_of(node: sys::CUgraphNode) -> Launch {
+        // SAFETY: zeroed is valid for this plain C struct; the driver fills it.
+        let mut p: sys::CUDA_MEMSET_NODE_PARAMS = unsafe { std::mem::zeroed() };
+        // SAFETY: a set node of the live graph.
+        if unsafe { sys::cuGraphMemsetNodeGetParams(node, &mut p) }
+            .result()
+            .is_err()
+        {
+            return Launch {
+                name: "memset".into(),
+                shape: [0; 7],
+                params: None,
+            };
+        }
+        let words = [
+            p.dst,
+            p.pitch as u64,
+            u64::from(p.value),
+            u64::from(p.elementSize),
+        ];
+        Launch {
+            name: "memset".into(),
+            shape: [extent(p.width), extent(p.height), 0, 0, 0, 0, 0],
+            params: Some(words.iter().map(|w| w.to_le_bytes().to_vec()).collect()),
+        }
+    }
+
+    /// A copy's or set's extent in a launch shape's word.
+    fn extent(n: usize) -> u32 {
+        u32::try_from(n).unwrap_or(u32::MAX)
     }
 
     /// What moved between a group's two captures, summed over the process.
@@ -1851,6 +1938,63 @@ mod cuda {
             session.all_updated,
             std::mem::take(&mut session.refused_updates),
         ))
+    }
+
+    /// The parameter diff reads a captured copy as a launch named `memcpy`
+    /// whose parameters name its source and destination ([`copy_of`]) — read
+    /// as kernel nodes only before 2026-11-23, a copy whose source moved went
+    /// unreported (`docs/plans/level_replay.md` Stage 0). The source here was
+    /// made before the capture, so it lies outside the graph's own memory.
+    #[test]
+    #[ignore = "a card, run alone (--test-threads=1): a capture takes all the stream's work"]
+    fn a_captured_copy_is_read_as_a_launch_naming_its_source_and_destination() {
+        let Ok(device) = candle_core::Device::new_cuda(0) else {
+            eprintln!("SKIPPED: no card");
+            return;
+        };
+        let candle_core::Device::Cuda(dev) = &device else {
+            unreachable!("a card device");
+        };
+        let src = candle_core::Tensor::arange(0f32, 256.0, &device).unwrap();
+        let stream = dev.cuda_stream();
+        stream.context().bind_to_thread().unwrap();
+        // SAFETY: a live stream of this device, captured on this thread only.
+        unsafe {
+            result::stream::begin_capture(
+                stream.cu_stream(),
+                sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL,
+            )
+        }
+        .unwrap();
+        let copied = src.copy();
+        // SAFETY: the stream this thread began capturing.
+        let graph = Graph(unsafe { result::stream::end_capture(stream.cu_stream()) }.unwrap());
+        let copied = copied.unwrap();
+        assert!(!graph.0.is_null(), "the capture held");
+        let launches = launches_of(graph.0).expect("the graph's nodes");
+        let copy = launches
+            .kernels
+            .iter()
+            .find(|l| l.name == "memcpy")
+            .expect("the copy is read as a launch");
+        assert_eq!(copy.shape[0], 256 * 4, "its width in bytes");
+        let words: Vec<u64> = copy
+            .params
+            .as_ref()
+            .expect("its parameters")
+            .iter()
+            .map(|b| u64::from_le_bytes(b.as_slice().try_into().unwrap()))
+            .collect();
+        let (from, to) = (words[0], words[3]);
+        assert!(
+            from != 0 && to != 0 && from != to,
+            "source and destination named: {words:?}"
+        );
+        assert!(
+            launches.inside(from).is_none(),
+            "the source was made before the capture"
+        );
+        drop(copied);
     }
 }
 
