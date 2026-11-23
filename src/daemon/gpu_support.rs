@@ -223,7 +223,9 @@ pub fn missing_cuda_libraries() -> Vec<&'static str> {
     if !unsafe { driver::sys::is_culib_present() } {
         return Vec::new();
     }
-    let present: [(&'static str, unsafe fn() -> bool); 4] = [
+    /// A library's name and the probe that says whether it opens.
+    type LibraryProbe = (&'static str, unsafe fn() -> bool);
+    let present: [LibraryProbe; 4] = [
         ("cuBLAS", cublas::sys::is_culib_present),
         ("cuBLASLt", cublaslt::sys::is_culib_present),
         ("cuRAND", curand::sys::is_culib_present),

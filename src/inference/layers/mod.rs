@@ -3652,6 +3652,11 @@ impl SsmState {
 }
 
 /// A layer's feed-forward — either dense or MoE.
+// A card build's variants differ in size (its `Mlp` is 368 bytes), which only
+// a card build's clippy reports: the enum is held once a layer in the model's
+// `Vec` and never moved on a forward, so the size costs nothing, where a `Box`
+// on either variant would add a pointer read to every layer's feed-forward.
+#[cfg_attr(feature = "candle-cuda", allow(clippy::large_enum_variant))]
 #[derive(Debug, Clone)]
 pub(crate) enum FfnVariant {
     Dense(Mlp),

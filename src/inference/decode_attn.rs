@@ -1712,15 +1712,14 @@ mod tests {
                         .map(|(a, b)| (a - b).abs())
                         .fold(0f32, nan_max)
                 };
-                for h in 0..n_head {
+                for (h, &sink) in sinks.iter().enumerate().take(n_head) {
                     let (card_moved, cpu_moved) = (moved(&got, h), moved(&want, h));
                     assert!(
                         (card_moved - cpu_moved).abs() <= 0.1 * cpu_moved + 1e-5,
-                        "heads {n_head}/{n_kv_head} S={s_len} head {h} (sink {}): the card moved \
-                         {card_moved}, the processor {cpu_moved}",
-                        sinks[h]
+                        "heads {n_head}/{n_kv_head} S={s_len} head {h} (sink {sink}): the card \
+                         moved {card_moved}, the processor {cpu_moved}"
                     );
-                    if sinks[h] == 6.0 {
+                    if sink == 6.0 {
                         assert!(
                             cpu_moved > 1e-3,
                             "head {h}: a dominant sink moved {cpu_moved}"

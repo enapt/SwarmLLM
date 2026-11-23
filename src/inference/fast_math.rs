@@ -335,10 +335,10 @@ pub fn silu_mul(gate: &Tensor, up: &Tensor) -> Result<Tensor> {
         match gate.device() {
             Device::Cpu => return gate.apply_op2_no_bwd(up, &SiluMul),
             #[cfg(feature = "candle-cuda")]
-            Device::Cuda(_) if up.device().same_device(gate.device()) => {
-                if fuse_silu_mul_on_cuda() {
-                    return gate.apply_op2_no_bwd(up, &SiluMul);
-                }
+            Device::Cuda(_)
+                if up.device().same_device(gate.device()) && fuse_silu_mul_on_cuda() =>
+            {
+                return gate.apply_op2_no_bwd(up, &SiluMul);
             }
             _ => {}
         }
