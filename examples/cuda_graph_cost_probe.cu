@@ -32,7 +32,9 @@
 // runs each): 1000 launches — update 3.68-4.00 ms/token (capture 1.53-1.58,
 // update 0.50-0.57), arena 1.61-1.64 (capture 0.44-0.46, update 0.19), replay
 // 0.92-0.95; 85 launches — update 0.28, arena 0.18. The memory nodes are ~2 µs
-// a pair of recording, update and the card's own run: FUTURE_WORK #496.
+// a pair of recording, update and the card's own run HERE — but a real
+// Qwen3.5-0.8B level with its ~900 pairs served from a pool ran no faster
+// (FUTURE_WORK § Decided, #496): read this probe's rates as its own.
 //
 // WHAT IT CANNOT TELL YOU: anything about OUR forward pass (captured allocs
 // must be freed inside the capture, no host sync inside it — § Stage 4b), or

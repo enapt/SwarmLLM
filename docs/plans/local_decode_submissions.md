@@ -418,6 +418,10 @@ allocation and free again, and the update and the card's run pay for them too:
 token with an alloc/free pair beside each, 1.6 ms with the buffers made outside
 the capture. Stage 3 has its own reason again — as a caching allocator for
 captured work (PyTorch's graph-private pool), not an arena keyed on shapes.
+**Measured the same day, and it has not:** a prototype of that pool served
+nearly every allocation of a Qwen3.5-0.8B flowing level (26,590 lent, 86
+missed) and the level ran as before — 6.46-6.63 ms against 6.48-6.72 at 2 rows
+(FUTURE_WORK § Decided, #496). The probe's rate does not hold in the real step.
 
 ### Stage 4 — Capture the decode step as a CUDA graph
 

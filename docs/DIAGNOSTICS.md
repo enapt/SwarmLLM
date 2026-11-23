@@ -2990,7 +2990,10 @@ submission COUNT, not bandwidth".
    our kernels 5.20 ms an 8-row level (1,027 kernels in 12 graphs), llama.cpp's 5.37 (844); 2 rows
    3.84 against 4.25 — while the untraced level is 8.4-9.2 / 6.0-6.6 ms against llama.cpp's 5.35 /
    4.5. Every level re-records ~1,000 ops and ~900 allocations + ~900 frees (graph memory nodes)
-   on the host; the group size (`SWARMLLM_CUDA_GRAPH_GROUP` 1-4) does not move it. ⚠ Build the
+   on the host; the group size (`SWARMLLM_CUDA_GRAPH_GROUP` 1-4) does not move it, and neither
+   does serving the allocations from a pool so no memory node is recorded (FUTURE_WORK § Decided,
+   #496: 6.46-6.63 against 6.48-6.72 ms at 2 rows; `~/swarmllm-gate/deep/fr/pace_pool.sh`) — a
+   probe's per-node cost is not the real step's. ⚠ Build the
    probe `--release`: the test profile leaves the crate at opt-level 0, and a level read 20.7 ms
    there. ⚠ A laptop card's clocks move one run's median by ~30% (6.05 against 8.4-9.2 ms in the
    same hour) — interleave arms, never compare runs from different minutes.
