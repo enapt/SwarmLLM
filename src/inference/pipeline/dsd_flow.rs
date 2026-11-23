@@ -1086,28 +1086,68 @@ pub(super) fn flows_with_the_walk(state: &SharedState, model: &crate::types::Mod
 /// `try_dsd_distributed`, so a reply refused here still falls through to the
 /// n-gram loop. The drafter is not loaded yet: its place is asked where it
 /// would load (`engine_drafter::guesses_on_a_card`) once it is chosen, and the
-/// line here takes it on a card.
+/// line here takes it on a card — and neither are this node's own layers,
+/// whose place is the spawn the plan leads to
+/// (`ModelProcessPool::runs_whole_on_the_card_for_a_plan`). A refusal says
+/// which condition refused it, at `debug!` (the n-gram loop's ~7 tok/s against
+/// the flow's 14-28 on the 9B ↔ AU link is worth one line).
 pub(super) fn recurrent_flow_may_start(exec: &PipelineExecutor) -> bool {
+    match why_a_recurrent_flow_may_not_start(exec) {
+        None => true,
+        Some(why) => {
+            tracing::debug!(
+                request_id = %exec.request.id,
+                why = %why,
+                "DSD: a recurrent model's tree may not flow"
+            );
+            false
+        }
+    }
+}
+
+/// [`recurrent_flow_may_start`]'s conditions in order: the first that refuses,
+/// or `None`.
+fn why_a_recurrent_flow_may_not_start(exec: &PipelineExecutor) -> Option<String> {
     use super::dsd_tree::FlowDraws;
     let state = &exec.shared_state;
     let segments = &exec.assignment.segments;
-    recurrent_flow_on()
-        && flow_requested()
-        && super::tree_check_possible(state, segments, swarmllm_types::node::features::DRAFT_TREES)
-        && super::dsd_stream::stream_shape(state, segments, exec.verify_may_chain())
-            .filter(|shape| flow_possible(state, shape, &exec.request.sampling_params, true))
-            .is_some_and(|shape| {
-                super::dsd_tree::trees_wanted(
-                    super::every_segment_runs_on_a_card(state, segments, &exec.request.model_id),
-                    true,
-                    super::farthest_segment_round_trip_ms(state, segments),
-                    Some(if shape.far_walks() {
-                        FlowDraws::AtTheFarEnd
-                    } else {
-                        FlowDraws::Here
-                    }),
-                )
-            })
+    if !recurrent_flow_on() {
+        return Some("the recurrent flow is off (SWARMLLM_RECURRENT_FLOW=0)".into());
+    }
+    if !flow_requested() {
+        return Some("trees that flow are off (SWARMLLM_TREE_FLOW=0)".into());
+    }
+    if !super::tree_check_possible(state, segments, swarmllm_types::node::features::DRAFT_TREES) {
+        return Some("a peer segment does not check trees, or the tail does not walk".into());
+    }
+    let Some(shape) = super::dsd_stream::stream_shape(state, segments, exec.verify_may_chain())
+    else {
+        return Some("the plan's peers are not one run".into());
+    };
+    if !flow_possible(state, &shape, &exec.request.sampling_params, true) {
+        return Some(
+            "no flow on this run: a peer lacks the recurrent flow, or the sampler reads history"
+                .into(),
+        );
+    }
+    let on_card = super::every_segment_runs_on_a_card(
+        state,
+        segments,
+        &exec.request.model_id,
+        super::worker_requester(&exec.request),
+    );
+    let round_trip_ms = super::farthest_segment_round_trip_ms(state, segments);
+    let draws = if shape.far_walks() {
+        FlowDraws::AtTheFarEnd
+    } else {
+        FlowDraws::Here
+    };
+    (!super::dsd_tree::trees_wanted(on_card, true, round_trip_ms, Some(draws))).then(|| {
+        format!(
+            "under the tree line: every segment on a card {on_card}, farthest round trip \
+             {round_trip_ms:?} ms, drawn {draws:?}"
+        )
+    })
 }
 
 /// A forward out being read.

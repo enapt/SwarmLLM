@@ -2993,7 +2993,11 @@ submission COUNT, not bandwidth".
    on the host; the group size (`SWARMLLM_CUDA_GRAPH_GROUP` 1-4) does not move it, and neither
    does serving the allocations from a pool so no memory node is recorded (FUTURE_WORK § Decided,
    #496: 6.46-6.63 against 6.48-6.72 ms at 2 rows; `~/swarmllm-gate/deep/fr/pace_pool.sh`) — a
-   probe's per-node cost is not the real step's. ⚠ Build the
+   probe's per-node cost is not the real step's. **Where the time goes**: `level_serial.py` reads,
+   per group of a level, the host's time from one launch to the next, the card's idle before the
+   group and its run — the card runs a group in 0.31-0.38 ms and waits 0.75-0.89 ms for the next to
+   be recorded (2026-11-23): recording is the critical path, and the lever is replaying a level, not
+   overlapping it (FUTURE_WORK #228 (1)). ⚠ Build the
    probe `--release`: the test profile leaves the crate at opt-level 0, and a level read 20.7 ms
    there. ⚠ A laptop card's clocks move one run's median by ~30% (6.05 against 8.4-9.2 ms in the
    same hour) — interleave arms, never compare runs from different minutes.

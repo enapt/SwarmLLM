@@ -622,6 +622,7 @@ impl PipelineExecutor {
                     &self.shared_state,
                     &self.assignment.segments,
                     &self.request.model_id,
+                    super::worker_requester(&self.request),
                 ),
                 drafter_on_card,
                 farthest_round_trip_ms,

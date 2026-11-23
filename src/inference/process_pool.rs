@@ -7180,6 +7180,39 @@ impl ModelProcessPool {
                 .is_some_and(|h| !h.short_of_the_card())
     }
 
+    /// Would `layers` of `model_id` a plan gives this node run whole on the
+    /// card — asked before the reply loads anything
+    /// (`pipeline::every_segment_runs_on_a_card`, read by
+    /// `dsd_flow::recurrent_flow_may_start` before a Qwen 3.5 reply's first
+    /// token). A live worker answers for itself
+    /// ([`Self::runs_whole_on_the_card`]). With none, the spawn the plan leads
+    /// to is weighed as the planner weighed this node: on the card
+    /// ([`Self::planning_on_card`]) and no wider than the layers it has room
+    /// for there ([`Self::max_hostable_layers_for_planning`]) — wider, the
+    /// spawn puts the rest on the processor. Read as "no worker, so no", a
+    /// node's FIRST split reply after every start (and every update restarts
+    /// one) was refused the flow and ran the n-gram loop at half the speed
+    /// (2026-11-23, nine sittings in a row on the 9B ↔ AU link).
+    ///
+    /// Prior art: Ollama places a model by the layers that WOULD fit the
+    /// card's free memory before its runner loads (`llm/memory.go`
+    /// `EstimateGPULayers`); this node's own planner does the same, and this
+    /// asks it rather than a second estimate.
+    pub fn runs_whole_on_the_card_for_a_plan(
+        &self,
+        model_id: &ModelId,
+        layers: u32,
+        requester: Requester,
+    ) -> bool {
+        if self.live_worker(model_id).is_some() {
+            return self.runs_whole_on_the_card(model_id);
+        }
+        self.planning_on_card(model_id, requester)
+            && self
+                .max_hostable_layers_for_planning(model_id, requester)
+                .is_some_and(|room| layers > 0 && layers <= room)
+    }
+
     /// Can any model use this node's graphics card at all: one detected, one
     /// our kernels run on, in a build that has them, and not switched off
     /// (`inference.gpu_layers = 0`)? Whether a particular model FITS it is a
@@ -21283,6 +21316,97 @@ mod tests {
         assert!(
             !p.runs_whole_on_the_card(&whole),
             "no card in play: a build without one, or `gpu_layers = 0`"
+        );
+    }
+
+    /// A Qwen 3.5 split asks before its prompt pass — before anything is loaded
+    /// — whether this node's layers of the plan run whole on the card
+    /// (`dsd_flow::recurrent_flow_may_start`). With no worker yet, the answer
+    /// is the spawn the plan leads to, weighed as the planner weighed it: the
+    /// layers the card has room for. Read as "no worker, so no", every node's
+    /// first split reply after a start ran without its flow (2026-11-23).
+    #[tokio::test]
+    async fn a_plans_layers_with_no_worker_yet_run_on_the_card_where_the_planner_gave_the_card_room(
+    ) {
+        use crate::inference::model_arch::ModelArch;
+        use crate::inference::split::hybrid::arch_supports_hybrid;
+        let p = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-plan-on-card"));
+        p.test_card_in_play.store(true, Ordering::Relaxed);
+        p.set_gpu_layers(-1);
+        p.set_vram_budget_mb(3000);
+        p.set_vram_budget_source(Box::new(|| Some(3000)));
+        let m = ModelId("plan-on-card".into());
+        p.test_footprint_inputs.insert(
+            m.clone(),
+            crate::model::auto_manage::vram::VramFootprintInputs {
+                quantized_weight_bytes: 4_400 * 1024 * 1024,
+                host_resident_bytes: 0,
+                head_bytes: 0,
+                unquantized_bytes_per_element: None,
+                vocab_size: 152_064,
+                embedding_length: 3584,
+                segment_layers: 28,
+                kv: crate::inference::split::kv_budget::KvPrice::uniform(
+                    28,
+                    4,
+                    28,
+                    128,
+                    crate::inference::layers::KvAttention::Standard,
+                ),
+                rope_dim: 128,
+                effective_context: 8192,
+                is_first: true,
+                embedding_gatherable: true,
+                splits_across_devices: arch_supports_hybrid(&ModelArch::Qwen2),
+            },
+        );
+        let room = p
+            .max_hostable_layers_for_planning(&m, Requester::Swarm)
+            .expect("fixture: a bound on the card");
+        assert!(
+            room > 0 && room < 28,
+            "fixture: the card has room for part of the model: {room}"
+        );
+        assert!(
+            !p.runs_whole_on_the_card(&m),
+            "fixture: no worker, so the live reading says no"
+        );
+        assert!(
+            p.runs_whole_on_the_card_for_a_plan(&m, room, Requester::Swarm),
+            "the layers the planner gave the card run on it"
+        );
+        assert!(
+            !p.runs_whole_on_the_card_for_a_plan(&m, room + 1, Requester::Swarm),
+            "one more and the spawn puts some on the processor"
+        );
+        assert!(!p.runs_whole_on_the_card_for_a_plan(&m, 0, Requester::Swarm));
+
+        // A live worker answers for itself, whatever the plan's width.
+        let now = std::time::Instant::now();
+        p.workers.insert(
+            m.clone(),
+            fake_worker_handle_split(
+                false,
+                None,
+                false,
+                now,
+                Some(CardSplit::Layers {
+                    on_card: 13,
+                    total: 28,
+                }),
+            )
+            .await,
+        );
+        assert!(
+            !p.runs_whole_on_the_card_for_a_plan(&m, 1, Requester::Swarm),
+            "a live card/processor split"
+        );
+        p.workers.remove(&m);
+
+        p.test_card_in_play.store(false, Ordering::Relaxed);
+        assert!(
+            !p.runs_whole_on_the_card_for_a_plan(&m, room, Requester::Swarm),
+            "no card in play"
         );
     }
 

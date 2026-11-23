@@ -4295,6 +4295,22 @@ but the last token — the state a read-ahead leaves; A/B `SWARMLLM_DRAFTER_READ
 round would have paid the same read. The same false negative was logged on 2026-10-23's
 `flowmech` ("each start's first request streamed … its drafter not yet on the card").
 
+**A third time, for this node's OWN layers (2026-11-23).** A Qwen 3.5 reply asks whether it may flow
+before its prompt pass (`dsd_flow::recurrent_flow_may_start`): outside a flow it guesses nothing,
+so the answer is taken before any token. Nothing is loaded then on a node's first split request
+after a start (`model metadata loaded (subprocess will load on first inference)` 0.2 s before), so
+the live reading said "not on a card" and the reply ran the n-gram loop at ~7 tok/s against the
+flow's 14-28 — in every arm of nine 9B ↔ AU sittings (11-22 → 11-23; the warm-ups absorbed it
+until rf9b15's arm 1 measured it, prose 7.51). The round trip was NOT the cause: the PEX sent on
+each connection had timed every peer (116-410 ms) a second before the request. With no worker,
+**`ModelProcessPool::runs_whole_on_the_card_for_a_plan`** weighs the spawn the plan leads to as the
+planner weighed this node — `planning_on_card` and no wider than `max_hostable_layers_for_planning`
+— a live worker still answering for itself (test
+`a_plans_layers_with_no_worker_yet_run_on_the_card_where_the_planner_gave_the_card_room`). A
+refusal now logs which condition refused (`DSD: a recurrent model's tree may not flow`, `why`).
+Prior art: Ollama places by the layers that WOULD fit before its runner loads (`llm/memory.go`
+`EstimateGPULayers`).
+
 **Measured** (real link, three arms alternating on/off/on, 160-token replies, the 3060 slower and
 noisier than that morning — its fixed-route flow read code 11.0-23.1): with it on the explored
 requests split, peer-first (`[0..24)` on the 3060's whole copy, served with no load, + `[24..48)`
@@ -6014,7 +6030,7 @@ cost) and trees did not (~5.5 at both). Scored against llama.cpp (`replies400.js
 
 **So trees are the default only where every segment AND the drafter run whole on a card**
 (`pipeline::every_segment_runs_on_a_card`: this node by `ModelProcessPool::runs_whole_on_the_card`
-— a live worker not short of the card — a peer by `NodeCapability::models_run_on_card`; the
+— a live worker not short of the card; with none yet, `runs_whole_on_the_card_for_a_plan`, below — a peer by `NodeCapability::models_run_on_card`; the
 drafter by `runs_whole_on_the_card` on its own worker, live once its prompt is read; logged as
 `drafter_on_card` on `DSD: request complete`), and the stream elsewhere;
 `SWARMLLM_DRAFT_TREES=1` / `=0` forces either (`dsd_tree::trees_wanted`). With the drafter on a

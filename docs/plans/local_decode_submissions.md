@@ -422,6 +422,11 @@ captured work (PyTorch's graph-private pool), not an arena keyed on shapes.
 nearly every allocation of a Qwen3.5-0.8B flowing level (26,590 lent, 86
 missed) and the level ran as before — 6.46-6.63 ms against 6.48-6.72 at 2 rows
 (FUTURE_WORK § Decided, #496). The probe's rate does not hold in the real step.
+The level's timeline (nsys, the same day) says why: the card runs each of
+a level's 12 groups in 0.31-0.38 ms and then waits 0.75-0.89 ms while the host
+records the next, so the cost is RECORDING the level, which a pool does not
+shorten. The lever is replaying a level without recording it again (FUTURE_WORK
+#228 (1); llama.cpp relaunches an unchanged graph, vLLM replays into static buffers).
 
 ### Stage 4 — Capture the decode step as a CUDA graph
 

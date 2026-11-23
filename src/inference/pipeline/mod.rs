@@ -977,22 +977,32 @@ pub(super) fn tree_check_possible(
 /// round trip, so a tree's extra rows are nearly free: on the TH↔AU link
 /// (2026-10-21) a check cost 497-520 ms plus 2-3 ms a row with the head's
 /// layers on its card, against 10-19 ms a row on its processor.
-/// `dsd_tree::trees_wanted` reads it. This node answers from its live worker
-/// (`ModelProcessPool::runs_whole_on_the_card`), a peer from what it
-/// advertises (`NodeCapability::models_run_on_card`); a peer that says
-/// nothing is not on a card.
+/// `dsd_tree::trees_wanted` reads it. This node answers from its live worker,
+/// or with none yet from the spawn this plan's layers here lead to, weighed
+/// as the planner weighed it
+/// (`ModelProcessPool::runs_whole_on_the_card_for_a_plan`): a recurrent
+/// target asks before its prompt pass, which is what loads them. A peer
+/// answers from what it advertises (`NodeCapability::models_run_on_card`); a
+/// peer that says nothing is not on a card.
 pub(super) fn every_segment_runs_on_a_card(
     shared_state: &SharedState,
     segments: &[crate::types::PipelineSegment],
     model_id: &crate::types::ModelId,
+    requester: crate::inference::process_pool::Requester,
 ) -> bool {
+    let local = shared_state.identity.node_id();
+    let layers_here: u32 = segments
+        .iter()
+        .filter(|s| s.node_id == *local)
+        .map(|s| s.layer_range.1.saturating_sub(s.layer_range.0))
+        .sum();
     every_segment_on_a_card(
         segments,
-        shared_state.identity.node_id(),
+        local,
         || {
             shared_state
                 .model_process_pool
-                .runs_whole_on_the_card(model_id)
+                .runs_whole_on_the_card_for_a_plan(model_id, layers_here, requester)
         },
         |node| {
             shared_state.peer_registry.get(node).is_some_and(|p| {
