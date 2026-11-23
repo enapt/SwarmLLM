@@ -4531,45 +4531,6 @@ the measurement that can kill it), `docs/plans/split_speculation.md` (guess-and-
 `docs/plans/standing_ring.md` (#492: one reply faster than local on a short ring of cards — a concept with its
 kill ladder).
 
-#### #498 — A far computer's slice of a model runs on its processor beside a card with 10 GB free, and nothing moves it back
-`P1` · inference / worker memory · **PARTIAL** — 2026-11-23 · seen: Qwen3.8-27B as the live node routes it (`~/swarmllm-gate/tier27_1123`)
-
-On 2026-11-23 between 17:33 and 17:49Z, the user's live node ran Qwen3.8-27B through four segments: here, then US
-(`5bfbd36e`, once TH `96842635`), then AU (`aa3d1e66`), then here again. The reply rates were 3.16 and 3.70 tok/s for
-code and 2.38 and 2.28 for prose (160-token replies, no thinking), and the first token came after 4.3-23.5 s.
-
-AU's resident report showed 47 layers with `card_layers: 0` and `card_free_at_load_mb: null`, at about 6.6 ms a
-layer, while its capability showed 10,063 MB of the card free. The slowest hop of the route was a processor, on a
-computer that has a card. Two separate gaps produced that:
-
-- **(a) Why a worker is on the processor never left the computer.** The spawn records it (`placed_on_cpu_because`,
-  `CpuReason`), but only that computer's log and admin API showed it. Nothing seen from here could tell "configured",
-  "drivers missing", "IQ4 needs the processor" and "the card was full at that moment" apart. **Fixed here:**
-  `ResidentModelLayers::on_processor_because` (`OnProcessorBecause`) carries the reason. It uses `CpuReason::as_str`'s
-  own words (`CpuReason::for_peers`, test `every_processor_reason_reaches_peers_in_its_own_words`) and is shown in
-  `/api/admin/peers` → `resident[].on_processor_because`. It is diagnostic only, and nothing plans on it. It is an
-  additive `#[serde(default)]` field: an older node ignores it, an unknown word reads as `Unknown`, and nothing needs
-  a feature bit.
-- **(b) Promotion never moves a slice back to a card that has room. OPEN.**
-  - `ModelProcessPool::should_return_to_gpu` weighs only a WHOLE fit on the card (`gpu_estimate_mb` against the
-    budget).
-  - `promotion_keeps_what_it_holds(held, asked)` promotes only when the asked range covers every held range.
-  - As a result, a worker holding a slice too big for the card whole is never re-placed as a card split. Neither is
-    a slice asked of it piece by piece. 47 of a 27B's layers need about 12 GB, more than the 10 GB free, so the room
-    for most of them was there and none of them moved.
-
-**Fix for (b):** a promotion that weighs a card SPLIT of what the worker holds, with as many layers on the card as
-fit and the rest on the processor. The spawn already builds that shape for a model too big for the card. The re-spawn
-should happen at a moment when no request holds the worker (`WorkerHandle::in_use`), the same as the whole-fit
-promotion. Read (a)'s word from AU first: "configured" or "drivers missing" is the owner's choice or setup, and no
-promotion would or should move it.
-
-**Prior art:** a Kubernetes condition carries a machine-readable `reason` beside its status (`meta/v1 Condition`,
-KEP-1623), because the status alone says what happened, not why. That is the shape of (a). For (b), llama.cpp fixes
-`--n-gpu-layers` at load. Ollama places layers at load and shows only the split (`ollama ps`, PROCESSOR column), and a
-model stays where it was placed until it is unloaded and loaded again. Neither moves a running model onto a card that
-frees up later. Our worker can re-spawn between replies, so it can do what they leave to a restart.
-
 #### #497 — A flowing chain's middle hops tell the coordinator nothing about their own time
 `P3` · network · **OPEN** — 2026-11-23 · seen: reading the 27B all-card chain's plan (here + AU + BE + US) before its next run
 
@@ -8494,6 +8455,30 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-11-23** (#498)
+- #498 — `P1` — **A far computer's slice of a model ran on its processor beside a card with 10 GB free, and nothing
+  moved it back.** On 2026-11-23 the user's Qwen3.8-27B route (here, US or TH, AU, here) ran at 2.3-3.7 tokens a second.
+  The Australian computer held 47 layers with `card_layers: 0` at ~6.6 ms a layer and 10,063 MB of its card free.
+  Two gaps, both closed:
+  - **(a) The reason never left the computer.** `ResidentModelLayers::on_processor_because` (`OnProcessorBecause`,
+    `CpuReason::for_peers`) now carries it, shown in `/api/admin/peers` → `resident[].on_processor_because`. It is
+    diagnostic only. `card_free_at_load_mb: null` cannot tell the reasons apart: no processor placement reads the card.
+  - **(b) Promotion weighed only a WHOLE move.** `moves_for_a_card_split` now also moves a worker wholly on the
+    processor where the spawn's own `partial_gpu_layers` of the asked range would put at least half its layers on the
+    card. Such a worker is weighed above the ceiling too. A respawn that lands on the processor anyway is marked
+    `WorkerHandle::promotion_missed` and never retried. On the card (`promo498b.sh`, v0.3.308 as the null control),
+    Mistral 7B, raised from a 300 MB cap to 4,000 MB, stayed on the processor on the release and moved 20 of 32 layers
+    to the card on main: 48 tokens in 2.7 s against 6.8 s, one retirement.
+
+  Field check after the release: read AU's `on_processor_because` for the 27B. `configured_cpu_only` or
+  `cuda_libraries_missing` is its owner's choice or setup, and no promotion moves it.
+  Prior art: a Kubernetes condition's machine-readable `reason` (KEP-1623) for (a). For (b), llama.cpp fixes
+  `--n-gpu-layers` at load, and Ollama places layers at load and never moves a running model.
+  Evidence: `docs/invariants/memory.md` § "A model is admitted against the card as it stands NOW". Tests
+  `a_slice_wholly_on_the_processor_moves_where_the_card_takes_half_of_it`,
+  `a_slice_on_the_processor_is_weighed_by_the_spawns_own_split`,
+  `every_processor_reason_reaches_peers_in_its_own_words`.
 
 **Closed 2026-11-22** (#177's second half)
 - #177 (second half) — `P3` — **A DHT provider record counted as a copy of a part.** #341 kept the rule ("the DHT's

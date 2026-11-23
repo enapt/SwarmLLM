@@ -1667,8 +1667,9 @@ fn ram_room_now_mb(
 }
 
 /// The A/B switch that stops the loader splitting a model across the card and
-/// the processor (`ModelProcessPool`'s own reads of it).
-fn hybrid_offload_off() -> bool {
+/// the processor — the one reading of `SWARMLLM_HYBRID_OFFLOAD` (the pool asks it
+/// too, through `process_pool::hybrid_offload_on`).
+pub(crate) fn hybrid_offload_off() -> bool {
     std::env::var("SWARMLLM_HYBRID_OFFLOAD").as_deref() == Ok("0")
 }
 

@@ -5481,6 +5481,34 @@ then idle 90 s): A priced B at 14 layers against 8 with the switch off (RAM_B 17
 (1400) — the figure reaches the planner. Both arms ran the same split there: B is the only holder, so
 the relaxed ceiling rung takes it either way.
 
+**A worker WHOLLY on the processor moves for a card SPLIT too (2026-11-23, #498).** Promotion weighed only a WHOLE
+move (`gpu_estimate_mb` against the room, never above `ceiling_mb`), so a slice placed on the processor while the card
+was busy, and too big for the card whole, stayed there for its worker's life. On 2026-11-23 the user's Qwen3.8-27B
+route ran at 2.3-3.7 tokens a second with the Australian computer's 47 layers on its processor (~6.6 ms a layer)
+beside 10,063 MB of its card free: never a whole fit, so never weighed. Now `moves_for_a_card_split` also moves such
+a worker where the spawn's OWN split of the asked range, in the room as it stands less the plan's other ranges here
+(`partial_gpu_layers` → `CardSplit::card_share`), puts at least half its layers on the card. It is weighed above
+the ceiling too, since the ceiling only rules out a whole move. Half, so the cold reload a promotion costs buys at
+least a halving of that hop's step. Reclaim is not counted, so the prediction can only under-promise against a
+spawn that reclaims. A respawn that lands wholly on the processor anyway, for want of room, is marked
+(`WorkerHandle::promotion_missed`, a WARN) and never retired for a split again: a reload a request for nothing was #93's loop. The card is read for such a worker past the ceiling only while the ceiling could hold half of it and splits are
+offered (`may_move_as_a_split`, from the review): otherwise the read the ceiling guard saves would come back on
+every request. A split is moved only
+whole, as before, so one split is never traded for another.
+
+Tests: `a_slice_wholly_on_the_processor_moves_where_the_card_takes_half_of_it` (the predicate) and
+`a_slice_on_the_processor_is_weighed_by_the_spawns_own_split` (the pool, 70B geometry: 3 GB → fewer than half, stays;
+9.5 GB → moves; missed → stays). Both go red with the branch forced off.
+
+Card run (`~/swarmllm-gate/deep/fr/promo498b.sh`, 11-23 18:28-18:35Z, the published v0.3.308 as the null control
+against main's CUDA build): Mistral 7B was placed wholly on the processor under a 300 MB `max_gpu_vram_mb`. Raising
+the cap to 4,000 MB (SIGHUP; whole it needs ~5.0 GB) changed nothing on v0.3.308: still on the processor, the card at
+777 MiB, 48 tokens in 5.7 / 6.8 s. On main the first ask after the raise retired the worker once and placed 20 of its
+32 layers on the card (a 1.1 s load). The next ask took 2.7 s for the same 48 tokens, with no second retirement.
+A 14B under the same cap is refused out loud ("needs about 10362 MB of memory"), not placed on the processor: the
+processor cannot hold it either, which is the RAM budget's answer and correct (`promo498_1820`).
+Prior art: llama.cpp fixes `--n-gpu-layers` at load; Ollama places layers at load and never moves a running model.
+
 ## "Used recently" has four answers, and one of them is never written locally
 
 `model::auto_manage::prune::effective_idle_secs` combines all of them — a

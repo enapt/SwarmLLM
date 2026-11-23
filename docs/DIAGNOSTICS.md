@@ -220,6 +220,13 @@ Never for a request the worker serves as a slice of what it holds (#3 (j12)): at
 names `held` and `asked`; the slice runs on the worker as it stands, and the next request for
 everything it holds promotes it.
 
+A worker WHOLLY on the processor whose model the card cannot hold whole moves too (#498). That happens
+where the spawn would now put at least half its layers on the card: the same retirement line, then
+`Model does not fit the card whole — placing N of M layers there`. If the respawn lands wholly on the
+processor anyway, the WARN `a worker retired so this model could move to the graphics card was
+replaced on the processor` follows, and that worker is never retired for a split again. A peer's
+reason for a slice on its processor is in `/api/admin/peers` → `resident[].on_processor_because`.
+
 A worker already running a model that is handed a LATER run of layers its card cannot hold
 whole (v0.3.241+, #265) places that run across the card and the processor instead of failing
 the request:
