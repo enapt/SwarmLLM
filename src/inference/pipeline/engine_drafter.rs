@@ -1482,6 +1482,7 @@ impl EngineDrafter {
         rows: u32,
         levels: u32,
         live_most: u32,
+        depth_floor: Option<f32>,
         sampling: &SamplingParams,
         coupling_seed: Option<u64>,
         cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
@@ -1536,6 +1537,7 @@ impl EngineDrafter {
                 rows,
                 levels,
                 live_most,
+                depth_floor,
             }),
         };
         let drafted = state

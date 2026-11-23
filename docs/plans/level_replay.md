@@ -94,6 +94,11 @@ Each lands alone, behind its own A/B switch, with its own proof.
     llama-bench on that file: pp8 25 ms, pp16 18.5 ms — our kernels are not the gap, the host is).
     **(c) bit identity: 39 of 39 relaunched levels' outputs (all 23 of the 4B's) keep the recorded bits**, worst
     difference 0 — a relaunch is idempotent, so a replay that holds the inputs fixed reads what a recording does.
+    **The 2B drafter** (Qwen3.5-2B Q8_0, which drafts the 9B split ~16-23% faster than the 0.8B on the link,
+    `recurrent_flow.md` § "The 2B drafter, captured"; `~/swarmllm-gate/deep/fr/s0_2b_1123/`, live node stopped):
+    an 8-row level **17.3-18.0 ms op by op, 13.9-14.9 captured, 9.4-10.0 relaunched** (host 0.08), a 2-row level
+    12.1-13.2 op by op, 7.26 relaunched; 39 of 39 bit-identical at each width. llama.cpp on the same file reads 8
+    rows in 9.4 ms (pp8 850 tok/s) and 2 in 8.1 (pp2 247) — a replayed 2B level would be llama.cpp's.
 - **Stage A — fixed inputs** (items 1-5, host only). A/B `SWARMLLM_LEVEL_INPUTS=per-level`.
   - Proof: the captured-level test made bitwise, still one graph made; the in-place store test still passing.
 - **Stage B — scalars on the card**, in three parts:
@@ -135,5 +140,5 @@ Each lands alone, behind its own A/B switch, with its own proof.
 
 An 8-row level 8.8 ms → ~5.5 ms replayed (~5.7 ms counting re-recordings, ~1 level in 20); a 2-row level
 6.0-6.6 → ~4.1 ms. On the 9B ↔ AU split, drafting is ~18 of the ~38 ms this computer spends on a forward, so a
-third off it is ~6 ms a forward (~15%) while this computer stays the slower side. Judge it on the link, by
+third off it is ~6 ms a forward (~15%) while this computer stays the slower side. With the 2B drafting, a level 14 → ~9.7 ms, ~9-10 ms off a two-level call's ~48 ms forward (~20%). Judge it on the link, by
 tok/s and by this computer's drafting time a forward.

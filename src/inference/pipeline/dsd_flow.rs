@@ -127,6 +127,28 @@ fn levels_by_default(with_the_walk: bool) -> u32 {
     }
 }
 
+/// How likely the level a drafter call last proposed must be to be reached
+/// for the call to grow another (`split::FlowStep::depth_floor`: the sum of
+/// its rows' path probabilities from the walk's row). `None` grows every
+/// level of [`levels_a_call`]. `SWARMLLM_FLOW_DEPTH=<p>`, 0 < p < 1; unset or
+/// anything else is `None`. Read once. Off: on the 9B TH↔AU split with the
+/// Qwen3.5-2B drafting (`real_link_rf9b24_1123/`, two runs an arm in one
+/// sitting) up to three levels gated at 0.5 read prose 17.09 / 17.29 and code
+/// 26.45 / 28.54 tok/s, at 0.3 16.41 / 16.22 and 23.33 / 27.97, against two
+/// fixed levels' 17.14 / 16.48 and 30.76 / 27.04 and one level's 17.77 / 16.92
+/// and 22.11 / 21.99 — inside the spread for prose, under two levels for code.
+/// This computer was the slower side throughout (`here_ms_a_forward` 28-57 ms
+/// against the far end's 16-30); the floor is for a link where the far end is.
+fn depth_floor() -> Option<f32> {
+    static FLOOR: OnceLock<Option<f32>> = OnceLock::new();
+    *FLOOR.get_or_init(|| {
+        std::env::var("SWARMLLM_FLOW_DEPTH")
+            .ok()
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .filter(|p| *p > 0.0 && *p < 1.0)
+    })
+}
+
 /// Live rows (the walk's row and those following it) past which the drafter
 /// is not asked for more: past ~128 a row's chance of lying on the reply's
 /// path is too small to pay for its place (the model: 128 lost nothing
@@ -1586,6 +1608,7 @@ impl PipelineExecutor {
             waiting_ms = format_args!("{:.0}", run.waiting_ms),
             rows_a_level = rows_a_level(),
             levels = levels_a_call(run.with_the_walk),
+            depth_floor = ?depth_floor(),
             here_ms_a_forward = format_args!(
                 "{:.1}",
                 (run.drafting_ms + run.near_ms + run.here_ms) / f64::from(run.forwards.max(1))
@@ -1720,6 +1743,7 @@ impl FlowRun<'_, '_> {
                 rows,
                 levels,
                 guard.live,
+                depth_floor(),
                 &exec.request.sampling_params,
                 self.io.noise.map(|n| n.seed()),
                 exec.request.cancel.clone(),

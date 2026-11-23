@@ -370,6 +370,26 @@ followers in the same tree read whole; red (checked) without the walk: the secon
   rounds finish the reply from the tree's start, which allocates nothing there; `executor`'s claim now clears only a
   refusal that ends the reply. Test `a_flowing_forward_refused_for_memory_keeps_the_conversation` (red without it:
   "a DeltaNet layer's state describes None positions").
+- **The 2B drafter, captured** (2026-11-23 night, `real_link_rf9b23_1123/`, the released v0.3.308, arms 0.8B, 2B ×2
+  levels, 2B ×1 level, 0.8B, 2B ×1, 2B ×2, 0.8B; parts 0-4 here, 5-9 and the head on the Australian card). With its
+  levels captured, Qwen3.5-2B Q8_0 drafts **prose 16.89, 15.92 and code 29.69, 25.06 tok/s at two levels, prose
+  18.25, 16.57 and code 23.03, 25.55 at one**, against Qwen3.5-0.8B's prose 13.35, 14.92, 14.19 and code 21.05, 22.67,
+  28.84 — every 2B prose arm above every 0.8B one. Prose misses roughly halve (0.8B 28-31 a reply, 2B 14 at two
+  levels, 10 at one); a 2B level costs ~14 ms on the card (forward_ms 5,023 over 362 levels) against the 0.8B's ~9,
+  this computer's time a forward 48-49 ms at two levels and 30-32 at one against the 0.8B's 38-42. The choice
+  (`engine_drafter::chosen`) already takes the 2B wherever it is held: 1.87 GiB is under the fetch bound, ×2 its size
+  proxy (24 × 2048²) is within half the 9B's (32 × 4096²), and the download pass fetches the largest such the swarm
+  knows. The rigs had been naming the 0.8B (`DRAFTER=`); the figures above are what a computer holding the 2B gets.
+  One level against two moves prose up and code down within the runs' spread, so a call now may stop growing where
+  its last level is unlikely to be reached — the depth gate (`split::FlowStep::depth_floor`, `SWARMLLM_FLOW_DEPTH`;
+  Dynamic Depth Decoding's summed path probability). **Measured and left off** (`real_link_rf9b24_1123/`, the 2B in
+  every arm, two runs each in one sitting, ABCDEEDCBA): up to three levels gated at 0.5 — prose 17.09 / 17.29, code
+  26.45 / 28.54, a prose reply stopping after its first level in ~90% of calls — and at 0.3 (16.41 / 16.22, 23.33 /
+  27.97), against two fixed levels' 17.14 / 16.48 and 30.76 / 27.04, one level's 17.77 / 16.92 and 22.11 / 21.99,
+  and four rows a level at two levels' 16.59 / 16.53 and 24.80 / 24.47 (fewer rows cost misses and save little: a
+  2B level is ~14 ms at 8 rows and ~12 at 2). This computer was the slower side in every arm (`here_ms_a_forward`
+  46-52 ms at two levels, 28-34 at one, against the far end's 16-30), which is where one level costs code its depth;
+  the gate is kept as the A/B for a link where the far end is the slower side (next_up NEXT 2).
 
 ## Not in this plan
 

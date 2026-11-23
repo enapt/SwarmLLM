@@ -11334,6 +11334,7 @@ fn grow_flow_call(
             rows: ask.rows as usize,
             levels: ask.levels as usize,
             live_most: ask.live_most as usize,
+            depth_floor: ask.depth_floor,
         },
         &d.sampling,
         noise.as_ref(),

@@ -1049,6 +1049,11 @@ pub struct FlowAsk {
     pub levels: u32,
     /// Propose none past this many live rows.
     pub live_most: u32,
+    /// Grow a level past the first only while the last one proposed is
+    /// this likely to be reached (`FlowStep::depth_floor`); `None` grows
+    /// every level asked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depth_floor: Option<f32>,
 }
 
 /// The tree of guesses a drafting call grows (`IpcDraft::tree`,

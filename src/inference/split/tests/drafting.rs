@@ -633,6 +633,7 @@ fn a_copied_row_is_rated_by_the_drafters_own_guess() {
                         rows,
                         levels: 1,
                         live_most: 128,
+                        depth_floor: None,
                     },
                     &greedy(),
                     None,
@@ -654,6 +655,7 @@ fn a_copied_row_is_rated_by_the_drafters_own_guess() {
                 rows: TREE_CHILDREN,
                 levels: 1,
                 live_most: 128,
+                depth_floor: None,
             },
             &greedy(),
             None,
@@ -720,6 +722,7 @@ fn a_tree_that_flows_proposes_what_a_fresh_read_of_each_path_ranks_likeliest() {
                     rows,
                     levels,
                     live_most: 128,
+                    depth_floor: None,
                 },
                 &greedy(),
                 None,
@@ -815,6 +818,7 @@ fn a_tree_that_flows_proposes_what_a_fresh_read_of_each_path_ranks_likeliest() {
             rows: 4,
             levels: 1,
             live_most: 128,
+            depth_floor: None,
         },
         &greedy(),
         None,
@@ -824,6 +828,51 @@ fn a_tree_that_flows_proposes_what_a_fresh_read_of_each_path_ranks_likeliest() {
         refused,
         Err(crate::error::SwarmError::ServiceUnavailable(_))
     ));
+}
+
+/// A call grows a level past the first only while the level it last proposed
+/// is likely enough to be reached (`FlowStep::depth_floor`): asked for three
+/// levels with a floor the first level of a small random model cannot reach,
+/// it proposes that level alone — the rows an ungated call proposes first —
+/// and with a floor every level clears, all three, as ungated. Red without
+/// the gate: the floored call proposes three levels.
+#[test]
+fn a_flowing_call_stops_growing_where_its_last_level_is_unlikely_to_be_reached() {
+    let children = super::super::draft::TREE_CHILDREN;
+    // One model for the three calls: `whole_model` draws its weights afresh.
+    let mut model = whole_model();
+    let mut grown = |floor: Option<f32>| {
+        let kv = KvCacheStore::new(std::time::Duration::from_secs(60));
+        let prompt: [u32; 8] = [3, 17, 99, 250, 7, 41, 12, 5];
+        let mut session = model
+            .start_flow(&kv, "g", 0, &prompt[..7], prompt[7], 0)
+            .unwrap();
+        model
+            .grow_flow(
+                &kv,
+                "g",
+                &mut session,
+                FlowStep {
+                    ops: &[],
+                    rows: children,
+                    levels: 3,
+                    live_most: 128,
+                    depth_floor: floor,
+                },
+                &greedy(),
+                None,
+                0,
+            )
+            .unwrap()
+    };
+    let every = grown(None);
+    assert_eq!(every.len(), 3 * children);
+    assert_eq!(
+        grown(Some(0.999)),
+        every[..children].to_vec(),
+        "a floor the first level cannot reach stops the call after it"
+    );
+    assert_eq!(grown(Some(1e-30)), every);
 }
 
 /// A RECURRENT drafter grows a tree that flows (`docs/plans/recurrent_flow.md`
@@ -905,6 +954,7 @@ fn a_recurrent_drafter_grows_a_tree_that_flows() {
                     rows,
                     levels,
                     live_most: 128,
+                    depth_floor: None,
                 },
                 &greedy(),
                 None,

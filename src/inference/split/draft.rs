@@ -77,6 +77,9 @@ struct FlowTimes {
     rebase_ms: f64,
     forward_ms: f64,
     followers_ms: f64,
+    /// Calls that grew fewer levels than asked because the last one
+    /// proposed was unlikely to be reached ([`FlowStep::depth_floor`]).
+    gated: u32,
 }
 
 impl Drop for FlowGrowth {
@@ -95,6 +98,7 @@ impl Drop for FlowGrowth {
             rebase_ms = format_args!("{:.0}", t.rebase_ms),
             forward_ms = format_args!("{:.0}", t.forward_ms),
             followers_ms = format_args!("{:.0}", t.followers_ms),
+            gated = t.gated,
             "DIAG: a guessing model's flowing tree ended"
         );
     }
@@ -126,6 +130,19 @@ pub struct FlowStep<'a> {
     /// lying on the reply's path is too small to pay for its place
     /// (`docs/plans/large_model_splits.md` § "A tree that flows").
     pub live_most: usize,
+    /// Grow a level past the first only while the level just proposed is
+    /// likely enough to be reached: the sum of its rows' path probabilities
+    /// from the walk's row, as this model rates them, at least this. `None`
+    /// grows every level asked for. A level costs this computer a forward
+    /// of the drafter and the far computer more rows to read, and a row
+    /// nobody reaches buys nothing; a call that stops proposes no fewer rows
+    /// for the next call to read. Prior art: Dynamic Depth Decoding
+    /// (arXiv 2409.00142) continues EAGLE-2's draft while the summed
+    /// probability of its beam stays above a threshold; SpecDec++ (arXiv
+    /// 2405.19715) and SVIP stop on a predicted rejection, from a trained
+    /// head and from entropy — a flow's tree is already rated by path
+    /// probability, so the summed rating needs nothing trained.
+    pub depth_floor: Option<f32>,
 }
 
 /// A guess waiting for a place in the tree, rated by its path's log-probability.
@@ -1323,10 +1340,19 @@ impl SplitModel {
             )));
         }
         let mut out = Vec::new();
-        for _ in 0..step.levels.max(1) {
+        let levels = step.levels.max(1);
+        for level in 0..levels {
             self.read_flow_rows(kv, request_id, session, sampling, noise)?;
             let before = out.len();
             let mut live = session.flow.live_rows();
+            // A proposal's path from the walk is its rating less the walk
+            // row's: every proposal follows a live row.
+            let walk_rating = session
+                .rating
+                .get(session.flow.at())
+                .copied()
+                .unwrap_or(0.0);
+            let mut reached = 0.0f64;
             while out.len() - before < step.rows
                 && live < step.live_most
                 && session.flow.len() < MAX_TREE_ROWS
@@ -1343,9 +1369,14 @@ impl SplitModel {
                 session.rating.push(c.score);
                 session.unrated.push(false);
                 out.push((parent as u16, c.token));
+                reached += f64::from(c.score - walk_rating).exp();
                 live += 1;
             }
             if out.len() == before {
+                break;
+            }
+            if level + 1 < levels && step.depth_floor.is_some_and(|f| reached < f64::from(f)) {
+                session.times.gated += 1;
                 break;
             }
         }
