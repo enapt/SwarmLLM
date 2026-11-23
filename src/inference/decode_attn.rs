@@ -573,6 +573,15 @@ fn tree_tiles(rows: usize, k: &Tensor, v: &Tensor) -> bool {
         })
 }
 
+/// Whether a tree's forward of `rows` over the half cache is read by the TILED
+/// kernel ([`tree_tiles`]'s row condition; its cache conditions hold for every
+/// half cache a card keeps): what a capture of a tree past
+/// [`TREE_KERNEL_MOST_ROWS`] needs, since past it the other path reads a mask
+/// made on the host (`SplitModel::wide_tree_may_be_captured`).
+pub(crate) fn tree_rows_tiled(rows: usize) -> bool {
+    tree_tiled_from_rows().is_some_and(|from| rows >= from)
+}
+
 /// Who reads a tiled tree's context — every position before its base, which
 /// each of its rows sees whole. `SWARMLLM_TREE_ATTN_PAST=tiled` (or `0`,
 /// `off`): the tiled kernel, as before; a number: flash in that many runs

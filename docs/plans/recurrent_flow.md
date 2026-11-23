@@ -390,6 +390,16 @@ followers in the same tree read whole; red (checked) without the walk: the secon
   2B level is ~14 ms at 8 rows and ~12 at 2). This computer was the slower side in every arm (`here_ms_a_forward`
   46-52 ms at two levels, 28-34 at one, against the far end's 16-30), which is where one level costs code its depth;
   the gate is kept as the A/B for a link where the far end is the slower side (next_up NEXT 2).
+- **A level's WIDTH is nearly free to the drafter; its cost is a level** (2026-11-23 night, `real_link_rf9b25_1123/`,
+  the 2B in every arm, one binary with the near forward's 16 rows captured — `docs/invariants/inference.md` § "A
+  flowing forward of up to 16 rows is captured too"). One level of 16 rows a call (`SWARMLLM_FLOW_ROWS=16
+  SWARMLLM_FLOW_LEVELS=1`, the drafter's 16-row level captured too): drafting 13.9-17.8 ms a forward against one
+  8-row level's 12.9-16.0 — a captured level is bound by its launches, not its rows — near 17.5-20.3 against
+  14.9-15.4, this computer 31-38 ms a forward against 28-31; replies prose 16.47 / 16.27 and code 23.96 / 21.81
+  tok/s, against one 8-row level's 16.33 / 18.73 and 25.77 / 25.15 and two levels' 17.16-17.46 and 23.54-30.91.
+  Every shape lands at the same speed: a deeper or wider tree is accepted further a forward and costs this computer
+  as much more. What moves it is the cost of a LEVEL (`level_replay.md`); once a level is replayed, a wider one stays
+  nearly free and the shapes should be measured again.
 
 ## Not in this plan
 

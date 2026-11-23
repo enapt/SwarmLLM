@@ -142,3 +142,10 @@ An 8-row level 8.8 ms → ~5.5 ms replayed (~5.7 ms counting re-recordings, ~1 l
 6.0-6.6 → ~4.1 ms. On the 9B ↔ AU split, drafting is ~18 of the ~38 ms this computer spends on a forward, so a
 third off it is ~6 ms a forward (~15%) while this computer stays the slower side. With the 2B drafting, a level 14 → ~9.7 ms, ~9-10 ms off a two-level call's ~48 ms forward (~20%). Judge it on the link, by
 tok/s and by this computer's drafting time a forward.
+
+**The near forward too** (measured 2026-11-23 night, the whole Qwen3.5-9B Q4_K_M, 16 rows a forward as a two-level
+call sends, `flowing_levels_pace_captured_and_op_by_op` at `SWARMLLM_PACE_ROWS=16`, `~/swarmllm-gate/deep/fr/wide_1123/`):
+op by op 37.5-37.9 ms, captured (since `cuda_graph::MAX_TREE_POSITIONS`) 35.0-35.9, relaunched unchanged 28.0-28.5
+with 29 of 29 outputs bit-identical (the card already at 76 °C and 1,560 MHz of 1,755 in that arm, so a floor no
+lower than this). The capture took a third of the host's share; a replay would take the rest — on the near half
+(layers [0, 17), 17 of the 9B's 32) ~3.5-4 ms more a forward, beside the drafter's ~9-10.

@@ -5452,6 +5452,44 @@ every half-cache shape with base ≥ runs, against the matmul path over the same
 
 **Moved from `arch-inference.md` (trimmed 2026-11-17):** 2026-10-23, `decode_attn::past_runs`: every row sees the positions before the tree's base whole, so FA2 reads them non-causally in `auto_past_runs` runs - FlashInfer's cascade, merged by log-sum-exp in the one combine - from `PAST_FLASH_FROM` work; the run count never depends on the context's length because a captured check's allocations must not move.
 
+## A flowing forward of up to 16 rows is captured too (2026-11-23, #228)
+
+**What it replaced.** A tree's forward was captured only up to `cuda_graph::MAX_POSITIONS` (8) rows, the most
+the drafter's levels carry. A Qwen 3.5 split's NEAR forward carries every row its drafter call grew: two levels
+of 8, so 16 rows (`rows_a_forward` 16.4 over 69 forwards on the 9B Thailand-Australia link, `real_link_rf9b24_1123/`;
+the few wider ones a miss's corrected row or a copied run), and past 8 it ran op by op: ~20.6 ms a forward for
+layers [0, 17) of the 9B, against ~15 of card work.
+
+**The rule.** `SplitModel::wide_tree_may_be_captured(rows)` lets a forward of up to `cuda_graph::MAX_TREE_POSITIONS`
+(16) rows capture where: the tree FLOWS (a walk is set, which `model_worker::flow_walk_to_apply` does only for
+recurrent models, so dense flows keep 8); every attention layer reads it through the tiled tree kernel over the
+half cache (`decode_attn::tree_rows_tiled`, `layers::kv_half_on_card_enabled`) — past 8 rows the other tree kernel
+declines and the matmul path would read a mask made on the host; and `tree_steps_may_be_captured` holds as before.
+Past 8 rows the quantized products are MMQ's: each tile width's shared-memory limit is raised by its first launch,
+and a shape's first forward always runs uncaptured (`DecodeGraph` `first_of_shape`), so no capture sees that
+driver call. Held to 16, not the 32 a recurrent layer keeps: each width is a graph a reply may have to make.
+A/B `SWARMLLM_TREE_GRAPH_WIDE=0`.
+
+**Measured** (RTX 3070 Laptop, live node stopped, the safety kit on, `~/swarmllm-gate/deep/fr/wide_1123/`):
+- *Correctness*: `a_captured_wide_flowing_level_reads_as_the_ordinary_one` (16 rows, 7 levels) on the
+  Qwen3.5-9B Q4_K_M and the 0.8B Q8_0: 6 launched, 0 refused, 1 graph made, worst logit difference 0 against op by
+  op; the 8-row test unchanged (also 0). With the tiled kernel off (`SWARMLLM_TREE_ATTN_TILED=0`) nothing past 8
+  rows is captured and the test fails.
+- *Speed*, the whole 9B, 30 levels, `flowing_levels_pace_captured_and_op_by_op`: 16 rows op by op 37.5-37.6 ms,
+  captured 35.0-35.1 (with `SWARMLLM_TREE_GRAPH_WIDE=0` both read 37.9, 0 launched); 8 rows (captured before too)
+  op 30.0, captured 27.3-27.8 — the same ~2.5 ms. 16 rows cost only ~27% more than 8. Relaunched unchanged, 16
+  rows read 28.0-28.5 (`docs/plans/level_replay.md` § Expected gain). A later arm's second round read 55 ms a level
+  for both kinds: the card at 80-83 °C had dropped to 1,335-1,365 MHz (telemetry `wide-wsl.csv`), set aside.
+- *On the link* (the 9B Thailand-Australia split, parts 0-4 here, the 2B drafting, one binary, ABCDDCBA, 160-token
+  greedy replies, `~/swarmllm-gate/deep/fr/real_link_rf9b25_1123/`): this computer's near forward a reply, on
+  against off (`SWARMLLM_TREE_GRAPH_WIDE=0`), 21.8 / 22.0 against 23.0 / 22.2 ms (the warm reply), 18.5 / 19.0
+  against 19.6 / 20.6 (prose), 20.6 / 21.2 against 21.9 / 22.6 (code) — ~1.1 ms less, a 16-row graph made in every
+  on arm and none in the off arms. The replies stayed inside their spread (prose 17.16 / 17.46 against 17.35 /
+  16.28 tok/s, code 23.54 / 30.91 against 23.40 / 28.43): the drafter's 24-30 ms a forward varies more than that.
+
+**What a change must keep**: a wide capture only where every attention layer is tiled over the half cache;
+a shape's first forward uncaptured (MMQ's limit); 16 rows the ceiling unless a width's graph is recorded ahead.
+
 ## A tree level's rows are ranked on the card in two launches (2026-10-22, #134 (b))
 
 **What it replaced.** After each level the drafter ranks its rows — each row's log-sum-exp and its

@@ -85,6 +85,38 @@ pub(crate) fn requested() -> bool {
 /// past it they switch to the prompt path.
 pub(crate) const MAX_POSITIONS: usize = 8;
 
+/// The most rows a captured forward of a FLOWING tree may carry
+/// (`SplitModel::wide_tree_may_be_captured`): a flowing forward carries every
+/// row its drafter call grew — two levels of 8 on a Qwen 3.5 split — and past
+/// [`MAX_POSITIONS`] it ran op by op, ~20.6 ms a forward of 16 rows on the
+/// 9B's near half against ~15 of card work (TH↔AU, 2026-11-23). Past 8 rows
+/// every attention layer is the tiled tree kernel's over the half cache, the
+/// one it reads at 1-8 rows too, and the quantized products are MMQ's, whose
+/// tile width's shared-memory limit a shape's first forward raises outside
+/// any capture (a shape's first forward always runs uncaptured). Held to one
+/// whole call of 16 rows, not the 32 a recurrent layer keeps
+/// (`SsmState::MOST_ROWS_KEPT`): each width is a graph a reply may have to
+/// MAKE, which under WSL2 cost 0.1-9.8 s (#357 (d)). Prior art: llama.cpp
+/// (master, `ggml-cuda.cu` `ggml_cuda_graph_check_compability`) captures a
+/// graph of any batch size, refusing only a node that synchronizes, keys its
+/// graphs by shape and runs a shape's first call directly, as ours does; vLLM
+/// captures every batch size it serves in steps of 8
+/// (`cudagraph_capture_sizes`) and pads a batch up to one.
+pub(crate) const MAX_TREE_POSITIONS: usize = 16;
+
+/// On unless `SWARMLLM_TREE_GRAPH_WIDE=0`: a flowing tree's forward of up to
+/// [`MAX_TREE_POSITIONS`] rows may be captured; off, a tree's forward is
+/// captured up to [`MAX_POSITIONS`] only, as before — the A/B in one binary.
+pub(crate) fn wide_trees_requested() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("SWARMLLM_TREE_GRAPH_WIDE").as_deref(),
+            Ok("0") | Ok("off") | Ok("false")
+        )
+    })
+}
+
 /// On unless `SWARMLLM_TREE_GRAPH=0`: a forward of a tree's rows may be
 /// captured where the card's tree attention takes every layer
 /// (`SplitModel::tree_steps_may_be_captured`). Off, a tree's forward runs op

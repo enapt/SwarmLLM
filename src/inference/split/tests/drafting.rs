@@ -1194,7 +1194,35 @@ fn a_flowing_forward_refused_for_memory_keeps_the_conversation() {
 #[test]
 #[ignore = "needs a GGUF in SWARMLLM_GUESS_TEST_GGUF and a card"]
 fn a_captured_flowing_level_reads_as_the_ordinary_one() {
-    use crate::inference::cuda_graph::{DecodeGraphSlot, MAX_POSITIONS as LEVEL};
+    captured_flowing_levels_read_as_the_ordinary_ones(crate::inference::cuda_graph::MAX_POSITIONS);
+}
+
+/// The same at 16 rows a forward — a flowing forward that carries a whole
+/// drafter call of two 8-row levels, captured since `MAX_TREE_POSITIONS`
+/// (`SplitModel::wide_tree_may_be_captured`). Past 8 rows the file's quantized
+/// products are MMQ's and its gates go through the matmuls; the capture must
+/// read what they read op by op, and never be refused. Same file, card and
+/// switches, and `SWARMLLM_TREE_GRAPH_WIDE` not `0`.
+#[cfg(feature = "candle-cuda")]
+#[test]
+#[ignore = "needs a GGUF in SWARMLLM_GUESS_TEST_GGUF and a card"]
+fn a_captured_wide_flowing_level_reads_as_the_ordinary_one() {
+    assert_ne!(
+        std::env::var("SWARMLLM_TREE_GRAPH_WIDE").as_deref(),
+        Ok("0"),
+        "a forward past 8 rows is never captured under SWARMLLM_TREE_GRAPH_WIDE=0: run without it"
+    );
+    captured_flowing_levels_read_as_the_ordinary_ones(
+        crate::inference::cuda_graph::MAX_TREE_POSITIONS,
+    );
+}
+
+/// [`a_captured_flowing_level_reads_as_the_ordinary_one`] with `width` rows a
+/// level: the walk's line is row `width + 1`'s (level 1's child of row 1), its
+/// fifth level's row `5 * width + 1`.
+#[cfg(feature = "candle-cuda")]
+fn captured_flowing_levels_read_as_the_ordinary_ones(width: usize) {
+    use crate::inference::cuda_graph::DecodeGraphSlot;
     use crate::inference::draft_tree::DraftTree;
     let Ok(path) = std::env::var("SWARMLLM_GUESS_TEST_GGUF") else {
         eprintln!("SKIPPED captured flowing level: SWARMLLM_GUESS_TEST_GGUF not set");
@@ -1230,19 +1258,19 @@ fn a_captured_flowing_level_reads_as_the_ordinary_one() {
     // others' (five gathers a layer fewer refused every update, 2026-11-23).
     const LEVELS: usize = 7;
     let mut parents: Vec<Option<u16>> = Vec::new();
-    for i in 0..LEVEL {
+    for i in 0..width {
         parents.push((i > 0).then_some(0));
     }
     for level in 1..LEVELS - 1 {
-        for i in 0..LEVEL {
-            parents.push(Some(((level - 1) * LEVEL + i) as u16));
+        for i in 0..width {
+            parents.push(Some(((level - 1) * width + i) as u16));
         }
     }
-    parents.extend(std::iter::repeat_n(Some(41), LEVEL));
+    parents.extend(std::iter::repeat_n(Some((5 * width + 1) as u16), width));
     let walk_at = |level: usize| match level {
         0..3 => 0,
-        6 => 41,
-        _ => 9,
+        6 => (5 * width + 1) as u32,
+        _ => (width + 1) as u32,
     };
     let run = |model: &mut SplitModel, rid: &str| -> Vec<Vec<f32>> {
         let kv = KvCacheStore::new(std::time::Duration::from_secs(600));
@@ -1252,7 +1280,7 @@ fn a_captured_flowing_level_reads_as_the_ordinary_one() {
             .unwrap();
         let mut rows = Vec::new();
         for level in 0..LEVELS {
-            let sent = level * LEVEL..(level + 1) * LEVEL;
+            let sent = level * width..(level + 1) * width;
             let tokens: Vec<u32> = sent.clone().map(|i| (i * 37 % 900 + 11) as u32).collect();
             let shape = DraftTree::new(p, parents[..sent.end].to_vec()).unwrap();
             let input = model.tensor_from_ids(&tokens).unwrap();
@@ -1345,14 +1373,15 @@ fn flowing_levels_pace_captured_and_op_by_op() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(40);
-    // Rows a level (`SWARMLLM_PACE_ROWS`, 2-8): the link's drafter runs levels
+    // Rows a level (`SWARMLLM_PACE_ROWS`, 2-16): the link's drafter runs levels
     // of 1-8 rows, and a refusal inside the capture surfaced only below the
-    // quantized matmul's 7-row line (2026-11-23).
+    // quantized matmul's 7-row line (2026-11-23); a target's flowing forward
+    // carries a whole call, 16 rows (`cuda_graph::MAX_TREE_POSITIONS`).
     let width: usize = std::env::var("SWARMLLM_PACE_ROWS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(LEVEL)
-        .clamp(2, LEVEL);
+        .clamp(2, crate::inference::cuda_graph::MAX_TREE_POSITIONS);
     let mut parents: Vec<Option<u16>> = (0..width).map(|i| (i > 0).then_some(0)).collect();
     for level in 1..levels {
         for i in 0..width {

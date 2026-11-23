@@ -1258,7 +1258,13 @@ impl SplitModel {
                     None => true,
                     Some(capture) => self.graph_keeps_rows(capture),
                 };
-                if seq_len <= crate::inference::cuda_graph::MAX_POSITIONS
+                let widest = if self.draft_tree.is_some() && self.wide_tree_may_be_captured(seq_len)
+                {
+                    crate::inference::cuda_graph::MAX_TREE_POSITIONS
+                } else {
+                    crate::inference::cuda_graph::MAX_POSITIONS
+                };
+                if seq_len <= widest
                     && shape_may_be_captured
                     && self.image_spans.is_empty()
                     && lora_adapter.is_none()
@@ -1360,6 +1366,25 @@ impl SplitModel {
                 }
                 LayerVariant::DeepSeek { .. } => false,
             })
+    }
+
+    /// Whether a FLOWING tree's forward of `rows` may be captured past
+    /// `cuda_graph::MAX_POSITIONS`, up to `MAX_TREE_POSITIONS` — beside
+    /// [`Self::tree_steps_may_be_captured`], which the caller asks too. Only a
+    /// flow's (a tree check that does not flow sizes its rows by price, so its
+    /// widths are many) — and a walk is set only for a flow through recurrent
+    /// layers (`model_worker::flow_walk_to_apply`), so a dense model's flowing
+    /// forward keeps 8 rows — and only where every attention layer reads the tree
+    /// through the tiled kernel over the half cache
+    /// (`decode_attn::tree_rows_tiled`, `layers::kv_half_on_card_enabled`): past
+    /// 8 rows the other kernel declines and the matmul path would read a mask
+    /// made on the host, which refuses the capture. `SWARMLLM_TREE_GRAPH_WIDE=0`
+    /// keeps every tree's capture to 8 rows.
+    fn wide_tree_may_be_captured(&self, rows: usize) -> bool {
+        self.flow_walk.is_some()
+            && crate::inference::cuda_graph::wide_trees_requested()
+            && crate::inference::layers::kv_half_on_card_enabled()
+            && crate::inference::decode_attn::tree_rows_tiled(rows)
     }
 
     /// Why this model's decode steps may NOT be captured, if they may not. The
