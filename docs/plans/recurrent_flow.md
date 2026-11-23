@@ -311,9 +311,9 @@ followers in the same tree read whole; red (checked) without the walk: the secon
   were three tables every recurrent layer uploaded again (parents, walks, gather rows; each pageable copy waits for
   the stream to drain). Now one join and one gather a kind (`FlowRows::put` since the store, `rows_the_lines_read`), the
   tables uploaded once while their content stands (`qwen35::rows_on`), and the walk's replay in two launches
-  (`FlowRows::advance_to` hands `cuda::replay` buffers of its own). A/B `SWARMLLM_FLOW_ROWS=per-layer`
+  (`FlowRows::advance_to` hands `cuda::replay` buffers of its own). A/B `SWARMLLM_FLOW_STORE=per-layer`
   (+ `SWARMLLM_SSM_REPLAY=composed`).
-  **Measured** (`real_link_rf9b3_1122/`, same rig, ABBA, old arms `SWARMLLM_FLOW_ROWS=per-layer
+  **Measured** (`real_link_rf9b3_1122/`, same rig, ABBA, old arms `SWARMLLM_FLOW_STORE=per-layer
   SWARMLLM_SSM_REPLAY=composed`): the drafter's call **43.2-45.3 → 38.8-42.2 ms** a flowing forward, the head's 17
   layers unchanged (22.0-25.1 → 22.1-23.8); prose 12.19, 12.84 against 10.94, 11.27, 12.03, code 22.50, 20.80, 19.24
   against 24.99, 20.03, 19.62 — within the runs' spread. The count arm: a drafter level **870 → 705 launches**, host
@@ -325,7 +325,7 @@ followers in the same tree read whole; red (checked) without the walk: the secon
   store, store, 2B, joined, store + count): each kind's rows in a buffer made for twice the rows kept (half as many
   again since the memory refusals below), a forward's
   new rows copied once after the rows written (`FlowRows::put`), a row the walk left kept in place until the buffer
-  is full (`FlowRows::make_room`); the joined arm is `SWARMLLM_FLOW_ROWS=joined`. Drafting a flowing forward with
+  is full (`FlowRows::make_room`); the joined arm is `SWARMLLM_FLOW_STORE=joined`. Drafting a flowing forward with
   Qwen3.5-0.8B Q8_0: store **36.9-38.5 ms** (prose 37.7-38.5, code 36.9-37.7) against joined 38.4-40.5; tok/s within
   the runs' spread — store prose 12.89, 14.00, 14.14, code 22.73, 23.36, 27.26; joined prose 12.77, 13.05, 13.47,
   code 22.46, 25.52, 26.68. The count arm: a level **705 → 644 launches** (`copy2d_f32` 202 → 137), the head's 17

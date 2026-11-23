@@ -656,7 +656,7 @@ impl DeltaNetWeights {
         // the held rows to the new ones anew each forward was two copies a kind
         // a layer, 202 of a drafter level's 705 launches with the gathers 100
         // (2026-11-22, Qwen3.5-0.8B, `SWARMLLM_COUNT_KERNELS`). Copies and
-        // gathers only, so the same bits every way. A/B `SWARMLLM_FLOW_ROWS=
+        // gathers only, so the same bits every way. A/B `SWARMLLM_FLOW_STORE=
         // joined` (that), `=per-layer` (before it).
         let mode = flow_rows_mode();
         flow.make_room(seq_len)?;
@@ -674,7 +674,7 @@ impl DeltaNetWeights {
         // where the store keeps them, through the table (`SlotTable`): the
         // gather a kind and the gates' stack were 7 of a layer's 12 copies, 126
         // launches of a drafter level (2026-11-23). The same values in the same
-        // order: the same bits. A/B `SWARMLLM_FLOW_ROWS=gathered`.
+        // order: the same bits. A/B `SWARMLLM_FLOW_STORE=gathered`.
         let in_place = read_rows
             .as_ref()
             .filter(|_| device.is_cuda() && flow_reads_in_place());
@@ -2151,7 +2151,7 @@ fn tree_parents_now(seq_len: usize) -> CandleResult<Option<Vec<Option<usize>>>> 
 /// (`SsmState::stage_flowing_level`): inside one, a miss refuses the capture
 /// rather than upload — a pageable copy there is replayed from the host
 /// address (gotcha #758). Kept in a `static` — never dropped, so no card
-/// memory is freed after the context at exit. A/B `SWARMLLM_FLOW_ROWS=per-layer`.
+/// memory is freed after the context at exit. A/B `SWARMLLM_FLOW_STORE=per-layer`.
 ///
 /// Prior art: llama.cpp sets a graph's inputs once a micro-batch
 /// (`llm_graph_input_*::set_input` — positions, masks, `s_copy`) and every
@@ -2238,8 +2238,9 @@ const ROW_TABLES_HELD: usize = 16;
 static ROWS_ON_CARD: std::sync::Mutex<Vec<(Vec<u32>, Device, Tensor)>> =
     std::sync::Mutex::new(Vec::new());
 
-/// How a flowing layer keeps its rows' inputs (`SWARMLLM_FLOW_ROWS`, read
-/// once). The three give the same bits; they differ in copies and launches.
+/// How a flowing layer keeps its rows' inputs (`SWARMLLM_FLOW_STORE`, read
+/// once; named `SWARMLLM_FLOW_ROWS` until 2026-11-23, which also set the
+/// rows a drafter level — `dsd_flow::rows_a_level` — and still does). The three give the same bits; they differ in copies and launches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FlowRowsMode {
     /// The default: a forward's new rows are copied once, in place, after the
@@ -2260,7 +2261,7 @@ enum FlowRowsMode {
 
 fn flow_rows_mode() -> FlowRowsMode {
     static MODE: std::sync::OnceLock<FlowRowsMode> = std::sync::OnceLock::new();
-    *MODE.get_or_init(|| match std::env::var("SWARMLLM_FLOW_ROWS").as_deref() {
+    *MODE.get_or_init(|| match std::env::var("SWARMLLM_FLOW_STORE").as_deref() {
         Ok("per-layer") => FlowRowsMode::PerLayer,
         Ok("joined") => FlowRowsMode::Joined,
         _ => FlowRowsMode::Stored,
@@ -2269,7 +2270,7 @@ fn flow_rows_mode() -> FlowRowsMode {
 
 /// Whether a flowing forward's kernels read each kind's rows where the store
 /// keeps them, through a [`SlotTable`] — the default — rather than gathered
-/// out first: `SWARMLLM_FLOW_ROWS=gathered` gathers them, as before
+/// out first: `SWARMLLM_FLOW_STORE=gathered` gathers them, as before
 /// 2026-11-23. Read once.
 ///
 /// Prior art: vLLM's PagedAttention (Kwon et al., SOSP 2023) reads a
@@ -2280,7 +2281,7 @@ fn flow_reads_in_place() -> bool {
     *ON.get_or_init(|| {
         flow_rows_mode() == FlowRowsMode::Stored
             && !matches!(
-                std::env::var("SWARMLLM_FLOW_ROWS").as_deref(),
+                std::env::var("SWARMLLM_FLOW_STORE").as_deref(),
                 Ok("gathered")
             )
     })
@@ -2317,7 +2318,7 @@ impl SlotTable {
     }
 }
 
-/// `SWARMLLM_FLOW_ROWS=per-layer`: [`rows_on`] copies every table for every
+/// `SWARMLLM_FLOW_STORE=per-layer`: [`rows_on`] copies every table for every
 /// layer, as before 2026-11-22.
 #[cfg(feature = "candle-cuda")]
 fn flow_rows_as_before() -> bool {

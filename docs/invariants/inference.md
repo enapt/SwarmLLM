@@ -6193,14 +6193,14 @@ width keeps +36% (the 11-18 processor measure). Now the layer reads the whole tr
   launches in copies and 98 in gathers — every recurrent layer gathered its earlier rows, joined them
   to the new ones and the new ones to the held ones apart — and 55 of 59 host-to-card copies in three
   tables (parents, walks, gather rows) uploaded again a layer; a pageable copy waits for the stream to
-  drain. Then a join of each kind once (`SWARMLLM_FLOW_ROWS=joined`), `rows_the_lines_read` gathers the lines'
+  drain. Then a join of each kind once (`SWARMLLM_FLOW_STORE=joined`), `rows_the_lines_read` gathers the lines'
   rows from that, `qwen35::rows_on` keeps a table on the card while its content stands (the
   content-keyed cache `CudaDevice::layout_params` set the pattern; llama.cpp fills
   `llm_graph_input_*::set_input` once a graph), and the walk's replay runs in two launches with
   buffers of its own (`FlowRows::advance_to`). A level 870 → 705 launches, copies 59 → 7; the
   drafter's call 43-45 → 39-42 ms a forward on the TH↔AU link. Copies and gathers only: bit for bit on
   the processor (both arms of `a_flowing_tree_through_a_recurrent_model_reads_each_rows_path`) and
-  the three card tests pass in both arms. A/B `SWARMLLM_FLOW_ROWS=per-layer`.
+  the three card tests pass in both arms. A/B `SWARMLLM_FLOW_STORE=per-layer`.
   **Then a store a kind** (2026-11-23): the join copied the held rows again every forward (two copies a
   kind a layer); now each kind's rows sit in a buffer made for half as many again as the rows kept
   (twice until the memory refusals below), a forward's new rows
@@ -6216,7 +6216,7 @@ width keeps +36% (the 11-18 processor measure). Now the layer reads the whole tr
   budget) and on the 9B's head (308 + 184 of 491), the flow's drafter or the flow itself lost and the
   reply 7.5-8 tok/s (`real_link_rf9b7_1123/`, `real_link_rf9b8_1123/` arm 5). A level 705 → 644 launches (`copy2d_f32` 202 → 137);
   the drafter's call 38.4-40.5 → 36.9-38.5 ms a forward on the TH↔AU link, tok/s within the runs'
-  spread (`real_link_rf9b5_1123/`). The joined arm stays the A/B: `SWARMLLM_FLOW_ROWS=joined`.
+  spread (`real_link_rf9b5_1123/`). The joined arm stays the A/B: `SWARMLLM_FLOW_STORE=joined`.
   **And a level is captured** (2026-11-23, A/B `SWARMLLM_FLOW_GRAPH=0`): everything a level makes
   outside a kernel — replay, tables, scratch pair, room, the memory claim — is made before the capture,
   and a captured level always gathers its lines' rows (one topology, or every update is refused).
@@ -6230,7 +6230,8 @@ width keeps +36% (the 11-18 processor measure). Now the layer reads the whole tr
   go of memory made before the capture inside the captured body (gotchas #1163, #1165), and the same
   kernels whatever the level reads. → `docs/plans/recurrent_flow.md` § Stage 5,
   "Captured levels".
-  **And the kernels read the store in place** (2026-11-23, A/B `SWARMLLM_FLOW_ROWS=gathered`): a DeltaNet
+  **And the kernels read the store in place** (2026-11-23, A/B `SWARMLLM_FLOW_STORE=gathered`; the store's
+  A/B was `SWARMLLM_FLOW_ROWS=` until that day, the variable a drafter level's row count reads too): a DeltaNet
   layer's bookkeeping was 12 launches — 5 puts, 5 gathers (`index_select` → `is_u32_f32`) and 2 copies
   stacking g and beta for the delta rule. The convolution and the delta rule now take the store itself
   and the lines' slot table (`qwen35::SlotTable`; `ssm_conv_silu_tree_stored_f32_k4`,
