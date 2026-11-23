@@ -1380,11 +1380,31 @@ impl SplitModel {
     /// 8 rows the other kernel declines and the matmul path would read a mask
     /// made on the host, which refuses the capture. `SWARMLLM_TREE_GRAPH_WIDE=0`
     /// keeps every tree's capture to 8 rows.
+    ///
+    /// **And only where no layer has experts** (pre-release review of v0.3.309):
+    /// a Qwen 3.5 mixture of experts (Qwen3.6-35B-A3B) with its experts stacked
+    /// on the card multiplies more than a few rows with `moe_gemm_gguf_prefill`,
+    /// whose sort runs through Thrust — scratch it may take with a plain
+    /// `cudaMalloc`, which a capture in thread-local mode refuses. Only the 8-row
+    /// path was ever captured with experts; the wide capture measured within
+    /// the link's spread (`docs/invariants/inference.md` § "A flowing forward of
+    /// up to 16 rows is captured too"), so such a model keeps 8 rows rather
+    /// than spend refusals and leaked scratch finding out.
+    /// Prior art: CUDA's stream-capture rules (`cudaStreamCaptureModeThreadLocal`
+    /// refuses a potentially unsafe call such as `cudaMalloc` on the capturing
+    /// thread); llama.cpp captures only after a warm-up shows the graph stable.
     fn wide_tree_may_be_captured(&self, rows: usize) -> bool {
         self.flow_walk.is_some()
             && crate::inference::cuda_graph::wide_trees_requested()
             && crate::inference::layers::kv_half_on_card_enabled()
             && crate::inference::decode_attn::tree_rows_tiled(rows)
+            && self.layers.iter().all(|layer| match layer {
+                LayerVariant::Dense(lw) => matches!(lw.ffn, FfnVariant::Dense(_)),
+                LayerVariant::Qwen35Attn { ffn, .. } | LayerVariant::Qwen35Ssm { ffn, .. } => {
+                    matches!(ffn, FfnVariant::Dense(_))
+                }
+                LayerVariant::DeepSeek { .. } => false,
+            })
     }
 
     /// Why this model's decode steps may NOT be captured, if they may not. The

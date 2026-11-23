@@ -5490,6 +5490,13 @@ A/B `SWARMLLM_TREE_GRAPH_WIDE=0`.
 **What a change must keep**: a wide capture only where every attention layer is tiled over the half cache;
 a shape's first forward uncaptured (MMQ's limit); 16 rows the ceiling unless a width's graph is recorded ahead.
 
+**Not with experts (2026-11-23, the v0.3.309 pre-release review).** A Qwen 3.5 mixture of experts with its experts
+stacked on the card multiplies more than a few rows with `moe_gemm_gguf_prefill`, whose sort runs through Thrust and
+may take scratch with a plain `cudaMalloc` — refused inside a thread-local capture. Only the 8-row path was ever
+captured with experts, and the wide capture measured within the link's spread, so `wide_tree_may_be_captured` keeps
+such a model to 8 rows; to widen it, run `flowing_levels_pace_captured_and_op_by_op` at `SWARMLLM_PACE_ROWS=16` on a
+Qwen 3.5 MoE file first.
+
 ## A tree level's rows are ranked on the card in two launches (2026-10-22, #134 (b))
 
 **What it replaced.** After each level the drafter ranks its rows — each row's log-sum-exp and its
