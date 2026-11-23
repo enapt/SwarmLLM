@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.3.308-alpha] — 2026-11-23
+
+**A Qwen 3.5 split's first reply after a computer starts guesses ahead again.** A computer restarts at every update,
+and its first split reply after a start never grew the flowing tree of guesses: it fell back to one guess per round
+trip, at about 7 tok/s on the Thailand-Australia 9B split, and only the replies after it flowed. The check asked
+whether this computer's part runs on its card by asking a worker that does not exist before the first reply. It
+now weighs the part as the planner did. On that link each fresh computer's first reply flowed: 12.35 and 11.34 tok/s
+on 64-token replies, against about 7.
+
+**The guessing model's steps make fewer card launches.** A step of the small Qwen 3.5 guessing model is bound by
+how many kernels the computer records, not by the card's arithmetic. Two cuts, each giving the same results:
+- **Gates:** the Q8_0 gate weights of the 9B and of the 0.8B and 2B guessing models are read where they lie, in one
+  launch instead of five (an 8-row step 739 -> 667 launches).
+- **Kept rows:** the recurrent layers read the tree's kept rows where they are stored instead of copying each kind
+  out first (a further 126 launches fewer a step; A/B `SWARMLLM_FLOW_STORE=gathered`).
+
+On the 9B link above, this computer's guessing and its own layers each took about 1-1.6 ms less a forward; reply
+speeds stayed within the runs' spread (prose 13-15, code 22-28 tok/s).
+
+**For diagnosing:** a flowing split's last log line says which side was the slower: this computer's own time a
+forward (`here_ms_a_forward`) beside the far computer's (`far_said_ms_median`). `SWARMLLM_GRAPH_PARAM_DIFF=1` prints
+which kernel, copy and set parameters changed between two captures of the same step, the first map of what a
+replayed step would have to hold fixed. The Qwen 3.5 layers' kept-rows test switch is now
+`SWARMLLM_FLOW_STORE=gathered|joined|per-layer`: it shared `SWARMLLM_FLOW_ROWS` with the guessing model's rows a
+level, so the two could not be set at once.
+
 ## [0.3.307-alpha] — 2026-11-23
 
 **Qwen 3.5, 3.6 and 3.8 models split across computers now guess ahead in a tree that flows through the pipeline, by
