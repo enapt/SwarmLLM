@@ -170,7 +170,7 @@ bit in both arms: the card against the processor, lines read alone, a fresh read
 ordinary on all three models.
 
 What is left of a level, in order: the card's own time (the next lever, kernel by kernel), the rest of
-`advance_to` (two fresh state pairs — no longer zeroed, below — and two replays a layer), `make_room`'s growth on the levels that grow the
+`advance_to` (two fresh state pairs — no longer zeroed, below — and two replays a layer), `make_room`'s growth (one gather a kind since 2026-11-24, below) on the levels that grow the
 store (3.6-3.9 ms against ~1.8), and the anchor copy (~0.24 ms). The replay waits until those are smaller than the
 recording it removes.
 
@@ -207,3 +207,16 @@ paths NaN-filled targets (red when one is planted). One binary, alternating arms
 (`~/swarmllm-gate/deep/fr/target_1124/`): memsets in a 12-level 0.8B trace 5,111 → 3,527; an 8-row level captured
 (min / median of six) 0.8B 7.92 / 8.04 → 7.61 / 7.71 ms, 2B 12.27 / 12.39 → 12.01 / 12.10; captured against
 ordinary bit for bit on the 0.8B, 2B and 9B.
+
+### A full store grows in one gather a kind (2026-11-24)
+
+One level in three grows the store on the 0.8B (8-row levels; `store_capacity_for` makes room for half as many again
+as the rows kept), and a growth was a zero-filled store a kind, the kept rows gathered apart, then copied in: 90
+fills, 180 allocations and 180 launches over the 18 recurrent layers' five kinds, which an nsys trace split by level
+put at ~2 ms of a growth level. `FlowRows::make_room` now makes each new store in ONE gather: the kept rows' slots,
+padded to the capacity with the first of them — a row past the kept ones is read only after `put` writes it. A/B
+`SWARMLLM_FLOW_GROWTH=copied`. One binary, alternating arms, the node stopped (`~/swarmllm-gate/deep/fr/growth_1124/`):
+fills in a 12-level trace 3,527 → 2,447 and launches 26,325 → 25,245 (90 each a growth); the MEAN of a run's levels
+(what a reply pays — a median hides the growth levels) 0.8B 8.39-8.85 → 7.77-8.17 ms, the slowest third 9.98-11.12
+→ 8.24-9.10; 2B 12.71-12.97 → 12.28-12.63, slowest third 14.16-14.58 → 12.78-13.22; captured against ordinary bit for
+bit on the 0.8B, 2B and 9B, and the processor's flowing tests red with the kept rows' slots rotated by one.

@@ -1715,18 +1715,42 @@ impl FlowRows {
             self.store.capacity = capacity;
             return Ok(());
         };
-        let at = match self.slots.is_empty() {
-            true => None,
-            false => Some(rows_on(self.slots.clone(), &device)?),
+        // ONE gather a kind makes the whole new store: the kept rows' slots,
+        // then the first of them again up to the capacity — rows past the
+        // kept ones are only ever read after `put` writes them (a table names
+        // no slot past the rows written, `rows_the_lines_read`), so what they
+        // hold first is never read. It was a zero-filled store, the kept rows
+        // gathered apart and copied in: 90 fills, 180 allocations and 180
+        // launches a growth of the 0.8B drafter's 18 layers, ~2 ms (nsys,
+        // 2026-11-24). A/B `SWARMLLM_FLOW_GROWTH=copied`.
+        //
+        // Prior art: llama.cpp has dropped its cache defragmentation and vLLM
+        // never compacts — both read through tables, as this store does
+        // between growths; a growth is the one copy left.
+        let copied = flow_growth_copied();
+        let at = match self.slots.first() {
+            None => None,
+            Some(&first) => {
+                let mut at = self.slots.clone();
+                if !copied {
+                    at.resize(capacity, first);
+                }
+                Some(rows_on(at, &device)?)
+            }
         };
         for kind in self.store.kinds.iter_mut().flatten() {
-            let mut dims = kind.dims().to_vec();
-            dims[1] = capacity;
-            let fresh = Tensor::zeros(dims, kind.dtype(), kind.device())?;
-            if let Some(at) = &at {
-                fresh.slice_set(&kind.index_select(at, 1)?, 1, 0)?;
-            }
-            *kind = fresh;
+            *kind = match &at {
+                Some(at) if !copied => kind.index_select(at, 1)?,
+                _ => {
+                    let mut dims = kind.dims().to_vec();
+                    dims[1] = capacity;
+                    let fresh = Tensor::zeros(dims, kind.dtype(), kind.device())?;
+                    if let Some(at) = &at {
+                        fresh.slice_set(&kind.index_select(at, 1)?, 1, 0)?;
+                    }
+                    fresh
+                }
+            };
         }
         self.slots = (0..self.kept.len() as u32).collect();
         self.store.len = self.kept.len();
@@ -2319,6 +2343,15 @@ enum FlowRowsMode {
 fn path_inputs_gathered() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("SWARMLLM_FLOW_PATH").as_deref() == Ok("gathered"))
+}
+
+/// Whether a full store grows as before 2026-11-24 — zero-filled, the kept
+/// rows gathered apart and copied in (`SWARMLLM_FLOW_GROWTH=copied`, the A/B
+/// inside one binary) — rather than in one gather a kind
+/// ([`FlowRows::make_room`]). Read once.
+fn flow_growth_copied() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SWARMLLM_FLOW_GROWTH").as_deref() == Ok("copied"))
 }
 
 fn flow_rows_mode() -> FlowRowsMode {
