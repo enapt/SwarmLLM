@@ -274,3 +274,10 @@ Q6_K.
 interleaved, cooled). What MMQ still runs in a level: the Q6_K `ffn_down` of 16 layers and `attn_v`, the 1,024-row keys
 and values (each with an 8.5 µs stream-k fixup), and the head — Q6_K next (`docs/invariants/inference.md` § "Q5_K on
 the same kernel").
+
+**Q6_K on a kernel of its own** (2026-11-24, `mul_mat_q6_k_rows_tc_{8,16,24}`: 210-byte blocks staged as 16-byte-aligned
+224-byte windows, per-16 scales combined in integers; A/B `SWARMLLM_QMATMUL_ROWS_TC_K=q4k,q5k`): the 9B's captured
+level 27.35-27.44 → 26.29-26.57 ms at 16 rows and 22.20-24.45 → 21.25-21.53 at 8 (best three of five, interleaved,
+cooled). What MMQ still runs in a level is the 1,024-row keys and values, ~21 products and their fixups, ~0.4 ms of
+~22 — the row kernels are 71% of the level's kernel time (`docs/invariants/inference.md` § "Q6_K: aligned windows
+over 210-byte blocks").

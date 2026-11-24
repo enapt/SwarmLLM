@@ -4829,7 +4829,9 @@ are 54,528 bytes, past the 48 KB any launch may ask for: the launcher raises the
 launch (`CudaFunction::set_attribute`). MMQ's few-rows rule keeps every raise off the capturing thread by caution
 (gotcha #841 was a POOL query that invalidated a capture); a function attribute is not a stream operation, and the
 card test's captured 24-row Q5_K product — the raise inside a THREAD_LOCAL capture, as `cuda_graph` captures — gives
-a valid graph and the uncaptured product's bits. Two stages fit under 48 KB but were 3-24% slower at 24 rows.
+a valid graph and the uncaptured product's bits. Two stages fit under 48 KB but were 3-24% slower at 24 rows — issued
+AFTER the arithmetic; issued before it they were faster, and 17-24 rows run so since the same day, with no raise
+(§ "17-24 rows: two stages, the next issued early").
 
 **Bench** (`~/swarmllm-gate/deep/fr/rowstc_1124/rowstc_q5k.cu`, `q5k.log`; MMQ type 13 → this kernel, four warps and
 three stages as shipped, the floor in brackets, µs, one pass over K): 9B `attn_qkv` at 8 rows 91.3 → 68.4, 16 rows
@@ -4853,9 +4855,85 @@ arms); Phi-3.5's first token ranks 4-16 on EVERY arm (the scorer's, not the kern
 gaps ≤ 2.7, identically on both arms. In a real Phi-3.5 reply (`SWARMLLM_COUNT_KERNELS=1`) `mul_mat_q5_k_rows_tc_24`
 and `_8` each ran once a layer (the prompt, then the speculative checks).
 
-**What a change must keep** — the Q4_K kernel's list, and: the raise of the limit stays before the launch that needs
-it (a module loaded on a new card starts at 48 KB); A/B `SWARMLLM_QMATMUL_ROWS_TC_K=q5k` (this type alone) /
+**What a change must keep** — the Q4_K kernel's list, and: a launch asking past 48 KB of shared memory needs the
+kernel's limit raised before it (a module loaded on a new card starts at 48 KB) — none does since the 17-24-row
+staging, and the launcher refuses a layout that would; A/B `SWARMLLM_QMATMUL_ROWS_TC_K=q5k` (this type alone) /
 `=q4k` (the other alone).
+
+### Q6_K: aligned windows over 210-byte blocks (2026-11-24)
+
+**Why it matters.** Every Q4_K_M file keeps `ffn_down` as Q6_K in half its layers, and usually `attn_v` and the output
+head (llama.cpp's quantizer rules): the 9B's down 4,096 × 12,288 in 16 layers and its 248,320 × 4,096 head, a 14B's
+5,120 × 13,824 in 24, a 27B's 5,120 × 17,408, Mistral's 4,096 × 14,336, Qwen2.5-7B's 3,584 × 18,944, Llama 3.2 3B's
+3,072 × 8,192, Gemma 2 2B's 2,304 × 9,216 (census of the test set's headers, 2026-11-24). MMQ read them at 1.3-1.9x
+the time of streaming their bytes once at 8-24 rows; the 9B's head alone is 2.8 ms of a 16-row level.
+
+**Prior art.** llama.cpp's `dequantize_row_q6_K` / `load_tiles_q6_K`: `ql[128]` low nibbles, `qh[64]` two high bits
+each, `int8 scales[16]` (one per 16 values), `half d` at byte 208; value l of sub-block j is the nibble of
+`ql[64 (j / 4) + 32 (j & 1) + l]` (the high one for `(j & 3) >= 2`) with bits `2 (j & 3)` of `qh[32 (j / 4) + l]` as
+16 and 32, less 32 (`__vsubss4(q, 0x20202020)`); no minimum. CUTLASS's multistage mainloop issues the next stage's
+copy right after the barrier that frees its slot.
+
+**The kernel.** `swarm_q6k_rows_tc<NT>`, not the Q4_K template: 210 is not a multiple of 16, so a row's blocks start at
+every even offset of a 16-byte line and cannot be copied block by block. A stage copies the 16-byte-aligned 224-byte
+WINDOW covering each row's block (14 `cp.async` of 16 bytes) and reads a word at a 2-mod-4 offset from two aligned
+ones by `__funnelshift_r`; the last row's window reaches at most 14 bytes past the weight's last block, inside the
+`MATRIX_ROW_PADDING` (512 elements = 420 bytes of Q6_K) every quantized card buffer is allocated with — every
+`PaddedCudaSlice` constructor in `quantized/cuda.rs` pads so, and a new one must. The −32 is done a byte at a time
+with no borrow leaving a byte (each byte's top bit set first, XOR'd back after): three operations where
+`__vsubss4` compiles to eight (`cuobjdump -sass`): the 9B down at 16 rows 163.7 → 139.8 µs, 2-15% on the large
+weights. Per-16 scales: each
+16-value half of a sub-block is one `mma.m16n8k16` with its own scale, and the two integer sums are combined by their
+scales IN INTEGERS (`lo · sc0 + hi · sc1`, |sum| ≤ 2 · 16 · 32 · 127 · 128 < 2^24, so exact) before ONE fused step a
+sub-block — the same bits every launch, a row's outputs independent of the rows beside it. Two stages, the next
+issued right after the barrier: 42,496 bytes at 24 rows, under 48 KB, no limit raised.
+
+**Bench** (`~/swarmllm-gate/deep/fr/rowstc_1124/rowstc_q6k_v{3,4}.cu`, `q6k_v{3,4}.log`; MMQ type 14 → this kernel at
+four warps and two stages as shipped, the floor in brackets, µs, the live node stopped): 9B down at 8 rows 159.2 →
+124.0, 16 rows 172.7 → 142.4, 24 rows 189.9 → 155.2 (113.5); 14B down at 16 rows 236.8 → 172.6 (158.8); 27B down at 16
+rows 376.6 → 220.8 (198.9); the 9B head at 16 rows 2,787 → 2,343 (2,245), Llama's 128,256-row head 1,635 → 1,254
+(1,169); Gemma 2 2B down at 16 rows 83.9 → 64.8 (48.6). The four variants measured on every shape (`v3`): issuing the
+next stage early and the integer combine each alone were mixed; together 2-19% faster than neither and 8-22% faster
+than the integer combine with the next stage issued after (each its best configuration), and two stages beat three
+at 16-24 rows. The weight-row line: 2,048 rows (0.75-0.85x of MMQ at 2,048-2,560 rows,
+within 2% at a 3B's 3,072 × 8,192 at 24); 1,536 rows 0.97-1.07x and 1,024-row values 1.1-1.4x, so those stay on MMQ.
+Every output within 3.1e-7 of the f64 product of its own terms, the same bits twice.
+
+**In a level** (the whole Qwen3.5-9B Q4_K_M through the pace probe, `SWARMLLM_QMATMUL_ROWS_TC_K=q4k,q5k` against all
+three, interleaved ×5 an arm and cooled under 65 °C, the live node stopped; `~/swarmllm-gate/deep/fr/rowstc_stage_1124/`):
+captured at 16 rows 27.35-27.44 → 26.29-26.57 ms a level, op by op 29.8-30.4 → 28.8-29.2; captured at 8 rows the arms'
+best three 22.20-24.45 → 21.25-21.53, op by op 24.89-25.34 → 23.97-24.66 (two runs of each arm ran warm and slower,
+both arms alike). The level's nsys (8 rows): the three row kernels are 71% of its kernel time — Q6_K 17 products a
+level (16 `ffn_down`, the head) — and MMQ keeps only the 1,024-row keys and values, ~21 products a level at 14 µs each
+plus a 4.5 µs stream-k fixup apiece (~0.4 ms of a ~22 ms level).
+
+**Replies** (a release-built daemon, greedy, 200 tokens; Llama 3.2 3B, Qwen2.5-Coder-7B and Gemma 2 2B, all
+Q4_K_M; `~/swarmllm-gate/deep/fr/rowstc_q6k_1124/`): Q6_K off and on twice each, scored against llama.cpp
+(`score_against_reference.py`) — eight of the nine prompts read the same in all four runs, six of them llama.cpp's
+first choice at every token; on Gemma's code reply the first off run left the first choice at three near-ties (gap ≤
+0.187), the other three runs at one (0.179). No reply with Q6_K on scored worse. The kernel fired in the reply
+(`count_on.node.log`: `mul_mat_q6_k_rows_tc_8` 15 a step on Llama 3.2 3B's 8-row checks — 14 `ffn_down` and the head),
+and the daemon carrying the staging below wrote the nine replies byte for byte as the first.
+
+### 17-24 rows: two stages, the next issued early (2026-11-24)
+
+The Q6_K bench found that issuing the next stage's copy right after the barrier (CUTLASS's multistage order) beat
+issuing it after the arithmetic, and the Q4_K / Q5_K kernel was measured again both ways
+(`~/swarmllm-gate/deep/fr/rowstc_1124/rowstc_q{4,5}k_early.cu`, `q{4,5}k_early.log`, four warps, the live node
+stopped). At 24 rows two stages issued early beat the shipped three issued after on EVERY 4,096+-row weight, 1-24%:
+Q5_K `attn_qkv` 108.4 → 83.2 µs, `ssm_out` 55.0 → 43.9, a 14B's Q5_K down 183.8 → 144.0; Q4_K 9B up 108.8 → 94.9,
+27B up 184.8 → 170.6, 7B up 123.6 → 112.4, 9B down 116.5 → 111.2. The cause is occupancy: three Q5_K stages at 24
+rows are 54,528 bytes, and a multiprocessor of compute 8.6 holds 100 KB, so ONE block where two stages (36,352) let
+two run. At 8 and 16 rows the result was mixed — two stages up to 22% slower on the widest weights (Q5_K `attn_qkv`
+at 8 rows 67.6 → 77.9, Phi-3.5's at 16 61.3 → 74.8), within a few percent or faster elsewhere — so they keep three
+issued after. The kernel's `STAGES` is a function of its width (`NT == 3 ? 2 : 3`), the launcher's table carries the
+same, and the largest launch is now Q5_K at 16 rows, 47,616 bytes: no launch raises a limit, and
+`mul_mat_k_quant_via_rows_tc` refuses a layout past 48 KB rather than let it fail at launch. The arithmetic and its
+order are untouched, so the bits are: `a_few_rows_k_quant_product_on_the_tensor_cores_is_each_rows_own` holds every
+width's rows to the 24-row product's bit for bit, across the two stagings. Measured in that test's trace (nsys, the
+previous binary against this one): Q5_K at 24 rows 13.69 → 12.43 µs a product on average, Q4_K 11.36 → 11.04, every
+other width within 0.3 µs — the change is the 24-row kernels' alone; its card tests pass and the replies above are
+byte for byte the same.
 
 ### Tried and reverted: smaller MMQ tiles for 9-40 rows (2026-10-22)
 
