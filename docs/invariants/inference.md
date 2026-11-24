@@ -5199,6 +5199,75 @@ TinyLlama worst gap 0.024 against 0.130; Gemma 3 1B over four prompts 20 picks m
 llama.cpp's first choice against 16, 8 against 9 more than 0.3, worst 1.0 against 1.9 — the same
 spread, no shift; Qwen 3.5 0.8B one each.
 
+### A decode step over the half cache runs on the tensor cores (2026-11-25, FUTURE_WORK #309)
+
+**What.** `decode_attn_mma_f16kv_d{64,128}`: one WARP owns a run of `chunk` positions of one KV
+head and every query head of its group, sixteen positions a step, with no shared memory and no
+barrier. The query heads are the 16 rows of `mma.m16n8k16` (a group of up to 16; rows past
+`n_rep` are zeros and never written), so the scores are `Q · K^T` with K's rows read as B's
+columns straight from the cache in 32-bit half pairs, and `Σ P·V` takes the two score tiles'
+accumulators as its A fragment (FlashAttention-2's register reuse) with V's pairs gathered from
+two rows. An online softmax runs over the run's 16-position steps and the run writes the old
+kernels' `partial` layout, so `decode_attn_combine_f32` merges it unchanged. **`decode_attn::mma_takes`**
+is the one rule: a decode step (no tree), the half cache, merged, d 64 or 128, ≤ 16 query heads, every
+K/V row on 4 bytes, a PTX of sm_80+ (build.rs hands `SWARMLLM_KERNEL_PTX_CAP` to the crate). It reads
+neither the cache length nor the card, so a captured step keeps one kernel as the cache grows (§ "Its
+chunk follows the cache length": the kernel may not change in an update) and which kernel runs
+depends on the file only — though not its bits: `mma` adds its products in an order PTX does not fix,
+so a reply may differ between card generations (review, 2026-11-25). A/B `SWARMLLM_DECODE_ATTN_MMA=0`.
+
+**What it replaced, and why the shape.** nsys on the 7B at ~960 positions put our decode attention
+at 45.5 + 10.8 µs a layer (1.57 ms a token) against llama.cpp's `flash_attn_ext_f16<128,128,1,8>`
+13.7 + 3.0 — the whole of the card decode's remaining gap, growing with the cache (49.4 tok/s from a
+4,096-token prompt against llama-bench's 60.5). Two bodies that kept more loads in flight inside
+the old block — 10-19 and 11-25, the second bit-identical, local branch `decode-attn-pipelined` —
+were each slower somewhere (54.3 against 42.0 µs a call at ~928), so one block's waits were never
+the cost; a warp spent a shuffle reduction per query head on every position, and every block paid
+the query's trip through shared memory and three barriers for 16-64 positions. llama.cpp's answer
+for a GQA ratio ≥ 2 on sm_80+ is its MMA kernel with the group as one tile's columns (`fattn.cu`,
+`ncols2`); this is that idea at the scale a decode step needs, without its stream-K.
+
+**Precision.** The query is scaled and rounded to half, P is rounded to half before `Σ P·V`, the
+products accumulate in f32 — llama.cpp's three roundings. Against f32 attention over the same half
+cache (`the_tensor_core_decode_kernel_matches_f32_attention`, nine shapes × every chunk: groups of 1,
+7, 8, 16, two batches, a soft cap, 37-4,099 positions) the worst gap is 3.5e-4 abs / 1.3e-2 rel, held to
+the flash arms' 2e-3 / 2e-2; the test also proves it RAN (its bits are not the per-position kernels'
+anywhere, the entry point's are its own) and that a declined call (d 256, an f32 cache) is the old
+kernels' bit for bit. Its soft-cap case caps at 2, not Gemma 2's 50 (which moves an N(0, 1) score by ~1e-2
+and passes with the cap skipped — llama.cpp's own test caps at 10 over scores of ~0.3): a body with the cap
+removed FAILS it at 8.3e-2 abs against 3.6e-5 (`dec1125/run_mmactl.out`). The entry point's tolerance in the other card tests follows `mma_takes`
+(`entry_tolerance`); the sinks test measures the card's move from its OWN sink-less answer.
+
+**Measured** (RTX 3070 Laptop, live node stopped, `~/swarmllm-gate/deep/dec1125/run_mma.out`,
+`run_mmachunk.out`; `prefill_bench`, 64 decoded tokens, best of 2, two interleaved rounds, one binary):
+
+| | tensor cores | per-position | llama.cpp |
+|---|---|---|---|
+| 7B attention, nsys at ~928 (µs a call) | 12.5 | 41.7 | 13.7 |
+| merge (µs a call) | 9.7 | 9.9 | 3.0 (fixup) |
+| Qwen2.5-Coder 7B, 896-token prompt | 57.4-59.1 | 55.2-57.0 | — |
+| Qwen2.5-Coder 7B, 4,096-token prompt | 56.7-57.9 | 48.5-49.2 | 60.5 (`-d 4096`) |
+| Llama 3.2 3B, 4,096 | 84.0-94.1 | 68.0-71.7 | — |
+| Llama 3.2 3B, 200 | 103.5-105.8 | 101.8-104.1 | — |
+| TinyLlama, 200 | 198-215 | 205-210 | — |
+
+**Replies** (`~/swarmllm-gate/deep/dec1125/run_mma_replies.out`: one card daemon, arms off/on/off/on, greedy,
+200 tokens, three prompts, scored by `score_against_reference.py` against llama.cpp on the same file). Qwen2.5-Coder
+7B and Llama 3.2 3B: every reply the same in both arms and llama.cpp's first choice at every token. TinyLlama all
+three and Mistral 7B two of three the same in both arms; Mistral's code reply 165 of 171 tokens at llama.cpp's first
+choice against 166, worst rank 3 and gap 1.311 in both. GLM-4 9B (a group of 16): the code reply moves (110 tokens,
+9 off the first choice, against 145 and 10), the same worst gap (17.8) in both arms — a disagreement with llama.cpp
+the old kernel had. Qwen3 1.7B: the OLD arm's two runs differ from each other (gotcha #1168); the new arm's worst
+rank 2, gaps 0.152-0.244 against 0.176-0.260. Gemma 2 2B (d 256) and Phi-3.5 (d 96), declined: byte for byte.
+
+**The chunk stays `chunk_for`'s.** A fixed 32 or 64 under the tensor cores (`SWARMLLM_DECODE_ATTN_CHUNK`)
+was level or slower everywhere: at ~928 a 32 halves the merge (6.2 against 9.9 µs) but the decode
+reads the same; TinyLlama at 200 is 187-200 in 32 and 192-193 in 64 against 207-215.
+
+**Next.** The merge now costs nearly what the kernel does (llama.cpp's fixup is 3.0 µs); a head width
+of 256 (Gemma 2/3) stays on the per-position kernels — two warps a run, or the output split across
+them, would bring it over.
+
 **From the rules file (moved 2026-10-02):**
 
 **`decode_attn::gqa_decode_attention_cuda`** (`kernels/decode_attn.cu`, flash-decoding: one

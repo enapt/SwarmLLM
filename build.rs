@@ -60,6 +60,10 @@ fn build_fused_decode_ptx() {
         .ok()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "80".to_string());
+    // The decode kernels' tensor-core body needs sm_80's `mma.m16n8k16`; below
+    // it the body is a `__trap()`, so the crate asks this before launching it
+    // (`decode_attn::kernel_ptx_cap`).
+    println!("cargo:rustc-env=SWARMLLM_KERNEL_PTX_CAP={compute_cap}");
 
     // `CUDA_PATH` first, because that is the one this repo's CI actually sets —
     // `gpu-build-env` exports it on Linux, and `Jimver/cuda-toolkit` sets it on

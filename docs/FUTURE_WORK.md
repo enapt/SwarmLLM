@@ -3973,9 +3973,26 @@ left was 4 of the 7B's layers, short of the 6 this node had to hold, and no plan
 link). The drafter choice already avoids it where a quantized copy is held.
 
 #### #309 — Small dense models decoded at 0.80-0.83 of llama.cpp on a card; 0.94-1.00 since the attention chunk follows the cache, Gemma 4 E2B 0.87
-`P3` · perf-local · **PARTIAL** — 2026-10-19, re-measured 2026-11-25 · history: #307's sweep
+`P3` · perf-local · **PARTIAL** — 2026-10-19, the tensor-core body 2026-11-25 · history: #307's sweep
 
-**Residual (2026-11-25): decode attention is still the gap, on the 7B too, and it grows with the
+**Residual (2026-11-25, after the tensor-core body):** a head width of 256 still decodes on the
+per-position kernels — Gemma 2/3, Gemma 4's global layers, and **Qwen 3.5 / 3.6's attention layers
+(`key_length` 256 in the 4B's and the 27B's headers), so the popular 27B and 35B-A3B gain nothing
+yet** — the body keeps a run's output in one
+warp's registers (164 at d 128), so 256 needs the output split across two warps; and the merge
+(`decode_attn_combine_f32`, 9.7 µs a layer at ~928 on the 7B) now costs nearly what the attention
+does, against llama.cpp's 3.0 µs fixup. Prior art for both: llama.cpp `fattn-mma-f16.cuh` (its
+D = 256 configs; stream-K's fixup only for the runs that share an output tile).
+
+**Done 2026-11-25: decode on the tensor cores** (`decode_attn_mma_f16kv_d{64,128}`,
+`decode_attn::mma_takes`, A/B `SWARMLLM_DECODE_ATTN_MMA=0`; `docs/invariants/inference.md` § "A
+decode step over the half cache runs on the tensor cores"). One warp a run of positions, the group's
+query heads as the rows of `mma.m16n8k16`, FlashAttention-2's score-to-weights register reuse, the
+old partial layout and merge. The 7B's attention 41.7 → 12.5 µs a call at ~928 (llama.cpp 13.7);
+decode from a 4,096-token prompt 48.5-49.2 → 56.7-57.9 tok/s (llama-bench `-d 4096` 60.5), Llama 3.2
+3B at 4,096 68.0-71.7 → 84.0-94.1, level at short caches. The history of the attempts before it:
+
+**Re-measured 2026-11-25: decode attention was still the gap, on the 7B too, and it grew with the
 cache.** nsys, Qwen2.5-Coder-7B Q4_K_M at ~960 positions, RTX 3070 Laptop, live node stopped
 (`~/swarmllm-gate/deep/dec1125/`): our `decode_attn_f16kv` 45.5 µs + `decode_attn_combine_f32`
 10.8 µs a layer, 1.57 ms a token, against llama.cpp's `flash_attn_ext_f16<128,128,1,8>` 13.7 µs +
@@ -3990,10 +4007,9 @@ before the merge adds them — every sum in its old order, bit for bit the seria
 rounds in one binary: TinyLlama at 200 positions 217-218 against 206-208, Llama 3.2 3B at 200
 103-105 against 99-103, the 7B level at 896 and 4,096, the 3B at 4,096 68-69 against 71-72. So one
 block's waits are not what costs the time at any length this card serves; the 10-19 attempt said
-the same at 64-position chunks. **Next: the `mma` body** — llama.cpp's choice for a GQA ratio ≥ 2
+the same at 64-position chunks. Hence the `mma` body above — llama.cpp's choice for a GQA ratio ≥ 2
 on sm_80+ (`fattn.cu` `ggml_cuda_flash_attn_ext_mma_f16_switch_ncols2`: a 7-head group padded to 8
-columns of one tensor-core tile, stream-K over the SMs). It rounds the query to half, so it is
-judged against llama.cpp's replies, not bits.
+columns of one tensor-core tile, stream-K over the SMs).
 
 **Residual (2026-10-19):** Gemma 4 E2B decodes at 0.87 of llama.cpp (108-109 against 124.8 tok/s,
 same session), TinyLlama and Llama 3.2 1B at 0.95-0.97. Next: an nsys kernel sum of an E2B step

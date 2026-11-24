@@ -291,9 +291,11 @@ const CHUNK_MAX_CHUNKS: usize = 64;
 /// 175, Gemma 2 2B 126-127 against 118-120, Llama 3.2 3B 121-122 against
 /// 116-117; behind 1,848 and 672-token prompts +4 and +3 %; at 4,320 it is 64
 /// and the reply is the same byte for byte. It reads the head layout and the
-/// length only — never the card — so a reply is the same on every card, and a
-/// captured step only updates its arguments as the chunk grows (a reply
-/// crossing 16 → 32 rebuilt no graph).
+/// length only — never the card — so the per-position kernels' reply is the
+/// same on every card, and a captured step only updates its arguments as the
+/// chunk grows (a reply crossing 16 → 32 rebuilt no graph). The tensor-core
+/// body's `mma` adds its products in an order PTX does not fix, so its bits
+/// may differ between card generations; its CHOICE never does (`mma_takes`).
 #[cfg(any(feature = "candle-cuda", test))]
 pub(crate) fn chunk_for(groups: usize, s_len: usize) -> usize {
     CARD_CHUNKS
@@ -344,6 +346,42 @@ fn combine_every_length() -> bool {
         std::env::var("SWARMLLM_DECODE_ATTN_COMBINE").as_deref() != Ok("when-needed")
     })
 }
+/// Whether a decode step's attention may run on the tensor cores
+/// (`kernels/decode_attn.cu`, "ONE WARP A RUN OF POSITIONS"; FUTURE_WORK #309)
+/// where [`mma_takes`] the call. `SWARMLLM_DECODE_ATTN_MMA=0` keeps every call
+/// on the kernels before it, for an A/B inside one binary.
+#[cfg(feature = "candle-cuda")]
+fn tensor_cores_decode() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SWARMLLM_DECODE_ATTN_MMA").as_deref() != Ok("0"))
+}
+
+/// The virtual architecture the decode kernels' PTX was built for (build.rs,
+/// `CUDA_COMPUTE_CAP`, default 80): the tensor-core kernel's `mma.m16n8k16`
+/// exists from 80 on, and below it the kernel is a `__trap()`.
+#[cfg(feature = "candle-cuda")]
+fn kernel_ptx_cap() -> u32 {
+    option_env!("SWARMLLM_KERNEL_PTX_CAP")
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(0)
+}
+
+/// Does the tensor-core decode kernel take this call? The ONE rule, asked by
+/// the launch and the tests: a decode step (no tree) over the half cache,
+/// merged by the combine, a head width it is built for (64 or 128), a group of
+/// at most 16 query heads (one tile's rows), every K/V row starting on 4 bytes
+/// (it reads half pairs as 32-bit words), and a PTX of sm_80 or later.
+/// `offsets` are the K/V views' start and their batch and head strides, in
+/// halves.
+#[cfg(feature = "candle-cuda")]
+fn mma_takes(d: usize, n_rep: usize, merged: bool, offsets: [usize; 6]) -> bool {
+    merged
+        && (d == 64 || d == 128)
+        && n_rep <= 16
+        && offsets.iter().all(|o| o.is_multiple_of(2))
+        && kernel_ptx_cap() >= 80
+}
+
 /// Query heads per KV head one block holds (`DA_MAX_REP`); head dims it
 /// handles (`DA_MAX_D`, and a multiple of 32).
 const CUDA_MAX_REP: usize = 16;
@@ -462,6 +500,7 @@ pub fn gqa_decode_attention_cuda(
             softcap: softcap.unwrap_or(0.0),
             combine_one_chunk: combine_every_length(),
             chunk: fixed_chunk(),
+            tensor_cores: tensor_cores_decode(),
             tree: None,
             sinks: sinks.map(Tensor::contiguous).transpose()?,
         };
@@ -837,6 +876,7 @@ pub(crate) fn gqa_tree_attention_cuda(
             softcap: softcap.unwrap_or(0.0),
             combine_one_chunk: combine_every_length(),
             chunk: fixed_chunk(),
+            tensor_cores: false,
             tree: Some(cuda::TreeOperands {
                 visibility: visibility.clone(),
                 rows,
@@ -925,6 +965,10 @@ mod cuda {
         /// Positions per block, one of [`super::CARD_CHUNKS`]; `None` =
         /// [`super::chunk_for`] the call's shape ([`super::fixed_chunk`]).
         pub(super) chunk: Option<usize>,
+        /// A decode step may go to the tensor-core kernel where
+        /// [`super::mma_takes`] it ([`super::tensor_cores_decode`]); a tree
+        /// never does.
+        pub(super) tensor_cores: bool,
         /// `None`: one query row a batch, every position read (a decode step).
         pub(super) tree: Option<TreeOperands>,
         /// gpt-oss's attention sinks, `[n_head]` f32 on the card — folded in
@@ -1147,6 +1191,11 @@ mod cuda {
             let (k_sb, k_sh, v_sb, v_sh) = (ks[0] as i64, ks[1] as i64, vs[0] as i64, vs[1] as i64);
             let (n_kv_i, n_rep_i, d_i, s_len_i) =
                 (n_kv_head as i32, n_rep as i32, d as i32, kernel_len as i32);
+            // A decode step the tensor-core kernel takes (`mma_takes`, the one rule).
+            let mma_here = self.tensor_cores
+                && self.tree.is_none()
+                && matches!(cache, CacheViews::F16(..))
+                && super::mma_takes(d, n_rep, merged, [k_at, v_at, ks[0], ks[1], vs[0], vs[1]]);
             if tiled {
                 let CacheViews::F16(k, v) = &cache else {
                     candle_core::bail!(
@@ -1222,6 +1271,53 @@ mod cuda {
                 // views by the strides passed, `rows * n_head * d` query floats
                 // and `rows` rows of the visibility's words, and writes every
                 // (row, head, chunk, query head) partial of `d + 2`.
+                unsafe { builder.launch(cfg) }.w()?;
+            } else if mma_here {
+                let (CacheViews::F16(k, v), Some(p)) = (&cache, partial.as_mut()) else {
+                    candle_core::bail!(
+                        "decode-attention: the tensor-core kernel reads a half cache"
+                    );
+                };
+                let func = dev.get_or_load_custom_func(
+                    if d == 64 {
+                        "decode_attn_mma_f16kv_d64"
+                    } else {
+                        "decode_attn_mma_f16kv_d128"
+                    },
+                    "swarmllm_decode_attn",
+                    super::DECODE_ATTN_PTX,
+                )?;
+                let cfg = LaunchConfig {
+                    // One warp a run of `chunk` positions, four runs a block.
+                    grid_dim: ((b * n_kv_head) as u32, n_chunks.div_ceil(4) as u32, 1),
+                    block_dim: (128, 1, 1),
+                    shared_mem_bytes: 0,
+                };
+                let (chunk_i, n_chunks_i) = (chunk as i32, n_chunks as i32);
+                let mut builder = func.builder();
+                builder.arg(&q);
+                builder.arg(k);
+                builder.arg(v);
+                builder.arg(p);
+                builder.arg(&n_kv_i);
+                builder.arg(&n_rep_i);
+                builder.arg(&s_len_i);
+                builder.arg(&k_sb);
+                builder.arg(&k_sh);
+                builder.arg(&v_sb);
+                builder.arg(&v_sh);
+                builder.arg(&self.scale);
+                builder.arg(&self.softcap);
+                builder.arg(&chunk_i);
+                builder.arg(&n_chunks_i);
+                // SAFETY: ffi. `mma_takes` checked the head width (64/128), the
+                // group (<= 16 query heads, one tile's rows) and that every K/V
+                // row starts on 4 bytes; the caller checked the shapes and
+                // strides. The kernel reads `b` batches × `n_kv_head` heads ×
+                // `s_len` rows of `d` halves from the views by the strides
+                // passed (no row at or past `s_len`) and `b * n_head * d` query
+                // floats, and writes every (batch, KV head, run, query head)
+                // partial of `d + 2` — the buffer sized for `n_chunks` runs.
                 unsafe { builder.launch(cfg) }.w()?;
             } else {
                 let func = dev.get_or_load_custom_func(
@@ -1385,6 +1481,23 @@ mod tests {
             f32::NAN
         } else {
             worst.max(gap)
+        }
+    }
+
+    /// What a card answer reached through the entry point is held to: where
+    /// the tensor-core kernel takes the call ([`mma_takes`]) the query and the
+    /// weights are rounded to half — llama.cpp's precision, held to the flash
+    /// arms' bound — and the per-position kernels' f32 sums to 1e-5. The views
+    /// these tests hand over start at 0 with even strides.
+    #[cfg(feature = "candle-cuda")]
+    fn entry_tolerance(cache_dtype: candle_core::DType, d: usize, n_rep: usize) -> (f32, f32) {
+        if cache_dtype == candle_core::DType::F16
+            && tensor_cores_decode()
+            && mma_takes(d, n_rep, true, [0; 6])
+        {
+            (2e-3, 2e-2)
+        } else {
+            (1e-5, 1e-4)
         }
     }
 
@@ -1594,6 +1707,7 @@ mod tests {
                     softcap: softcap.unwrap_or(0.0),
                     combine_one_chunk: true,
                     chunk: Some(chunk),
+                    tensor_cores: false,
                     tree: None,
                     sinks: None,
                 };
@@ -1603,6 +1717,11 @@ mod tests {
                 ));
             }
             for (arm, got) in arms {
+                let (most_abs, most_rel) = if arm == "entry point" {
+                    entry_tolerance(cache_dtype, d, n_head / n_kv_head)
+                } else {
+                    (1e-5, 1e-4)
+                };
                 assert_eq!(got.len(), want.len());
                 let worst_abs = got
                     .iter()
@@ -1615,8 +1734,187 @@ mod tests {
                     .map(|(a, b)| (a - b).abs() / a.abs().max(b.abs()).max(0.05))
                     .fold(0f32, nan_max);
                 assert!(
-                    worst_abs < 1e-5 && worst_rel < 1e-4,
+                    worst_abs < most_abs && worst_rel < most_rel,
                     "{arm}: b={b} heads {n_head}/{n_kv_head} S={s_len} d={d} softcap={softcap:?} cache {cache_dtype:?}: worst abs {worst_abs} rel {worst_rel}"
+                );
+            }
+        }
+    }
+
+    /// The tensor-core decode kernel (`kernels/decode_attn.cu`, "ONE WARP A
+    /// RUN OF POSITIONS") against f32 attention over the same half cache: the
+    /// 7B's group of 7 at one run and many (a part-filled last run and a
+    /// part-filled last 16 of it), gpt-oss's 8 at d 64, no grouping, a group
+    /// of 16, two batches, a soft cap, a narrowed cache; every chunk. Held to
+    /// the flash arms' bound (the query and the weights are rounded to half,
+    /// as llama.cpp's MMA kernel rounds them). That it RAN: its answer is not
+    /// the per-position kernels' bit for bit anywhere, the entry point's
+    /// answer IS its own, and a call it declines (d 256, an f32 cache) is the
+    /// per-position kernels' answer bit for bit. ⚠ Gated: run it on a card
+    /// with `--nocapture` and look for the SKIPPED line before believing a pass.
+    #[cfg(feature = "candle-cuda")]
+    #[test]
+    fn the_tensor_core_decode_kernel_matches_f32_attention() {
+        let card = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("SKIPPED tensor-core decode attention: no CUDA device ({e})");
+                return;
+            }
+        };
+        if kernel_ptx_cap() < 80 {
+            eprintln!("SKIPPED tensor-core decode attention: PTX built below sm_80");
+            return;
+        }
+        let cpu = Device::Cpu;
+        let flat = |t: Tensor| t.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        // (b, n_head, n_kv_head, s_len, d, softcap, cache, taken)
+        for case in [
+            (
+                1usize,
+                28usize,
+                4usize,
+                37usize,
+                128usize,
+                None,
+                candle_core::DType::F16,
+                true,
+            ),
+            (1, 28, 4, 200, 128, None, candle_core::DType::F16, true),
+            (1, 28, 4, 961, 128, None, candle_core::DType::F16, true),
+            (1, 28, 4, 4099, 128, None, candle_core::DType::F16, true),
+            (1, 64, 8, 700, 64, None, candle_core::DType::F16, true),
+            (1, 32, 32, 300, 128, None, candle_core::DType::F16, true),
+            (1, 16, 1, 500, 128, None, candle_core::DType::F16, true),
+            (2, 24, 8, 600, 128, None, candle_core::DType::F16, true),
+            // A cap of 2 on scores of about N(0, 1): Gemma 2's 50 would move
+            // them by ~1e-2 and the output by ~1e-4, under the bound, so a
+            // kernel that skipped the cap would pass (review, 2026-11-25).
+            // Prior art: llama.cpp's test-backend-ops caps at 10 over scores
+            // of ~0.3 — as weak; the cap here is chosen to bite.
+            (
+                1,
+                8,
+                4,
+                700,
+                128,
+                Some(2.0f32),
+                candle_core::DType::F16,
+                true,
+            ),
+            (
+                1,
+                8,
+                4,
+                700,
+                256,
+                Some(50.0f32),
+                candle_core::DType::F16,
+                false,
+            ),
+            (1, 28, 4, 961, 128, None, candle_core::DType::F32, false),
+        ] {
+            let (b, n_head, n_kv_head, s_len, d, softcap, cache_dtype, taken) = case;
+            let n_rep = n_head / n_kv_head;
+            assert_eq!(
+                cache_dtype == candle_core::DType::F16 && mma_takes(d, n_rep, true, [0; 6]),
+                taken,
+                "the case list disagrees with mma_takes: heads {n_head}/{n_kv_head} d {d}"
+            );
+            let q = Tensor::randn(0f32, 1.0, (b, n_head, 1, d), &cpu).unwrap();
+            let as_stored = |t: Tensor| {
+                t.to_dtype(cache_dtype)
+                    .unwrap()
+                    .to_dtype(candle_core::DType::F32)
+                    .unwrap()
+            };
+            let kbuf =
+                as_stored(Tensor::randn(0f32, 1.0, (b, n_kv_head, s_len + 17, d), &cpu).unwrap());
+            let vbuf =
+                as_stored(Tensor::randn(0f32, 1.0, (b, n_kv_head, s_len + 17, d), &cpu).unwrap());
+            let scale = 1.0 / (d as f32).sqrt();
+            let (k, v) = (
+                kbuf.narrow(2, 0, s_len).unwrap(),
+                vbuf.narrow(2, 0, s_len).unwrap(),
+            );
+            let qg = q.reshape((b, n_kv_head, n_rep, d)).unwrap();
+            let att = (qg.matmul(&k.t().unwrap()).unwrap() * scale as f64).unwrap();
+            let att = match softcap {
+                Some(c) => ((att / c as f64).unwrap().tanh().unwrap() * c as f64).unwrap(),
+                None => att,
+            };
+            let att = candle_nn::ops::softmax_last_dim(&att).unwrap();
+            let want = flat(att.matmul(&v.contiguous().unwrap()).unwrap());
+
+            let on_card = |t: &Tensor| {
+                t.to_dtype(cache_dtype)
+                    .unwrap()
+                    .to_device(&card)
+                    .unwrap()
+                    .narrow(2, 0, s_len)
+                    .unwrap()
+            };
+            let (qc, kc, vc) = (q.to_device(&card).unwrap(), on_card(&kbuf), on_card(&vbuf));
+            let run = |chunk: Option<usize>, tensor_cores: bool| {
+                let op = cuda::DecodeAttn {
+                    scale,
+                    softcap: softcap.unwrap_or(0.0),
+                    combine_one_chunk: true,
+                    chunk,
+                    tensor_cores,
+                    tree: None,
+                    sinks: None,
+                };
+                flat(qc.apply_op3_no_bwd(&kc, &vc, &op).unwrap())
+            };
+            let bits = |x: &[f32]| x.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+            for chunk in CARD_CHUNKS.into_iter().map(Some).chain([None]) {
+                let (got, per_position) = (run(chunk, true), run(chunk, false));
+                assert_eq!(got.len(), want.len());
+                let what = format!(
+                    "b={b} heads {n_head}/{n_kv_head} S={s_len} d={d} softcap={softcap:?} \
+                     cache {cache_dtype:?} chunk {chunk:?}"
+                );
+                if !taken {
+                    assert_eq!(
+                        bits(&got),
+                        bits(&per_position),
+                        "{what}: a declined call changed"
+                    );
+                    continue;
+                }
+                let worst_abs = got
+                    .iter()
+                    .zip(&want)
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0f32, nan_max);
+                let worst_rel = got
+                    .iter()
+                    .zip(&want)
+                    .map(|(a, b)| (a - b).abs() / a.abs().max(b.abs()).max(0.05))
+                    .fold(0f32, nan_max);
+                eprintln!("MMA {what}: worst abs {worst_abs} rel {worst_rel}");
+                assert!(
+                    worst_abs < 2e-3 && worst_rel < 2e-2,
+                    "{what}: worst abs {worst_abs} rel {worst_rel}"
+                );
+                assert_ne!(
+                    bits(&got),
+                    bits(&per_position),
+                    "{what}: the tensor-core arm is the per-position kernels' answer — it did not run"
+                );
+            }
+            if taken && tensor_cores_decode() {
+                let entry = flat(
+                    gqa_decode_attention_cuda(&qc, &kc, &vc, None, scale, softcap, None)
+                        .unwrap()
+                        .expect("the card kernel applies to these inputs"),
+                );
+                let fixed = fixed_chunk();
+                assert_eq!(
+                    bits(&entry),
+                    bits(&run(fixed, true)),
+                    "the entry point did not take the tensor-core kernel (heads {n_head}/{n_kv_head} d {d})"
                 );
             }
         }
@@ -1707,22 +2005,39 @@ mod tests {
                     .zip(&want)
                     .map(|(a, b)| (a - b).abs() / a.abs().max(b.abs()).max(0.05))
                     .fold(0f32, nan_max);
+                let (most_abs, most_rel) = entry_tolerance(cache_dtype, d, n_head / n_kv_head);
                 assert!(
-                    worst_abs < 1e-5 && worst_rel < 1e-4,
+                    worst_abs < most_abs && worst_rel < most_rel,
                     "heads {n_head}/{n_kv_head} S={s_len} d={d} cache {cache_dtype:?}: worst abs {worst_abs} rel {worst_rel}"
+                );
+                // The card handed no sinks: the null control below, and what
+                // the card's answer moved from (its own rounding on both sides).
+                let card_sinkless = flat(
+                    gqa_decode_attention_cuda(
+                        &q.to_device(&card).unwrap(),
+                        &to_card(&k),
+                        &to_card(&v),
+                        None,
+                        scale,
+                        None,
+                        None,
+                    )
+                    .unwrap()
+                    .unwrap(),
                 );
                 // Each head moved from its sink-less answer as far as the
                 // processor's did — a dominant sink far, a small one at a long
                 // cache barely, `-inf` not at all.
-                let moved = |x: &[f32], h: usize| {
+                let moved = |x: &[f32], from: &[f32], h: usize| {
                     x[h * d..(h + 1) * d]
                         .iter()
-                        .zip(&sinkless[h * d..(h + 1) * d])
+                        .zip(&from[h * d..(h + 1) * d])
                         .map(|(a, b)| (a - b).abs())
                         .fold(0f32, nan_max)
                 };
                 for (h, &sink) in sinks.iter().enumerate().take(n_head) {
-                    let (card_moved, cpu_moved) = (moved(&got, h), moved(&want, h));
+                    let (card_moved, cpu_moved) =
+                        (moved(&got, &card_sinkless, h), moved(&want, &sinkless, h));
                     assert!(
                         (card_moved - cpu_moved).abs() <= 0.1 * cpu_moved + 1e-5,
                         "heads {n_head}/{n_kv_head} S={s_len} head {h} (sink {sink}): the card \
@@ -1737,19 +2052,6 @@ mod tests {
                 }
                 // The null control: the card handed no sinks is NOT the
                 // processor's answer with them — the comparison above can fail.
-                let card_sinkless = flat(
-                    gqa_decode_attention_cuda(
-                        &q.to_device(&card).unwrap(),
-                        &to_card(&k),
-                        &to_card(&v),
-                        None,
-                        scale,
-                        None,
-                        None,
-                    )
-                    .unwrap()
-                    .unwrap(),
-                );
                 let control_off = card_sinkless
                     .iter()
                     .zip(&want)
@@ -1981,6 +2283,7 @@ mod tests {
                     softcap: softcap.unwrap_or(0.0),
                     combine_one_chunk: true,
                     chunk,
+                    tensor_cores: false,
                     tree: Some(cuda::TreeOperands {
                         visibility: vis.clone(),
                         rows: seq,
@@ -2204,6 +2507,7 @@ mod tests {
                                 softcap: 0.0,
                                 combine_one_chunk: true,
                                 chunk: None,
+                                tensor_cores: false,
                                 tree: Some(cuda::TreeOperands {
                                     visibility: vis.clone(),
                                     rows,
@@ -2301,6 +2605,7 @@ mod tests {
                                 softcap: 0.0,
                                 combine_one_chunk: true,
                                 chunk: None,
+                                tensor_cores: false,
                                 tree: Some(cuda::TreeOperands {
                                     visibility: vis.clone(),
                                     rows,
@@ -2384,6 +2689,7 @@ mod tests {
                             softcap: softcap.unwrap_or(0.0),
                             combine_one_chunk,
                             chunk: Some(CUDA_CHUNK),
+                            tensor_cores: false,
                             tree: None,
                             sinks: None,
                         };

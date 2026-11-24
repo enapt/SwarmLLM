@@ -26,9 +26,11 @@
 // (`inference::decode_attn`) learned the hard way (#119: once per query head
 // was 7x the traffic on Qwen2.5-7B).
 //
-// The chunk is fixed for a cache length (`decode_attn::chunk_for`), so the
-// summation order — and the result — depends on the cache length and the head layout only, never on
-// the card or the scheduling. It is not bit-identical to the matmul path it
+// The chunk is fixed for a cache length (`decode_attn::chunk_for`), so these
+// kernels' summation order — and the result — depends on the cache length and
+// the head layout only, never on the card or the scheduling. (The tensor-core
+// body below adds inside `mma`, in an order PTX does not fix: its bits may
+// differ between card generations; which kernel runs never does.) It is not bit-identical to the matmul path it
 // replaces (a different summation order): replies are judged against
 // llama.cpp, as for the tensor-core prompt pass. The chunk is an ARGUMENT
 // (16, 32 or `DA_CHUNK` = 64, the most shared memory is sized for), chosen by
@@ -273,6 +275,282 @@ static __device__ __forceinline__ void decode_attn_body(
 // differs.
 DA_ENTRY(decode_attn_f32, float)
 DA_ENTRY(decode_attn_f16kv, __half)
+
+// ONE WARP A RUN OF POSITIONS, THE GROUP'S QUERY HEADS ON THE TENSOR CORES
+// (2026-11-25, FUTURE_WORK #309)
+// -------------------------------------------------------------------------
+// The kernels above spend a warp on each position: one K row read, then a
+// shuffle reduction per query head before the next row, and every block pays
+// the query's trip through shared memory and three barriers for 16-64
+// positions. On the RTX 3070 Laptop that is 42-45 µs a layer of a 7B at ~960
+// positions where llama.cpp's decode takes 13.7 (+3.0 fixup), and two bodies
+// that kept more loads in flight (10-19, 11-25) did not close it. This body:
+// 12.5 µs there, and the 7B's decode from a 4,096-token prompt 48.5-49.2 →
+// 56.7-57.9 tok/s (`docs/invariants/inference.md` § "A decode step over the
+// half cache runs on the tensor cores").
+//
+// Here one warp owns a run of `chunk` positions of one KV head and every query
+// head of its group, sixteen positions a step, with no shared memory and no
+// barrier: the query heads are the 16 rows of `mma.m16n8k16` (a group of up to
+// 16; rows past `n_rep` are zeros and never written), so
+//   S^T[head][pos] = Q[head][dim] · K^T  — K's rows are B's columns as they lie
+//                    (`.col`), read as 32-bit pairs straight from the cache;
+//   O^T[head][dim] += P^T[head][pos] · V — the two score tiles' accumulators
+//                    ARE P^T's A fragment (FlashAttention-2's register reuse),
+//                    V's pairs gathered from two rows each.
+// An online softmax runs over the run's 16-position steps; the run writes the
+// kernels above's `partial` layout — (max, Σexp, Σexp·v) per query head — and
+// `decode_attn_combine_f32` merges the runs unchanged.
+//
+// Precision: the query is scaled and rounded to half, P is rounded to half
+// before Σ P·V, the products accumulate in f32 — llama.cpp's MMA kernel does
+// the same three. Not bit-identical to the kernels above: judged against
+// llama.cpp's replies (`examples/score_against_reference.py`) and pinned
+// against f32 attention by
+// `decode_attn::tests::the_tensor_core_decode_kernel_matches_f32_attention`.
+//
+// Requires a half cache, D of 64 or 128, n_rep <= 16, every K/V row starting
+// on 4 bytes (the caller checks; `decode_attn::mma_takes`), sm_80+.
+// Prior art: llama.cpp `fattn-mma-f16.cuh` (`ncols2`: a KV head's query heads
+// are the rows of one tile; stream-K for the cache) and FlashAttention-2
+// (Dao, 2023: the C→A fragment reuse, the online softmax).
+#define DA_MMA_WARPS 4
+
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
+#define DA_MMA_AVAILABLE 1
+#endif
+
+// The helpers exist only where the body below uses them: a PTX below sm_80
+// builds the entries as a `__trap()` and would otherwise warn of each unused one.
+#ifdef DA_MMA_AVAILABLE
+static __device__ __forceinline__ void da_mma_16816(
+    float (&c)[4], const unsigned (&a)[4], const unsigned b0, const unsigned b1
+) {
+    asm volatile(
+        "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
+        "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};\n"
+        : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
+        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
+}
+
+// Two floats as a half pair, the first in the low 16 bits (the element with
+// the lower index in every mma fragment).
+static __device__ __forceinline__ unsigned da_half2_bits(const float lo, const float hi) {
+    const __half2 h = __floats2half2_rn(lo, hi);
+    return *reinterpret_cast<const unsigned *>(&h);
+}
+
+static __device__ __forceinline__ unsigned da_halves_bits(const __half lo, const __half hi) {
+    return (unsigned)__half_as_ushort(lo) | ((unsigned)__half_as_ushort(hi) << 16);
+}
+#endif
+
+template <int D>
+static __device__ __forceinline__ void decode_attn_mma_body(
+    const float *__restrict__ q,
+    const __half *__restrict__ k,
+    const __half *__restrict__ v,
+    float *__restrict__ partial,
+    const int n_kv_head,
+    const int n_rep,
+    const int s_len,
+    const long long k_sb,
+    const long long k_sh,
+    const long long v_sb,
+    const long long v_sh,
+    const float scale,
+    const float softcap,
+    const int chunk,
+    const int n_chunks
+) {
+#ifdef DA_MMA_AVAILABLE
+    constexpr int KS = D / 16;  // k-steps of the score product
+    constexpr int NT = D / 8;   // output tiles of Σ P·V
+    const int g = blockIdx.x;   // (batch, KV head)
+    const int bi = g / n_kv_head;
+    const int h = g % n_kv_head;
+    const int lane = threadIdx.x & 31;
+    const int c = blockIdx.y * DA_MMA_WARPS + (threadIdx.x >> 5);
+    if (c >= n_chunks) {
+        return;
+    }
+    const int s0 = c * chunk;
+    const int n = min(chunk, s_len - s0);
+    // mma fragment coordinates: `gid` picks a row (A, C) or a column (B),
+    // `tig` a pair of columns (A, C) or rows (B).
+    const int gid = lane >> 2;
+    const int tig = lane & 3;
+
+    // The query heads as A: rows gid and gid + 8, scaled, rounded to half.
+    unsigned qa[KS][4];
+    const float *qg = q + (long long)g * n_rep * D;
+#pragma unroll
+    for (int ks = 0; ks < KS; ks++) {
+#pragma unroll
+        for (int f = 0; f < 4; f++) {
+            const int r = gid + 8 * (f & 1);
+            const int col = ks * 16 + 2 * tig + 8 * (f >> 1);
+            qa[ks][f] = r < n_rep
+                ? da_half2_bits(qg[r * D + col] * scale, qg[r * D + col + 1] * scale)
+                : 0u;
+        }
+    }
+
+    const __half *kb = k + bi * k_sb + h * k_sh + (long long)s0 * D;
+    const __half *vb = v + bi * v_sb + h * v_sh + (long long)s0 * D;
+
+    float o[NT][4];
+#pragma unroll
+    for (int t = 0; t < NT; t++) {
+#pragma unroll
+        for (int i = 0; i < 4; i++) {
+            o[t][i] = 0.0f;
+        }
+    }
+    // Running max and Σexp of rows gid (0) and gid + 8 (1), the same in the
+    // row's four threads.
+    float m[2] = {-INFINITY, -INFINITY};
+    float l[2] = {0.0f, 0.0f};
+
+    for (int p0 = 0; p0 < n; p0 += 16) {
+        // Scores of positions p0..p0+15: two 8-position tiles, column gid of
+        // tile t is position p0 + 8t + gid — its K row read as half pairs.
+        float s[2][4];
+        unsigned kf[2][KS][2];
+#pragma unroll
+        for (int t = 0; t < 2; t++) {
+            const int p = p0 + 8 * t + gid;
+            const unsigned *krow = reinterpret_cast<const unsigned *>(kb + (long long)p * D);
+#pragma unroll
+            for (int ks = 0; ks < KS; ks++) {
+                kf[t][ks][0] = p < n ? krow[ks * 8 + tig] : 0u;
+                kf[t][ks][1] = p < n ? krow[ks * 8 + tig + 4] : 0u;
+            }
+        }
+#pragma unroll
+        for (int t = 0; t < 2; t++) {
+#pragma unroll
+            for (int i = 0; i < 4; i++) {
+                s[t][i] = 0.0f;
+            }
+#pragma unroll
+            for (int ks = 0; ks < KS; ks++) {
+                da_mma_16816(s[t], qa[ks], kf[t][ks][0], kf[t][ks][1]);
+            }
+        }
+        // Accumulator i of tile t: row gid + 8 (i >> 1), position
+        // p0 + 8t + 2 tig + (i & 1). Soft cap; positions past the run are −∞.
+        float tmax[2] = {-INFINITY, -INFINITY};
+#pragma unroll
+        for (int t = 0; t < 2; t++) {
+#pragma unroll
+            for (int i = 0; i < 4; i++) {
+                float x = s[t][i];
+                if (softcap > 0.0f) {
+                    x = softcap * tanhf(x / softcap);
+                }
+                x = p0 + 8 * t + 2 * tig + (i & 1) < n ? x : -INFINITY;
+                s[t][i] = x;
+                tmax[i >> 1] = fmaxf(tmax[i >> 1], x);
+            }
+        }
+        float scale_old[2];
+        float tsum[2] = {0.0f, 0.0f};
+#pragma unroll
+        for (int hr = 0; hr < 2; hr++) {
+            // A row's four threads differ in the low two lane bits.
+            tmax[hr] = fmaxf(tmax[hr], __shfl_xor_sync(0xffffffff, tmax[hr], 1));
+            tmax[hr] = fmaxf(tmax[hr], __shfl_xor_sync(0xffffffff, tmax[hr], 2));
+            const float mn = fmaxf(m[hr], tmax[hr]);
+            // Nothing seen yet keeps a zero sum; past that, the old sums'
+            // weight under the new max.
+            scale_old[hr] = mn == -INFINITY ? 1.0f : expf(m[hr] - mn);
+            m[hr] = mn;
+        }
+#pragma unroll
+        for (int t = 0; t < 2; t++) {
+#pragma unroll
+            for (int i = 0; i < 4; i++) {
+                const float mr = m[i >> 1];
+                const float e = mr == -INFINITY ? 0.0f : expf(s[t][i] - mr);
+                s[t][i] = e;
+                tsum[i >> 1] += e;
+            }
+        }
+#pragma unroll
+        for (int hr = 0; hr < 2; hr++) {
+            tsum[hr] += __shfl_xor_sync(0xffffffff, tsum[hr], 1);
+            tsum[hr] += __shfl_xor_sync(0xffffffff, tsum[hr], 2);
+            l[hr] = l[hr] * scale_old[hr] + tsum[hr];
+        }
+        // P^T as A: rows gid / gid + 8, positions 2 tig (+1) of tile 0, then
+        // of tile 1 — exactly the two score tiles' accumulators.
+        const unsigned pa[4] = {
+            da_half2_bits(s[0][0], s[0][1]),
+            da_half2_bits(s[0][2], s[0][3]),
+            da_half2_bits(s[1][0], s[1][1]),
+            da_half2_bits(s[1][2], s[1][3]),
+        };
+        // V as B: column gid of tile t is dim 8t + gid; rows (positions)
+        // 2 tig, 2 tig + 1 and 2 tig + 8, 2 tig + 9. A position past the run
+        // reads as zero: its P is zero, and 0 × a NaN left in the buffer is not.
+        const int pv = p0 + 2 * tig;
+        const __half zero = __float2half(0.0f);
+#pragma unroll
+        for (int t = 0; t < NT; t++) {
+            const __half *col = vb + 8 * t + gid;
+            const unsigned b0 = da_halves_bits(
+                pv < n ? col[(long long)pv * D] : zero,
+                pv + 1 < n ? col[(long long)(pv + 1) * D] : zero
+            );
+            const unsigned b1 = da_halves_bits(
+                pv + 8 < n ? col[(long long)(pv + 8) * D] : zero,
+                pv + 9 < n ? col[(long long)(pv + 9) * D] : zero
+            );
+            o[t][0] *= scale_old[0];
+            o[t][1] *= scale_old[0];
+            o[t][2] *= scale_old[1];
+            o[t][3] *= scale_old[1];
+            da_mma_16816(o[t], pa, b0, b1);
+        }
+    }
+
+    // Accumulator i of output tile t: row gid + 8 (i >> 1), dim 8t + 2 tig + (i & 1).
+#pragma unroll
+    for (int hr = 0; hr < 2; hr++) {
+        const int r = gid + 8 * hr;
+        if (r < n_rep) {
+            float *part = partial + (((long long)g * n_chunks + c) * n_rep + r) * (D + 2);
+#pragma unroll
+            for (int t = 0; t < NT; t++) {
+                part[2 + 8 * t + 2 * tig] = o[t][2 * hr];
+                part[2 + 8 * t + 2 * tig + 1] = o[t][2 * hr + 1];
+            }
+            if (tig == 0) {
+                part[0] = m[hr];
+                part[1] = l[hr];
+            }
+        }
+    }
+#else
+    __trap();
+#endif
+}
+
+#define DA_MMA_ENTRY(NAME, D)                                                      \
+    extern "C" __global__ void __launch_bounds__(DA_MMA_WARPS * 32) NAME(          \
+        const float *__restrict__ q, const __half *__restrict__ k,                 \
+        const __half *__restrict__ v, float *__restrict__ partial,                 \
+        const int n_kv_head, const int n_rep, const int s_len,                     \
+        const long long k_sb, const long long k_sh, const long long v_sb,          \
+        const long long v_sh, const float scale, const float softcap,              \
+        const int chunk, const int n_chunks) {                                     \
+        decode_attn_mma_body<D>(q, k, v, partial, n_kv_head, n_rep, s_len, k_sb,   \
+                                k_sh, v_sb, v_sh, scale, softcap, chunk, n_chunks); \
+    }
+
+DA_MMA_ENTRY(decode_attn_mma_f16kv_d64, 64)
+DA_MMA_ENTRY(decode_attn_mma_f16kv_d128, 128)
 
 // A TREE's rows TILED over the half cache (#134 (b)): one block stages ONE KV
 // head's chunk of K and V in shared memory and serves a tile of the tree's
