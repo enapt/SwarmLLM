@@ -1342,6 +1342,14 @@ fn captured_flowing_levels_read_as_the_ordinary_ones(width: usize) {
 /// about speed, only that no level was refused inside its capture — run it
 /// at `SWARMLLM_PACE_ROWS=4` too, where a refusal surfaces. Same file, card
 /// and switch as the test above.
+///
+/// Each level's rows are read as the drafter reads them: ranked on the card,
+/// their eight likeliest copied back (`tree_rank::ranked_on_the_card`, what
+/// `draft::likeliest_rows_where_they_are` takes). Until 2026-11-24 the probe
+/// copied every row back whole — 8 rows of a 248K vocabulary, 7.9 MB, ~2.5 ms
+/// of every 0.8B level the drafter never spends (nsys: one
+/// `cuMemcpyDtoHAsync` a level); `SWARMLLM_PACE_READ=whole` still does, to
+/// compare with figures taken so.
 #[cfg(feature = "candle-cuda")]
 #[test]
 #[ignore = "a timing probe: needs a GGUF in SWARMLLM_GUESS_TEST_GGUF and a card"]
@@ -1396,6 +1404,7 @@ fn flowing_levels_pace_captured_and_op_by_op() {
         0..3 => 0,
         _ => ((level - 2) * width + 1) as u32,
     };
+    let read_whole = std::env::var("SWARMLLM_PACE_READ").as_deref() == Ok("whole");
     let run = |model: &mut SplitModel, rid: &str| -> Vec<f64> {
         let kv = KvCacheStore::new(std::time::Duration::from_secs(600));
         let prompt = model.tensor_from_ids(&context).unwrap();
@@ -1415,7 +1424,22 @@ fn flowing_levels_pace_captured_and_op_by_op() {
                 })
                 .unwrap()
                 .unwrap();
-            let _ = out.to_device(&Device::Cpu).unwrap();
+            if read_whole {
+                let _ = out.to_device(&Device::Cpu).unwrap();
+            } else {
+                let vocab = out.dim(candle_core::D::Minus1).unwrap();
+                let rows = out.reshape((out.elem_count() / vocab, vocab)).unwrap();
+                let ranked = crate::inference::tree_rank::ranked_on_the_card(
+                    &rows,
+                    1.0,
+                    super::super::draft::TREE_CHILDREN,
+                )
+                .unwrap();
+                assert!(
+                    matches!(ranked, crate::inference::tree_rank::CardRanking::Ranked(_)),
+                    "the card ranked the level"
+                );
+            }
             ms.push(began.elapsed().as_secs_f64() * 1e3);
         }
         ms
