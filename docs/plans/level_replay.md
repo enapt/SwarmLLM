@@ -1,7 +1,8 @@
 # Replaying a captured drafter level instead of recording it again (FUTURE_WORK #228)
 
 Status: **Stage 0 done** (2026-11-23: the oracle reads copies and sets; the floor is 5.0 ms at 8 rows and
-3.9 ms at 2, a relaunch bit-identical); stages A-D not built. The staged plan below comes from reading the code at
+3.9 ms at 2, a relaunch bit-identical). **Stages A-D were built (local branch `level-replay-a`, 2026-11-23/24)
+and measured NULL on main's kernels — not landed** (§ "Stages A-D, measured on main 3c01baf68"). The staged plan below comes from reading the code at
 `18088f87b`; every file:line in it is a pointer to check, not a fact to build on (gotcha #645).
 
 ## Why
@@ -281,3 +282,32 @@ level 27.35-27.44 → 26.29-26.57 ms at 16 rows and 22.20-24.45 → 21.25-21.53 
 cooled). What MMQ still runs in a level is the 1,024-row keys and values, ~21 products and their fixups, ~0.4 ms of
 ~22 — the row kernels are 71% of the level's kernel time (`docs/invariants/inference.md` § "Q6_K: aligned windows
 over 210-byte blocks").
+
+## Stages A-D, measured on main 3c01baf68 (2026-11-24 evening) — not landed
+
+Built on local branch `level-replay-a` (19 commits rebased onto `3c01baf68`, the Q4_K/Q5_K/Q6_K/Q8_0 row
+kernels under it; never pushed). Bitwise first: replayed = recorded and captured = ordinary on the 0.8B, 2B and
+9B, worst logit difference 0. Then the pace probe (8 rows, 30 levels, `SWARMLLM_LEVEL_REPLAY` 0/1 interleaved,
+each run cooled under 60 °C, judged by each run's MEAN level after 4; 17 of 29 levels replayed in every on
+run; `~/swarmllm-gate/deep/fr/lr_1124b/`, nsys of a 0.8B level each way kept there):
+
+| drafter | replay off, mean ms | replay on, mean ms |
+|---|---|---|
+| Qwen3.5-0.8B Q8_0 | 6.07 / 6.08 / 6.10 / 6.24 / 6.25 | 5.96 / 5.98 / 6.13 / 6.15 (and one run 10.7) |
+| Qwen3.5-2B Q8_0 | 9.92 / 10.05 / 10.08 | 10.42 / 10.72 / 10.73 |
+| Qwen3.5-9B Q4_K_M | 22.20 / 22.32 / 22.37 | 22.17 / 22.23 / 22.72 |
+
+So ~1-2% on the 0.8B, ~5% WORSE on the 2B, nothing on the 9B. The level the plan set out to shorten (8.8 ms
+recorded, 2026-11-23) had already come down to ~6.1 ms by other routes — the row kernels cut the card's own
+time, and the pace probe no longer copies every logit back (gotcha #1167); an ordinary capture updates its graph
+in place on 28 of 29 levels — and what the replay saves past that is about what its fixed buffers and staging
+cost (UNVERIFIED split: the two nsys traces above would show it).
+
+A review of the branch (2026-11-24, read only) found, beside the null: the always-on stages (fixed inputs, the
+position read on the card, the padded attention bucket, the fixed anchor) change EVERY captured tree level,
+replay off too — the anchor copy alone ~+0.2 ms a level; several fallbacks bake a scalar the replay key cannot
+see (a by-value KV write or attended length where `staged_position_on` returns None, an untiled tree-attention
+launch, `SWARMLLM_FLOW_FIXED_ANCHOR=0` with replay on reading a moving — possibly freed — anchor pair); one
+fixed position buffer per role with nothing asserting every layer noted the same length; and no sampled check
+in `=1`. A later attempt starts from those: a "baked a value" flag that cancels the level's key, `=1` refused
+unless every sub-switch is at its default, and the stages gated on replay being on.
