@@ -1123,6 +1123,26 @@ fn written_into(
     })
 }
 
+/// A buffer shaped as `like` for a replay to write WHOLE: on a card
+/// `cuda::replay`'s two kernels assign every element of both of a target's
+/// buffers, and the composition sets both whole ([`written_into`]) — so it
+/// needs no memset (`CudaDevice::alloc_fully_overwritten`). Elsewhere zeros.
+/// Test `a_replay_on_the_card_lands_where_the_composed_replay_does` hands
+/// both paths NaN-filled targets. A/B `SWARMLLM_SSM_REPLAY_TARGET=zeroed`.
+///
+/// Prior art: llama.cpp's `gated_delta_net.cu` / `ssm-conv.cu` write outputs
+/// ggml's allocator hands them unzeroed (its pool never clears), as PyTorch's
+/// `torch.empty`; zeros are for a buffer read before it is written.
+fn unwritten_like(like: &Tensor) -> CandleResult<Tensor> {
+    #[cfg(feature = "candle-cuda")]
+    if !replay_targets_zeroed() {
+        if let Some(fresh) = cuda::unwritten_like(like)? {
+            return Ok(fresh);
+        }
+    }
+    like.zeros_like()
+}
+
 /// The delta rule over a step's rows, from `state` — the one choice of kernel
 /// a step and a replay share, so a replay's state is the step's: the card
 /// kernel (written straight into `into`, the third answer `true`), the
@@ -1855,15 +1875,16 @@ impl FlowRows {
         // every forward the walk moved — bit for bit the same state either way
         // (`a_replay_on_the_card_lands_where_the_composed_replay_does`).
         // Fresh, never the pair being replaced: a forward's rollback copy
-        // (`SsmState::flow_begun`) may still hold it. A/B
+        // (`SsmState::flow_begun`) may still hold it. Never zeroed: either
+        // replay writes the pair whole (`unwritten_like`). A/B
         // `SWARMLLM_SSM_REPLAY=composed`.
         let target = || -> CandleResult<Option<SsmSlot>> {
             if !device.is_cuda() {
                 return Ok(None);
             }
             Ok(Some(SsmSlot {
-                conv_state: self.anchor.conv_state.zeros_like()?,
-                recurrent_state: self.anchor.recurrent_state.zeros_like()?,
+                conv_state: unwritten_like(&self.anchor.conv_state)?,
+                recurrent_state: unwritten_like(&self.anchor.recurrent_state)?,
             }))
         };
         let before = if reach > 1 {
@@ -2604,6 +2625,19 @@ fn replay_in_two_launches() -> bool {
         !matches!(
             std::env::var("SWARMLLM_SSM_REPLAY").as_deref(),
             Ok("composed")
+        )
+    })
+}
+
+/// `SWARMLLM_SSM_REPLAY_TARGET=zeroed` → the walk's replay targets are
+/// zero-filled as before [`unwritten_like`]: its A/B switch. Read once.
+#[cfg(feature = "candle-cuda")]
+fn replay_targets_zeroed() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(
+            std::env::var("SWARMLLM_SSM_REPLAY_TARGET").as_deref(),
+            Ok("zeroed")
         )
     })
 }
@@ -3372,6 +3406,24 @@ mod cuda {
     /// instead (`ggml_gated_delta_net(…, K)`, rollback picks a slot — 2 MB a
     /// slot a layer here); this keeps the replay's 32 KB a row and its
     /// bit-exactness, and drops only its launches.
+    /// [`super::unwritten_like`] on a card: an f32 buffer with no memset;
+    /// `None` for any other type or device.
+    pub(super) fn unwritten_like(like: &Tensor) -> Result<Option<Tensor>> {
+        let (candle_core::Device::Cuda(dev), DType::F32) = (like.device(), like.dtype()) else {
+            return Ok(None);
+        };
+        let slice = dev.alloc_fully_overwritten::<f32>(like.elem_count())?;
+        Ok(Some(Tensor::from_storage(
+            candle_core::Storage::Cuda(candle_core::CudaStorage::wrap_cuda_slice(
+                slice,
+                dev.clone(),
+            )),
+            like.shape(),
+            candle_core::op::BackpropOp::none(),
+            false,
+        )))
+    }
+
     pub(super) fn replay(
         read: &super::SsmSlot,
         kept: &super::SsmRows,
@@ -4552,6 +4604,10 @@ mod tests {
     /// a check keeps — window and state — and is the path that ran. A replay
     /// one row off lands elsewhere, so the comparison sees the error a wrong
     /// window or row count makes. Qwen 3.5's widths (kd = vd = 128).
+    ///
+    /// Both write their target WHOLE, which lets `FlowRows::advance_to` hand
+    /// them unzeroed buffers (`unwritten_like`): every target starts as NaN,
+    /// and an element either leaves unwritten fails here.
     #[cfg(feature = "candle-cuda")]
     #[test]
     fn a_replay_on_the_card_lands_where_the_composed_replay_does() {
@@ -4575,8 +4631,22 @@ mod tests {
             beta: unit(&[1, cap, nv]),
         };
         let blank = || SsmSlot {
-            conv_state: Tensor::zeros((1, channels, pad), DType::F32, &device).unwrap(),
-            recurrent_state: Tensor::zeros((1, nv, d, d), DType::F32, &device).unwrap(),
+            conv_state: Tensor::full(f32::NAN, (1, channels, pad), &device).unwrap(),
+            recurrent_state: Tensor::full(f32::NAN, (1, nv, d, d), &device).unwrap(),
+        };
+        // On the host: a card reduction's max may pass a NaN over.
+        let written_whole = |slot: &SsmSlot, what: &str| {
+            for t in [&slot.conv_state, &slot.recurrent_state] {
+                let unwritten = t
+                    .flatten_all()
+                    .unwrap()
+                    .to_vec1::<f32>()
+                    .unwrap()
+                    .iter()
+                    .filter(|x| x.is_nan())
+                    .count();
+                assert_eq!(unwritten, 0, "{what}: elements left unwritten");
+            }
         };
         let fused = |rows: usize| {
             let into = blank();
@@ -4589,6 +4659,8 @@ mod tests {
         for rows in 1..cap {
             let composed = replay_rows_composed(&read, &kept, rows, Some(&blank())).unwrap();
             let into = fused(rows);
+            written_whole(&composed, &format!("{rows} rows composed"));
+            written_whole(&into, &format!("{rows} rows in two launches"));
             assert_eq!(
                 max_abs_diff(&composed.conv_state, &into.conv_state),
                 0.0,

@@ -170,7 +170,7 @@ bit in both arms: the card against the processor, lines read alone, a fresh read
 ordinary on all three models.
 
 What is left of a level, in order: the card's own time (the next lever, kernel by kernel), the rest of
-`advance_to` (two fresh state pairs and two replays a layer), `make_room`'s growth on the levels that grow the
+`advance_to` (two fresh state pairs — no longer zeroed, below — and two replays a layer), `make_room`'s growth on the levels that grow the
 store (3.6-3.9 ms against ~1.8), and the anchor copy (~0.24 ms). The replay waits until those are smaller than the
 recording it removes.
 
@@ -187,4 +187,23 @@ two passes, `~/swarmllm-gate/deep/fr/mmvq_1124/`), Q8_0 at 4,096 × 14,336 (62 M
 weight (a 145 MB head, 560 µs ≈ 259 GB/s, nsys 2026-10-22). So porting it buys no kernel time on large weights.
 What it could still buy is LAUNCHES on the small ones: MMQ on a weight of under ~7 tiles is quantize + product +
 stream-K fixup (the fixup 4.8 µs on a 0.5B key), MMVQ quantize + product — and a level makes 392 MMQ launches.
-The guessing models' own shapes get timed (their fixups summed off a captured level) before anything is ported.
+
+**Timed at the 0.8B drafter's own shapes (2026-11-24): no port.** llama.cpp's product fed the drafter's Q8_0 shapes
+(`--test-file`, `~/swarmllm-gate/deep/fr/target_1124/shapes_08b.txt`, two passes, the node stopped) against our
+kernels off an nsys trace of a captured 8-row level (`nsys_unwritten.sqlite`, each product's shape read off the
+activation's quantize launched before it). At 8 rows, llama.cpp → ours (product + stream-K fixup + quantize): FFN up
+3584 × 1024 25-33 → ~20 µs, FFN down 1024 × 3584 23-25 → ~21.5, the 2,048-wide output projections 18.5-19 → ~16, the
+248,320-row head 1,686-1,744 → 806. Every trunk product runs on all 40 SMs (stream-K) with its fixup (2.3-3.1 µs);
+the trunk's weights read at 190-230 GB/s, the head at ~335. The fixups (~139 a level, ~0.4 ms) are what is left of
+this lever, and the kernel that would drop them is slower. A level's MMQ path is ~3.7 ms of its ~5.2 ms of kernels.
+
+### The walk's replay targets are not zeroed (2026-11-24)
+
+Both of `advance_to`'s replays write their target pair whole — `conv_window_replay_f32` every element of the window,
+`delta_rule_replay_f32_d*` every element of the state, and the composition sets both whole (`written_into`) — so
+the pair comes from `qwen35::unwritten_like` (`CudaDevice::alloc_fully_overwritten`), no memset: up to four a
+recurrent layer every forward the walk moved. A/B `SWARMLLM_SSM_REPLAY_TARGET=zeroed`. The card test hands both
+paths NaN-filled targets (red when one is planted). One binary, alternating arms, the node stopped
+(`~/swarmllm-gate/deep/fr/target_1124/`): memsets in a 12-level 0.8B trace 5,111 → 3,527; an 8-row level captured
+(min / median of six) 0.8B 7.92 / 8.04 → 7.61 / 7.71 ms, 2B 12.27 / 12.39 → 12.01 / 12.10; captured against
+ordinary bit for bit on the 0.8B, 2B and 9B.
