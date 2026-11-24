@@ -4681,3 +4681,160 @@ extern "C" __global__ void indexed_moe_forward_q8_0_q8_1(
     indexed_moe_forward<QK8_0, QI8_0, block_q8_0, VDR_Q8_0_Q8_1_MMVQ, vec_dot_q8_0_q8_1>
         (all_weights, all_inputs, indices, all_outputs, n, k, batch, topk, k_padded, input_dim1);     
 }
+
+// SwarmLLM patch: a product of 2-8 activation rows against a Q8_0 weight at the card's
+// streaming rate (`quantized/cuda.rs` `mul_mat_via_rows_tc`; A/B SWARMLLM_QMATMUL_ROWS_TC=0).
+//
+// At 8 rows llama.cpp's MMQ reads a drafter's small weights at 205-250 GB/s plus a stream-k
+// fixup launch, and its vector kernel at 8 rows ~214 GB/s, where this card streams the same
+// bytes at 290-348 GB/s (RTX 3070 Laptop, 2026-11-24). Here each block owns 16 weight rows over
+// all of K; its W warps split K (warp w takes stages w, w+W, ...) and add their sums in warp
+// order, so an output is the same bits every launch and no other launch finishes it. Weights
+// reach shared memory by 16-byte cp.async in a 3-deep ring of 8 k-blocks a stage; each k-block
+// of 32 is ONE int8 tensor-core mma.m16n8k32 — the 16 weight rows as A, the 8 activation rows
+// (zero past the real ones) as B.
+//
+// Prior art: Marlin (async weight staging, many warps in flight, near-ideal to 16-32 rows),
+// GemLite (split-K for 2-32 rows); llama.cpp's MMVQ at n <= 8 and MMQ's stream-k measured here.
+//
+// The activation is quantized as quantize_q8_1 does (d = amax/127 rounded to half, q =
+// round(x/d)), laid out k-block-major so a fragment load is one 128-byte line:
+//   qs int8 [KB][2][8][16] (half h: a block's bytes 16h..16h+15, row by row), then
+//   d  f32  [KB][8]
+// Needs K % 256 == 0 (a stage is 8 whole k-blocks, 272 bytes a row: 16-byte aligned) and sm_80.
+#define SWARM_ROWS_TC_STAGES 3
+#define SWARM_ROWS_TC_SB 8
+#define SWARM_ROWS_TC_ROW_BYTES (SWARM_ROWS_TC_SB * 34)
+#define SWARM_ROWS_TC_STAGE_BYTES (16 * SWARM_ROWS_TC_ROW_BYTES)
+
+// Grid (KB), block (32, 8): warp r quantizes row r's k-block; rows past `rows` are zeros.
+extern "C" __global__ void quantize_q8_1_rows_tc(
+    const float *__restrict__ x, int8_t *__restrict__ act, const int k, const int rows) {
+    const int kb = blockIdx.x, r = threadIdx.y, i = threadIdx.x;
+    const int nkb = k / QK8_1;
+    const float xi = r < rows ? x[(size_t)r * k + kb * QK8_1 + i] : 0.0f;
+    const float amax = warp_reduce_max(fabsf(xi));
+    const float d = amax / 127;
+    const int8_t q = amax == 0.0f ? 0 : roundf(xi / d);
+    act[(size_t)kb * 256 + (i >> 4) * 128 + r * 16 + (i & 15)] = q;
+    if (i == 0) {
+        float *ds = (float *)(act + (size_t)nkb * 256);
+        ds[(size_t)kb * 8 + r] = __half2float(__float2half(d));
+    }
+}
+
+#if __CUDA_ARCH__ >= 800
+static __device__ __forceinline__ void swarm_cp_async16(void *smem, const void *gmem, bool pred) {
+    const unsigned s = (unsigned)__cvta_generic_to_shared(smem);
+    const int n = pred ? 16 : 0;
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(s), "l"(gmem), "r"(n));
+}
+// Four bytes at a 2-byte-aligned shared address (a Q8_0 block's quants start 2 bytes in).
+static __device__ __forceinline__ uint32_t swarm_ld_u32_a2(const uint8_t *p) {
+    const uint16_t *h = (const uint16_t *)p;
+    return (uint32_t)h[0] | ((uint32_t)h[1] << 16);
+}
+#endif
+
+// Grid (ceil(nrows_x / 16)), block (32, W), dynamic shared W * 3 * 4352 bytes.
+// dst [nrows_act][nrows_x]: every element assigned once.
+extern "C" __global__ void __launch_bounds__(32 * 3) mul_mat_q8_0_rows_tc(
+    const uint8_t *__restrict__ vx, const int8_t *__restrict__ act, float *__restrict__ dst,
+    const int ncols_x, const int nrows_x, const int nrows_act) {
+#if __CUDA_ARCH__ >= 800
+    extern __shared__ __align__(16) uint8_t swarm_rows_tc_smem[];
+    constexpr int STAGES = SWARM_ROWS_TC_STAGES, SB = SWARM_ROWS_TC_SB;
+    constexpr int ROW_BYTES = SWARM_ROWS_TC_ROW_BYTES, STAGE_BYTES = SWARM_ROWS_TC_STAGE_BYTES;
+    constexpr int CHUNKS = STAGE_BYTES / 16;
+    const int warp = threadIdx.y, W = blockDim.y, lane = threadIdx.x;
+    const int n0 = blockIdx.x * 16;
+    uint8_t *ring = swarm_rows_tc_smem + warp * (STAGES * STAGE_BYTES);
+    const int kb_total = ncols_x / QK8_0;
+    const int stages_all = kb_total / SB;
+    const int stages = (stages_all - warp + W - 1) / W;
+    const size_t row_bytes_x = (size_t)kb_total * 34;
+    const float *ad = (const float *)(act + (size_t)kb_total * 256);
+
+    auto issue = [&](int i) {
+        const int s = warp + i * W;
+        uint8_t *st = ring + (i % STAGES) * STAGE_BYTES;
+#pragma unroll
+        for (int c = lane; c < CHUNKS; c += 32) {
+            const int row = c / 17, piece = c % 17;
+            const bool ok = n0 + row < nrows_x;
+            const uint8_t *src = vx + (size_t)(ok ? n0 + row : n0) * row_bytes_x
+                + (size_t)s * ROW_BYTES + piece * 16;
+            swarm_cp_async16(st + row * ROW_BYTES + piece * 16, src, ok);
+        }
+    };
+
+    const int g = lane >> 2, t = lane & 3;
+    float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+#pragma unroll
+    for (int i = 0; i < STAGES - 1; i++) {
+        if (i < stages) issue(i);
+        asm volatile("cp.async.commit_group;\n" ::);
+    }
+    for (int i = 0; i < stages; i++) {
+        const int s = warp + i * W;
+        uint32_t b0[SB], b1[SB];
+        float2 da[SB];
+#pragma unroll
+        for (int j = 0; j < SB; j++) {
+            const int kb = s * SB + j;
+            const int8_t *q = act + (size_t)kb * 256 + g * 16 + 4 * t;
+            b0[j] = __ldg((const unsigned *)q);
+            b1[j] = __ldg((const unsigned *)(q + 128));
+            da[j] = __ldg((const float2 *)(ad + (size_t)kb * 8 + 2 * t));
+        }
+        asm volatile("cp.async.wait_group %0;\n" ::"n"(STAGES - 2));
+        __syncwarp();
+        const uint8_t *st = ring + (i % STAGES) * STAGE_BYTES;
+#pragma unroll
+        for (int j = 0; j < SB; j++) {
+            const uint8_t *wg = st + g * ROW_BYTES + j * 34;
+            const uint8_t *wg8 = wg + 8 * ROW_BYTES;
+            const uint32_t a0 = swarm_ld_u32_a2(wg + 2 + 4 * t), a2 = swarm_ld_u32_a2(wg + 18 + 4 * t);
+            const uint32_t a1 = swarm_ld_u32_a2(wg8 + 2 + 4 * t), a3 = swarm_ld_u32_a2(wg8 + 18 + 4 * t);
+            const float dwg = __half2float(*(const half *)wg), dwg8 = __half2float(*(const half *)wg8);
+            int c0, c1, c2, c3;
+            asm volatile(
+                "mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 "
+                "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
+                : "=r"(c0), "=r"(c1), "=r"(c2), "=r"(c3)
+                : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0[j]), "r"(b1[j]),
+                  "r"(0), "r"(0), "r"(0), "r"(0));
+            acc[0] += (float)c0 * (dwg * da[j].x);
+            acc[1] += (float)c1 * (dwg * da[j].y);
+            acc[2] += (float)c2 * (dwg8 * da[j].x);
+            acc[3] += (float)c3 * (dwg8 * da[j].y);
+        }
+        __syncwarp();
+        if (i + STAGES - 1 < stages) issue(i + STAGES - 1);
+        asm volatile("cp.async.commit_group;\n" ::);
+    }
+    // The warps' sums, added in warp order.
+    __shared__ float4 part[3][32];
+    if (W > 1) {
+        if (warp > 0) part[warp][lane] = make_float4(acc[0], acc[1], acc[2], acc[3]);
+        __syncthreads();
+        if (warp > 0) return;
+        for (int w = 1; w < W; w++) {
+            const float4 p = part[w][lane];
+            acc[0] += p.x; acc[1] += p.y; acc[2] += p.z; acc[3] += p.w;
+        }
+    }
+    // c0 / c1: weight row g, activation rows 2t / 2t + 1; c2 / c3: weight row g + 8.
+    const int r0 = 2 * t, r1 = 2 * t + 1, ng = n0 + g, ng8 = n0 + g + 8;
+    if (r0 < nrows_act) {
+        if (ng < nrows_x) dst[(size_t)r0 * nrows_x + ng] = acc[0];
+        if (ng8 < nrows_x) dst[(size_t)r0 * nrows_x + ng8] = acc[2];
+    }
+    if (r1 < nrows_act) {
+        if (ng < nrows_x) dst[(size_t)r1 * nrows_x + ng] = acc[1];
+        if (ng8 < nrows_x) dst[(size_t)r1 * nrows_x + ng8] = acc[3];
+    }
+#else
+    __trap();
+#endif
+}

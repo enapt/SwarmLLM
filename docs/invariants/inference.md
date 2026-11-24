@@ -4675,6 +4675,77 @@ is a near-tie.
 - A llama.cpp update re-copies the headers verbatim and re-reads `launch_mul_mat_q` /
   `mul_mat_q_switch_J` against `swarm_mmq.cuh`.
 
+### 2-8 rows of a Q8_0 weight: one tensor-core kernel at the card's streaming rate (2026-11-24)
+
+**What it replaced.** A drafter's flowing level is 8 rows, and a Qwen 3.5 0.8B or 2B drafter is
+Q8_0 throughout. Below MMQ's few-rows line (7 rows for Q8_0, weights of 2 MiB or more) the vector
+kernel ran; from it, MMQ. A 0.8B level's trunk products were ~2.3 ms of its ~4.95 ms of card time:
+MMQ read those weights at 205-250 GB/s and ran a stream-k fixup launch after each one (0.36 ms a
+level), and the vector kernel at 8 rows read ~214 GB/s. Streaming the same bytes once, back to back
+in a graph with nothing reused from L2, reads 290-368 GB/s on this card (RTX 3070 Laptop, 40 SMs:
+2.18 MB 7.1 µs, 3.9 MB 11.7, 6.68 MB 19.2, 62 MB 168).
+
+**Research.** Marlin (async weight staging, many warps in flight, near-ideal to 16-32 rows) and
+GemLite (split-K at 2-32 rows) say a few-row product is a streaming problem; llama.cpp's MMVQ at
+n ≤ 8 (master, timed here at 214 GB/s on a 62 MB Q8_0 weight) and MMQ's stream-k were measured
+rather than assumed. What was taken: async staging and split-K inside a block. What was not:
+Marlin's offline re-layout (GGUF bytes are read in place, and every node holds one upload) and a
+split-K over blocks, which needs a fixup or atomics — order-dependent bits.
+
+**The kernel** (`mul_mat_q8_0_rows_tc`, candle-kernels `quantized.cu`; Rust `mul_mat_via_rows_tc`).
+A block owns 16 weight rows over all of K. Its W warps (1, or up to 3 where the weight has fewer than
+128 groups of 16 rows: `rows_tc_warps`, the shape alone) take stages w, w+W, …; each stage is 8
+k-blocks (272 bytes a row, so K % 256 == 0 keeps every 16-byte `cp.async` aligned), staged in a
+3-deep ring; each k-block is ONE `mma.m16n8k32.s8` with the weights as A and the 8 activation rows
+(zeros past the real ones) as B. The warps' sums are added in warp order through shared memory, so
+an output is the same bits every launch and nothing else finishes it. The activation is quantized
+as `quantize_q8_1` does, laid out k-block-major (`quantize_q8_1_rows_tc`) so a fragment load is one
+128-byte line, and shared across `forward_shared`'s weights under its own layout key
+(`ROWS_TC_LAYOUT`, -2). Shared memory stays ≤ 3 × 13,056 bytes: under the 48 KB a launch may ask
+for without raising the kernel's limit, a driver call no capture may see (gotcha #841's class).
+
+**Measured** (standalone harness `~/swarmllm-gate/deep/fr/rowstc_1124/rowstc3.cu`, 8 rows, best of
+three, µs; MMQ + fixup from nsys of a captured 0.8B level → this kernel, the floor in brackets):
+`wqkv` 6,144 × 1,024 29.3 → 23.1 (19.1); `wz` 2,048 × 1,024 13.3 → 8.7 (7.2); `ssm_out` 1,024 ×
+2,048 14.0 → 8.6 (7.2); FFN gate/up 3,584 × 1,024 21.2 → 15.1 (11.7); FFN down 1,024 × 3,584 19.3 →
+13.7 (11.7); the 248,320-row head 817 → 767 (725). Against an exact host product the error was
+~1e-7 of the terms' size.
+
+**In a captured flowing level** (8 rows, the pace probe `flowing_levels_pace_captured_and_op_by_op`
+reading as the drafter does, `SWARMLLM_QMATMUL_ROWS_TC=0` / on interleaved 0 1 1 0 0 1 1 0 in ONE
+binary, live node stopped, mean of a pass's levels after the first four, best / median of eight
+passes; `~/swarmllm-gate/deep/fr/rowstc_int_1124/`): the 0.8B drafter 6.46 / 6.95 → 5.67 / 5.78 ms
+a level, the 2B 11.08 / 11.18 → 9.58 / 9.68; the 9B (Q4_K, which the kernel does not take: the
+control) 26.31 / 26.68 → 26.39 / 26.65. The graph-level trace shows the mechanism: 3,322 launches
+of `mul_mat_q8_0_rows_tc` inside the captured graphs and none of MMQ's. Captured = ordinary stays at
+worst logit difference 0 on all three files.
+
+**In replies, judged against llama.cpp** (card daemon, live node stopped, greedy, 200 tokens, the switch
+0 1 0 1, `examples/score_against_reference.py`; `~/swarmllm-gate/deep/fr/rowstc_reply_1124/`):
+Llama 3.2 1B Q8_0 wrote the same three replies in all four runs, every token llama.cpp's first
+choice. Qwen3 1.7B Q8_0 (scored with its reasoning, which the stock scorer does not read) differed
+from llama.cpp only at near-ties on both arms: off, 2 tokens at rank 2 (gaps up to 0.50) on two
+prompts and 1 on the third; on, 0, 1 (rank 3, gap 0.18) and 1 (gap 0.05). The off arm was not even
+repeatable run to run (two prompts' reasoning differed between its two runs), the on arm was. In a
+real reply an 8-position speculative check launched it 197 times (`SWARMLLM_COUNT_KERNELS=1`: seven
+products a layer of the 28, and the head).
+
+**What a change must keep.**
+- **Capture-safe**: `rows_tc_takes` and `rows_tc_warps` are pure (dtype, rows, K, the environment,
+  the compiled-in PTX's `.target`); no attribute raise, no memset, every buffer fully written
+  (`alloc_fully_overwritten`).
+- **Deterministic**: an output's sum order depends on the weight's shape only — never the card, the
+  rows riding with it, or a capture.
+- **Never launched where it traps**: below compute 8.0 the body is `__trap()`, so a module whose PTX
+  targets less never takes it (`quantized_ptx_target`); a weight not 16-byte aligned keeps the
+  kernels before it.
+- Judged against the f64 product of the same quantized weight and against llama.cpp, never the bits
+  of MMQ or the vector kernel (another order of the same block products).
+- A/B `SWARMLLM_QMATMUL_ROWS_TC=0`; `rows_tc_products()` proves it fired. Test
+  `card_quantized_products::a_few_rows_q8_0_product_on_the_tensor_cores_is_each_rows_own`.
+- Not covered: K % 256 != 0 (a Qwen2.5-0.5B drafter's 896 stays on MMQ / the vector kernel), the
+  k-quants (design: `memory/archive/fable_batch_1124.md` § 2).
+
 ### Tried and reverted: smaller MMQ tiles for 9-40 rows (2026-10-22)
 
 **The hypothesis.** At 24-32 rows the 7B's Q4_K products ran at ~50% of the card's bandwidth, and

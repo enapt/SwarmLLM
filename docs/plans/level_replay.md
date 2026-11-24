@@ -242,3 +242,19 @@ tile sums its parts in the fixup's order — the same bits, no block waits on an
 **A delta-rule warp owns four state rows** (2026-11-24): the layer's 2,048 warps no longer spill into a second wave
 and four rows share each token's loads — `delta_rule_flow_stored` 33.7 → 23.7 µs a layer, the mean level 0.8B 7.95 →
 7.83 ms, 2B 12.44 → 12.15, bit for bit (`docs/invariants/inference.md` § "Four state rows a warp").
+
+**The replay branch, re-measured with the probe reading as the drafter does** (2026-11-24, `level-replay-a` rebased
+onto main, still local): bitwise, and still only 2-3% — mean level, best run, 0.8B 6.65 → 6.45 ms, 2B 11.20 → 11.00,
+9B 26.40 = 26.40; the staging that stays is 0.99-2.66 ms (median). It stays off main until the staging shrinks: a
+Fable pass (memory `archive/fable_batch_1124.md` § 3) found every third level is a STORE COMPACTION (`make_room`'s 90
+gathers, `store_capacity_for`'s 32-slot floor) — also the replay key's misses — and the room claim runs
+`cuMemGetInfo` every flowing level for the scratch pair's term.
+
+**The trunk's products at 8 rows run on one tensor-core kernel** (2026-11-24): 2-8 rows of a Q8_0 weight go to
+`mul_mat_q8_0_rows_tc` ahead of MMQ and the vector kernel — no stream-k fixup, the same bits every launch. Mean level
+(best / median of eight passes, `SWARMLLM_QMATMUL_ROWS_TC=0` interleaved): 0.8B 6.46 / 6.95 → 5.67 / 5.78 ms, 2B
+11.08 / 11.18 → 9.58 / 9.68; the 9B (Q4_K, not taken) unchanged (`docs/invariants/inference.md` § "2-8 rows of a Q8_0
+weight"). A Q4_K version (step 0, standalone `rowstc_1124/rowstc_q4k.cu`) is correct to ~1e-7 but 1.5-2x the floor,
+slower than MMQ on all but the smallest weight: more stages HURT and more warps help (occupancy-bound by shared memory
+a block), and its instruction mix is integer-heavy (address arithmetic, scale unpacking) — the next version stages
+less a warp and unpacks a superblock's scales once.
