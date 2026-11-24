@@ -1693,6 +1693,9 @@ impl PipelineExecutor {
             verdict_ms = format_args!("{:.0}", run.verdicts.kept_ms_median()),
             miss_verdict_ms = format_args!("{:.0}", run.verdicts.missed_ms_median()),
             voided_levels = run.verdicts.voided_levels,
+            taken_ranks = %Verdicts::ranks_line(run.verdicts.taken_ranks),
+            offered_ranks = %Verdicts::ranks_line(run.verdicts.offered_ranks),
+            levels_ahead_median = format_args!("{:.0}", run.verdicts.levels_ahead_median()),
             "DSD: a tree that flowed is complete"
         );
         outcome.map_err(|error| FlowFailed {
@@ -2002,24 +2005,36 @@ impl FlowRun<'_, '_> {
     fn note_verdicts(&mut self, reached: usize, missed: bool) {
         let now = std::time::Instant::now();
         let from = self.flow.at();
+        let tree = self.flow.tree();
+        let drafted_at = &self.drafted_at;
+        let copied = &self.copied;
+        // The drafter's own guesses under a row, best first: its queue pops
+        // siblings in the order of their own scores (`split::draft`'s
+        // `grow_flow`), and a row's children are its pushes in order. A
+        // copied row and the walk's own draw are not the drafter's.
+        let guessed = |parent: Option<usize>| {
+            tree.children(parent).filter(move |&row| {
+                matches!(drafted_at.get(row), Some(Some(_)))
+                    && matches!(copied.get(row), Some(Copied::No))
+            })
+        };
         let mut row = reached;
         while row != from {
-            if let Some(Some(at)) = self.drafted_at.get(row) {
+            if let Some(Some(at)) = drafted_at.get(row) {
                 self.verdicts.kept(now.duration_since(*at));
             }
-            match self.flow.tree().parent(row) {
+            let parent = tree.parent(row);
+            // A verdict the drafter's guess decided; one a copied row or the
+            // walk's own draw took says nothing of its ranks.
+            if let Some(rank) = guessed(parent).position(|guess| guess == row) {
+                self.verdicts.offered(guessed(parent).count());
+                self.verdicts.taken(rank);
+            }
+            match parent {
                 Some(parent) => row = parent,
                 None => break,
             }
         }
-        if !missed {
-            return;
-        }
-        let tree = self.flow.tree();
-        let lost = tree
-            .children(Some(reached))
-            .filter_map(|child| self.drafted_at.get(child).copied().flatten())
-            .min();
         // Levels beneath the walk's row, deepest first found breadth-first.
         let mut levels = 0u32;
         let mut frontier: Vec<usize> = tree.children(Some(reached)).collect();
@@ -2030,6 +2045,18 @@ impl FlowRun<'_, '_> {
                 .flat_map(|&row| tree.children(Some(row)))
                 .collect();
         }
+        self.verdicts.ahead(levels);
+        if !missed {
+            return;
+        }
+        let guesses = guessed(Some(reached)).count();
+        if guesses > 0 {
+            self.verdicts.offered(guesses);
+        }
+        let lost = tree
+            .children(Some(reached))
+            .filter_map(|child| drafted_at.get(child).copied().flatten())
+            .min();
         self.verdicts
             .missed(lost.map(|at| now.duration_since(at)), levels);
     }
@@ -2886,12 +2913,30 @@ impl FlowRun<'_, '_> {
 /// waited from its drafting to the walk reaching it, how long the level that
 /// lost waited, and how many levels each miss threw away. Logged on the
 /// reply's line only; nothing reads it to decide.
+///
+/// It also counts what decides a flow's speed in prose (#228's prose bar,
+/// `docs/plans/faster_than_local.md`): the drafter's RANK of each guess the
+/// walk took, among its own guesses under the same row, against how many
+/// verdicts offered that rank — Sequoia's acceptance vector, P(the rank-j child
+/// is taken | its parent was), read off each reply instead of an offline
+/// replay (Prior art: Sequoia, arXiv 2402.12374, whose `test_accept.py`
+/// measures it offline to shape a static tree) — and how many levels stood
+/// beneath the walk's row as each walk ended.
 #[derive(Default)]
 struct Verdicts {
     kept_ms: Vec<f32>,
     missed_ms: Vec<f32>,
     /// Levels drafted beneath a missed row, summed over the reply's misses.
     voided_levels: u32,
+    /// Verdicts the walk took at the drafter's first, second, third, and
+    /// fourth or later guess under their row.
+    taken_ranks: [u32; 4],
+    /// Verdicts at a row with at least one, two, three, four guesses of the
+    /// drafter's under it — taken or not (`taken_ranks[j] / offered_ranks[j]`
+    /// is the rank's acceptance; the last bucket pools the ranks past it).
+    offered_ranks: [u32; 4],
+    /// Levels standing beneath the walk's row as each walk ended.
+    levels_ahead: Vec<f32>,
 }
 
 impl Verdicts {
@@ -2920,6 +2965,36 @@ impl Verdicts {
 
     fn missed_ms_median(&self) -> f32 {
         median_of(&self.missed_ms)
+    }
+
+    /// The walk took the drafter's guess of `rank` (0: its first).
+    fn taken(&mut self, rank: usize) {
+        let at = rank.min(self.taken_ranks.len() - 1);
+        self.taken_ranks[at] = self.taken_ranks[at].saturating_add(1);
+    }
+
+    /// A verdict at a row the drafter had `guesses` guesses under.
+    fn offered(&mut self, guesses: usize) {
+        for count in self.offered_ranks.iter_mut().take(guesses) {
+            *count = count.saturating_add(1);
+        }
+    }
+
+    /// A walk ended with `levels` levels standing beneath its row.
+    fn ahead(&mut self, levels: u32) {
+        if self.levels_ahead.len() < Self::MOST_KEPT {
+            self.levels_ahead.push(levels as f32);
+        }
+    }
+
+    fn levels_ahead_median(&self) -> f32 {
+        median_of(&self.levels_ahead)
+    }
+
+    /// `first/second/third/later` for the reply's line.
+    fn ranks_line(ranks: [u32; 4]) -> String {
+        let [first, second, third, later] = ranks;
+        format!("{first}/{second}/{third}/{later}")
     }
 }
 
@@ -2965,6 +3040,25 @@ mod tests {
         assert_eq!(verdicts.kept_ms_median(), 200.0);
         assert_eq!(verdicts.missed_ms_median(), 300.0);
         assert_eq!(verdicts.voided_levels, 12);
+    }
+
+    /// A rank past the fourth is pooled into the last bucket, and a verdict
+    /// offers every rank up to its row's guesses.
+    #[test]
+    fn verdicts_count_each_rank_taken_against_the_ranks_offered() {
+        let mut verdicts = Verdicts::default();
+        for (guesses, rank) in [(3, Some(0)), (5, Some(4)), (2, Some(1)), (1, None)] {
+            verdicts.offered(guesses);
+            if let Some(rank) = rank {
+                verdicts.taken(rank);
+            }
+        }
+        assert_eq!(Verdicts::ranks_line(verdicts.taken_ranks), "1/1/0/1");
+        assert_eq!(Verdicts::ranks_line(verdicts.offered_ranks), "4/3/2/1");
+        for levels in [3, 1, 2] {
+            verdicts.ahead(levels);
+        }
+        assert_eq!(verdicts.levels_ahead_median(), 2.0);
     }
 
     fn feed(g: &mut FlowGuard, t0: Instant, sent_ms: u64, delay: f64) {
