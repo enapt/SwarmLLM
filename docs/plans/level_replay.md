@@ -258,3 +258,13 @@ weight"). A Q4_K version (step 0, standalone `rowstc_1124/rowstc_q4k.cu`) is cor
 slower than MMQ on all but the smallest weight: more stages HURT and more warps help (occupancy-bound by shared memory
 a block), and its instruction mix is integer-heavy (address arithmetic, scale unpacking) — the next version stages
 less a warp and unpacks a superblock's scales once.
+
+**The Q4_K kernel, third version, on main** (2026-11-24): the second version (fewer stages a warp, scales a word at a
+time) was still slower than MMQ, and an arm with no activation loads streamed at 1.05-1.2x the floor — the gap was
+each warp re-reading the activation from L2. The third shares it: a block's four warps own 16 rows each at the same k
+and the activation's stage is copied once a block. 4-24 rows of a Q4_K weight of 4,096+ rows now take it
+(`mul_mat_q4_k_rows_tc_{8,16,24}`, A/B `SWARMLLM_QMATMUL_ROWS_TC_K=0`): the whole 9B's captured level 31.0-31.5 →
+27.8-28.2 ms at 16 rows and 25.8-26.3 → 22.8-23.1 at 8 (arms interleaved, the card cooled under 65 C before each);
+replies of two Q4_K_M models score against llama.cpp as before (`docs/invariants/inference.md` § "4-24 rows of a large
+Q4_K weight"). Next on the same products: Q5_K (the 9B's `attn_qkv` and `ssm_out`, 48 a forward still on MMQ), then
+Q6_K.

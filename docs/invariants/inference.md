@@ -4743,8 +4743,69 @@ products a layer of the 28, and the head).
   of MMQ or the vector kernel (another order of the same block products).
 - A/B `SWARMLLM_QMATMUL_ROWS_TC=0`; `rows_tc_products()` proves it fired. Test
   `card_quantized_products::a_few_rows_q8_0_product_on_the_tensor_cores_is_each_rows_own`.
-- Not covered: K % 256 != 0 (a Qwen2.5-0.5B drafter's 896 stays on MMQ / the vector kernel), the
-  k-quants (design: `memory/archive/fable_batch_1124.md` § 2).
+- Not covered: K % 256 != 0 (a Qwen2.5-0.5B drafter's 896 stays on MMQ / the vector kernel); the
+  Q4_K weights have a kernel of their own (§ "4-24 rows of a large Q4_K weight"), Q5_K and Q6_K none yet.
+
+### 4-24 rows of a large Q4_K weight: four warps share one staged activation (2026-11-24)
+
+**What it replaced.** A 9B, 14B or 27B segment's near forward is 8-16 rows (a flowing level, a tree check), a local
+speculative check up to 8, a short prompt up to 24, and a Q4_K_M file is mostly Q4_K. From 4 rows
+(`mmq_fewest_rows_default` for a k-quant) llama.cpp's MMQ ran them, at 1.35-2.4x the time of streaming the weight's
+bytes once: it unpacks each tile's nibbles and scales into shared memory before its mma. Timed against our vendored
+`libggml_mmq.a` directly, in the same graph of products as the kernel (llama.cpp's `test-backend-ops` read 250 µs at
+8 rows where nsys of our captured levels read ~70 — not used).
+
+**Prior art.** As the Q8_0 kernel (Marlin, GemLite), plus llama.cpp's own Q4_K path (`load_tiles_q4_K`,
+`vec_dot_q4_K_q8_1_mma`) and its q8_1 "DS4" activation, copied exactly: d = amax/127 by its reciprocal, q =
+round(x · 127/amax), and beside d the sum of the 32 FLOATS (half2), which carries the Q4_K minimum.
+
+**Three versions, standalone** (`~/swarmllm-gate/deep/fr/rowstc_1124/rowstc_q4k{,_v2,_v3}.cu`, graph-timed, MMQ in
+the same binary). Step 0, the Q8_0 kernel's shape (warps split K): correct, slower than MMQ on large weights. v2
+(contiguous K a warp, two superblocks a stage, the scales unpacked a word at a time): still 1.0-1.9x MMQ. The
+experiment that decided it (`q4k_v2x.log`, four modes interleaved three times): with NO activation loads it streamed
+at 1.05-1.2x the floor (9B FFN up 82-91 µs against 77.5) — the whole gap was each warp re-reading the activation from
+L2 a superblock, latency exposed, the shared-memory carve-out leaving no L1 for it. v3, shipped: a block's four warps
+own 16 weight rows each at the SAME k, and the activation's stage (int8 + (d, Σx)) is copied ONCE a block into the
+ring beside the weights; the raw 144-byte blocks are staged by 16-byte `cp.async`, a nibble mask in registers makes
+each 32-value sub-block one `mma.m16n8k32.s8` operand, and each output is one thread's sum over the superblocks and
+sub-blocks in order, the fused steps pinned (`__fmaf_rn` / `__fmul_rn`) and the three widths (8, 16, 24 rows) one
+device function — so a row's bits do not depend on the rows riding with it. One pass over K (MMQ → v3, the floor in
+brackets, µs): 9B FFN up 12,288 × 4,096 at 8 rows 127.4 → 94.5, 16 rows 141.0 → 108.3 (77.7); 9B down 4,096 ×
+12,288 at 16 rows 145.3 → 101.8, 24 rows 167.8 → 146.1 (77.7); 14B q/o 5,120 × 5,120 at 16 rows 75.8 → 57.2 (41.3);
+27B down 5,120 × 17,408 at 16 rows 240.6 → 158.5 (136.9). At 24 rows a feed-forward up is MMQ's within 2% (9B 148.2
+→ 150.1, 27B 234.0 → 239.5), every other shape faster. A 1,024-row key or value is 16 blocks on a 40-processor card:
+25-45 µs one pass against MMQ's 18-20, so `ROWS_TC_K_LEAST_WEIGHT_ROWS` (4,096) keeps it on MMQ. A split of K over 4
+blocks with the last block summing the splits in order read 9.9-17 µs there — not built: its self-resetting counters
+need memory made and zeroed outside any capture.
+
+**In a captured flowing level** (the whole Qwen3.5-9B Q4_K_M, `flowing_levels_pace_captured_and_op_by_op`,
+`SWARMLLM_QMATMUL_ROWS_TC_K=0` / on interleaved 0 1 1 0 0 1 1 0 0 1 in ONE binary, live node stopped, each arm started
+with the card under 65 C, two passes' medians an arm; `~/swarmllm-gate/deep/fr/rowstc_k_1124/cool16b/`): 16 rows
+30.98-31.47 → 27.82-28.18 ms a level (one first pass 29.94), 8 rows 25.82-26.32 → 22.78-23.07. A first sitting with
+no wait between arms heated the card to 86-87 C and both arms drifted 30 → 39 ms (gotcha #1169). A graph-level trace
+of 16 rows shows the mechanism: 6,240 launches of `mul_mat_q4_k_rows_tc_16` inside the graphs (12,288-row weights
+97.9 µs each, 8,192 67.7, 4,096 54.1); MMQ still ran 6,656 products (52.4 µs on average) and the head 52 — the file's
+Q5_K `attn_qkv` / `ssm_out` (48 products a forward), Q6_K `ffn_down` in 16 layers and `attn_v`, the 1,024-row keys
+and values. Captured = ordinary: worst logit difference 0.
+
+**In replies, judged against llama.cpp** (card daemon, live node stopped, greedy, 200 tokens, the switch 0 1 0 1,
+`examples/score_against_reference.py`; `rowstc_k_1124/`): Qwen2.5-Coder-7B Q4_K_M wrote the same three replies in all
+four runs, every token llama.cpp's first choice. GLM-4-9B-0414 Q4_K_M wrote the same two short replies in all four
+(the first token ranks 40 and 3 there on every run — the scorer's, not the kernel's); on the code prompt three runs
+were identical and one on-arm run took llama.cpp's first choice at token 55, a near-tie the other three took at rank 3
+(gap 0.75), and wrote on from there: both arms differ from llama.cpp only at gaps ≤ 1.55 past the first token. In a real GLM-4 reply
+(`SWARMLLM_COUNT_KERNELS=1`) it launched three times a layer, at 24 rows for the 19-token prompt and 8 for the
+speculative checks.
+
+**What a change must keep** — the Q8_0 kernel's list, and:
+- `rows_tc_takes(dtype, rows, n, k)` reads the weight's rows: below 4,096 the kernel loses.
+- The shared group holds one activation per layout (`SHARED_Q8` is a list): a Q4_K query on this kernel and its key
+  and value on MMQ read two, and before it one slot made the second layout quantize again for every weight after.
+- A/B `SWARMLLM_QMATMUL_ROWS_TC_K=0` (this kernel only); test
+  `card_quantized_products::a_few_rows_q4_k_product_on_the_tensor_cores_is_each_rows_own` (each width's rows the
+  24-row product's bit for bit, a group across both kernels, a capture, f64).
+- Not covered: Q5_K (the same scales plus a high bit from `qh`; next — the 9B's 48 products a forward), Q6_K (210-byte
+  blocks: a stage of one superblock is not 16-byte aligned), 25+ rows, and the 1,024-row weights.
 
 ### Tried and reverted: smaller MMQ tiles for 9-40 rows (2026-10-22)
 
