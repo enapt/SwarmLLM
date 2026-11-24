@@ -1202,6 +1202,18 @@ pub fn gpu_memory_bandwidth_gbps(name: &str) -> f32 {
 /// the measurement. The tester's figure came over HTTP and is not calibration
 /// data; it only agrees the old constant was low.
 ///
+/// **Re-measured 2026-11-24 (FUTURE_WORK #493): 0.55 stands.** The same harness
+/// and card, graphs captured: 58.1-58.9 tok/s at ~912 KV (17.0-17.2 ms/token),
+/// 55.1 at ~1,864 — 0.54-0.585 of the roofline. A node's own reply reads faster
+/// (the release check's summary: 14.0-14.2 ms/token at a 1,811-token prompt)
+/// because prompt lookup (`ngram_lookup`) copies the document's phrases, several
+/// tokens a forward. That is real for a reply, but it is not the cost of a
+/// forward, which is what this figure prices — guessing is priced on its own.
+/// Never calibrate this constant from a reply's tok/s (gotcha #1137).
+/// Prior art: llamaperf.com's calculator is this formula, calibrated to 0.74-0.79
+/// against llama.cpp's scoreboards (token generation from an empty cache);
+/// llama.cpp itself writes this shape at ~61 tok/s on this card, 0.60.
+///
 /// Re-measure with:
 /// ```text
 /// SWARM_BENCH_MODEL=<7B Q4 dir> SWARM_BENCH_PROMPT=896 SWARM_BENCH_DECODE=32 \

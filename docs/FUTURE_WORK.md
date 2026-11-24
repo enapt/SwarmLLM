@@ -2233,40 +2233,44 @@ disconnects — or have the newcomer's catch-up carry the holdings point to poin
 are. Either way a capability is a peer's claim, so it may add a holder for planning and never
 remove one. Measure the newcomer's first-plan delay before and after.
 
-#### #493 — A graphics card advertises ~0.55 of its memory roofline; this card decodes at ~0.76-0.80 now
+#### #493 — A processor advertises 0.75 of its memory bandwidth and decodes at ~1.0 of it; the card's 0.55 was right
 
-`P3` · routing · **OPEN** — 2026-11-22 · history: #225 (§ Closed: the constant was 0.35, raised to 0.55 on 2026-10-06)
+`P3` · routing · **OPEN** (narrowed 2026-11-24) · history: #225 (§ Closed: the constant was 0.35, raised to 0.55 on 2026-10-06)
 
 Every node gossips `NodeCapability.est_tokens_per_sec_7b` from `vram::estimate_tokens_per_sec_7b`: bandwidth (the
-card-name table, 448 GB/s for this RTX 3070 Laptop) ÷ `MODEL_SIZE_7B_Q4_GB` (4.4) × an efficiency, **0.55 for a card,
-0.75 for a processor** (`vram.rs`, `let efficiency = if is_gpu { 0.55 } else { 0.75 }`). The planner prices a peer it
-has never measured from that figure (`scheduler/mod.rs`, `1000 / tokens_per_sec_7b / parallax::BASELINE_LAYER_COUNT`). 0.55 was set
-from 59.53 tok/s (0.585 of the roofline) on 2026-10-06; the README's v0.3.305 release check reads Qwen2.5-Coder-7B
-Q4_K_M on this card at **77 tok/s**, i.e. **0.76** against the 4.4 GB reference (0.80 against the file's ~4.7 GB). So an
-unmeasured card is priced ~1.4x slower than it is, and — the processor constant not having moved — ~1.4x slow
-AGAINST an unmeasured processor: a cold plan can lean to a processor peer it should not.
+card-name table, 448 GB/s for this RTX 3070 Laptop; a processor's own probe, `mem_bandwidth::measured_gbps`) ÷
+`MODEL_SIZE_7B_Q4_GB` (4.4) × an efficiency, **0.55 for a card, 0.75 for a processor**. The planner prices a peer it
+has never measured from that figure (`scheduler/mod.rs`, `1000 / tokens_per_sec_7b / parallax::BASELINE_LAYER_COUNT`),
+and `coverage::near_chain`'s `Devices::of` prices a machine's card against ITS OWN processor from
+`est_tokens_per_sec_7b` and `processor_tokens_per_sec_7b`.
+**The card half is closed: 0.55 stands (2026-11-24, 16:51-17:00Z).** The harness in the function's doc comment
+(`prefill_bench`, `--features cuda` release build of main, live node stopped, card 731 MiB idle, the graph module's
+"one CUDA graph" line seen) reads Qwen2.5-Coder-7B Q4_K_M at **58.88 / 58.63 tok/s** (two sittings, best of three,
+~912 KV), 57.7 at a 128-token decode, **55.1 at ~1,864 KV** — 0.54-0.585 of 448 ÷ 4.4. The 11-22 "74-77 tok/s, 0.73-0.76"
+came from the release check's speed step: a node's reply to a summary, where prompt lookup (`ngram_lookup`) copies the
+document's phrases several tokens a forward (14.0-14.2 ms a token against the harness's 18.1 at the same depth; gotcha
+#1137 measured written-new at 54-57, llama.cpp 61). That rate is real for a reply but is not a forward's cost, which is
+what the figure prices. The doc comment now says never to calibrate from a reply's tok/s.
+**The processor half is what remains.** In the same sitting Llama-3.2-3B Q4_K_M (2.343 GB a token) decoded on this
+Ryzen 7 5800H at **17.17 / 16.70 tok/s** = 39-40 GB/s, against the node's own probe at 37.7-39.1 GB/s (its code run
+standalone, 8 threads; 31.5 at 16) — **~1.0-1.07 of the probe**, where the constant says 0.75 (2026-09-01's table had
+0.82-0.90 on two machines; processor decode got faster since). So an unmeasured processor is priced ~1.35x slow
+against an unmeasured card, and a machine's own processor ~1.35x slow against its card in `Devices::of`.
+**Not changed tonight, deliberately**: raising it moves near chains toward processors and which parts every machine
+fetches, against the user's card-first preference (`feedback_cards_across_nodes.md`), on one machine's figure, hours
+before a cut. Next: the same harness on a second processor (the Proxmox node, the Mac mini's figure), then set the
+processor constant just under the lower of them; read `near_chain`'s tests that pin `est_tokens_per_sec_7b = 56.0`
+against `processor_tokens_per_sec_7b` (`a_complete_chain_moves_onto_cards_that_can_carry_it` at 6.3/20,
+`a_machine_that_runs_a_model_whole_only_beside_its_processor_still_joins_a_chain_of_cards` at 0.25/20) for a verdict
+that flips; update `the_efficiencies_reproduce_the_measurements_they_were_taken_from`.
 Prior art: llamaperf.com's speed calculator is this same formula (bandwidth ÷ active bytes per token × efficiency);
-its default efficiency is 0.55 (from llmfit), and calibrated against llama.cpp's own scoreboards it reads **0.74-0.79**;
-its stated miss is ~21% on dense models, ~46% on mixtures of experts (median measured/estimate 1.13 there),
-https://llamaperf.com/blog/how-accurate-is-the-llm-speed-calculator (read 2026-11-22). That agrees with our
-measurement; it is not calibration data of ours (self-reported results, licence unstated — never bundle it).
+calibrated against llama.cpp's own scoreboards it reads 0.74-0.79 — token generation from an EMPTY cache, so above our
+~912-KV figure, and llama.cpp itself writes our shape at ~61 tok/s here (0.60), https://llamaperf.com/blog/how-accurate-is-the-llm-speed-calculator
+(read 2026-11-22; self-reported results, licence unstated — never bundle it).
 **The name table, 2026-11-22**: it had no laptop rows, no RTX 50 series and no 4050, so the swarm's RTX 5080 Laptop
-(896 GB/s) and RTX 4050 Laptop (192) both advertised the 300 GB/s default — 37.5 tok/s each, the 5080 ~3x slow and
-the 4050 ~1.6x fast; a laptop part now reads its own row before its desktop namesake's
-(`a_laptop_card_reads_its_own_bandwidth`). The efficiency constant below is still open.
-**Measured again 2026-11-22 (22:54-23:06Z)**: the published v0.3.306 on this card idle (623 MiB before, live node
-stopped, `rebench.sh`), Qwen2.5-Coder-7B Q4_K_M at a ~1,770-token prompt, decodes at **74.12 / 75.31 tok/s** (best of
-two repeats, two runs) — **0.73-0.74** of 448 ÷ 4.4, at a deeper cache than the calibration's 896, so a floor for it.
-**Not changed in v0.3.307, deliberately**: the figure reaches more than the planner's price of an unmeasured peer —
-`coverage::near_chain`'s `Devices::of` prices a machine's card against ITS OWN processor from
-`est_tokens_per_sec_7b` and `processor_tokens_per_sec_7b`, so raising the card constant alone moves which device a
-near chain is planned on and which parts every machine fetches; it ships where that can be watched, not 30 minutes
-before a cut. Next: re-measure with the harness in `estimate_tokens_per_sec_7b`'s doc comment (`prefill_bench`, a
-`--features cuda` release build, live node stopped) at 896, set the constant just under it (~0.7: 71 tok/s for this
-card), check the processor's 0.75 the same way in the same sitting (the Mac mini's and this processor's own figures),
-update `speed_estimation_sanity` and `the_efficiencies_reproduce_the_measurements_they_were_taken_from`, and read
-`near_chain`'s tests that pin `est_tokens_per_sec_7b = 56.0` against a processor for a verdict that flips. A mixture of experts is priced by its ACTIVE bytes
-(`layer_work_from_bytes`) — check that path's error against a measured MoE before trusting it at 1.13.
+(896 GB/s) and RTX 4050 Laptop (192) both advertised the 300 GB/s default; a laptop part now reads its own row before
+its desktop namesake's (`a_laptop_card_reads_its_own_bandwidth`). A mixture of experts is priced by its ACTIVE bytes
+(`layer_work_from_bytes`) — check that path's error against a measured MoE before trusting it.
 
 ### Network and transport
 
