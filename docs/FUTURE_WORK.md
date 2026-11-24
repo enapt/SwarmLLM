@@ -3973,7 +3973,27 @@ left was 4 of the 7B's layers, short of the 6 this node had to hold, and no plan
 link). The drafter choice already avoids it where a quantized copy is held.
 
 #### #309 — Small dense models decoded at 0.80-0.83 of llama.cpp on a card; 0.94-1.00 since the attention chunk follows the cache, Gemma 4 E2B 0.87
-`P3` · perf-local · **PARTIAL** — 2026-10-19 · history: #307's sweep
+`P3` · perf-local · **PARTIAL** — 2026-10-19, re-measured 2026-11-25 · history: #307's sweep
+
+**Residual (2026-11-25): decode attention is still the gap, on the 7B too, and it grows with the
+cache.** nsys, Qwen2.5-Coder-7B Q4_K_M at ~960 positions, RTX 3070 Laptop, live node stopped
+(`~/swarmllm-gate/deep/dec1125/`): our `decode_attn_f16kv` 45.5 µs + `decode_attn_combine_f32`
+10.8 µs a layer, 1.57 ms a token, against llama.cpp's `flash_attn_ext_f16<128,128,1,8>` 13.7 µs +
+stream-K fixup 3.0 µs, 0.46 ms; the weight products are already faster than llama.cpp's. Decode
+from a 4,096-token prompt: ours 49.4 tok/s, llama-bench `-d 4096` 60.5. **Loads in flight were
+tried a second time and lost again** (local branch `decode-attn-pipelined`, `e7a0a49be`, not
+pushed): the score loop's K rows for four positions loaded before any product with the query heads'
+reductions unrolled, eight V rows loaded before they are added, eight chunks' partials loaded
+before the merge adds them — every sum in its old order, bit for bit the serial kernels
+(`the_pipelined_kernels_are_the_serial_ones_bit_for_bit`, with a control), 127 registers against
+122. nsys at ~928: 54.3 µs a call against 42.0 (merge 10.7 against 10.0); decode, two interleaved
+rounds in one binary: TinyLlama at 200 positions 217-218 against 206-208, Llama 3.2 3B at 200
+103-105 against 99-103, the 7B level at 896 and 4,096, the 3B at 4,096 68-69 against 71-72. So one
+block's waits are not what costs the time at any length this card serves; the 10-19 attempt said
+the same at 64-position chunks. **Next: the `mma` body** — llama.cpp's choice for a GQA ratio ≥ 2
+on sm_80+ (`fattn.cu` `ggml_cuda_flash_attn_ext_mma_f16_switch_ncols2`: a 7-head group padded to 8
+columns of one tensor-core tile, stream-K over the SMs). It rounds the query to half, so it is
+judged against llama.cpp's replies, not bits.
 
 **Residual (2026-10-19):** Gemma 4 E2B decodes at 0.87 of llama.cpp (108-109 against 124.8 tok/s,
 same session), TinyLlama and Llama 3.2 1B at 0.95-0.97. Next: an nsys kernel sum of an E2B step
