@@ -173,3 +173,18 @@ What is left of a level, in order: the card's own time (the next lever, kernel b
 `advance_to` (two fresh state pairs and two replays a layer), `make_room`'s growth on the levels that grow the
 store (3.6-3.9 ms against ~1.8), and the anchor copy (~0.24 ms). The replay waits until those are smaller than the
 recording it removes.
+
+### The card's own time: llama.cpp's few-row kernel, timed (2026-11-24)
+
+A level's quantized products at 8 rows go to MMQ (`mmq_few_rows_line`: Q8_0 from 7 rows, the K-quants from 4) where
+the weight is at least 2 MB, else to candle's vector kernel, an older copy of llama.cpp's MMVQ that costs ~1.5x at 8
+rows what it costs at 7. llama.cpp itself keeps every type on MMVQ up to 8 rows on this card generation
+(`ggml_cuda_should_use_mmvq`, `MMVQ_MAX_BATCH_SIZE`), so the question was whether its NEWER MMVQ would beat our MMQ.
+Timed with its own op tester (`test-backend-ops perf`, llama.cpp master `4b1a27f`, RTX 3070 Laptop, the node stopped,
+two passes, `~/swarmllm-gate/deep/fr/mmvq_1124/`), Q8_0 at 4,096 × 14,336 (62 MB): 1 row 174 µs (~357 GB/s), 2 rows
+175, 3: 184-188, 4: 203-214, 5: 198-217, **8 rows 287-294 µs, 1.67x one row (~214 GB/s)**; Q4_K 98-104 µs at 1 row,
+296-297 at 8. **Its newer kernel jumps at 8 rows too**, and there reads about what our MMQ already reads on a large
+weight (a 145 MB head, 560 µs ≈ 259 GB/s, nsys 2026-10-22). So porting it buys no kernel time on large weights.
+What it could still buy is LAUNCHES on the small ones: MMQ on a weight of under ~7 tiles is quantize + product +
+stream-K fixup (the fixup 4.8 µs on a 0.5B key), MMVQ quantize + product — and a level makes 392 MMQ launches.
+The guessing models' own shapes get timed (their fixups summed off a captured level) before anything is ported.
