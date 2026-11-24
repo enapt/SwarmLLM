@@ -238,3 +238,7 @@ so the grid was made SMs × resident blocks, as CUTLASS's stream-k swizzle sizes
 arm, alternating; `~/swarmllm-gate/deep/fr/persm_1124/`). Reverted: a second resident block does not read the weight
 faster. Still open on the same products: the fixup's 0.35 ms folded into the product (the last block to finish a
 tile sums its parts in the fixup's order — the same bits, no block waits on another).
+
+**A delta-rule warp owns four state rows** (2026-11-24): the layer's 2,048 warps no longer spill into a second wave
+and four rows share each token's loads — `delta_rule_flow_stored` 33.7 → 23.7 µs a layer, the mean level 0.8B 7.95 →
+7.83 ms, 2B 12.44 → 12.15, bit for bit (`docs/invariants/inference.md` § "Four state rows a warp").

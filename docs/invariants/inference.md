@@ -6790,6 +6790,23 @@ so the state rides on the op. The kernel writes the new state into a second buff
 it is handed (`state_out` — the pair the step did not read, never the same buffer:
 both are `__restrict__`) and the outputs into their own, so a state is never a view
 of a chunk's outputs (until #228 (4) it was, copied out past 8 tokens).
+
+### Four state rows a warp (2026-11-24)
+
+At one state row a warp a layer is `nv × D` warps — the 0.8B drafter's 16 × 128 = 2,048 — and an RTX 3070 Laptop
+holds 1,920 of these kernels' warps at once (40 SMs × 12 blocks of four; 40 registers each), so 32 blocks of every
+launch ran as a second wave behind the rest, and the kernel is a chain of dependent loads (each token's q, k, v,
+gates through the store's slot table) that more warps cannot shorten. `delta_rule_body<D, C, OUT>` gives a warp C
+consecutive rows; the `_c4` entry points (C = 4, grid z `D / 16`, 64 registers, no spills) are the default
+(`qwen35::delta_rule_entry`), `SWARMLLM_DELTA_RULE_ROWS=1` the A/B. The rows share each token's q, k and gate loads;
+each row's sums and updates are the one-row update's in its order, so the two are BIT FOR BIT
+(`four_state_rows_a_warp_are_one_rows_bits`: chain, tree and flow, D 128 and 64, outputs and state). The state read
+is kept in registers, so a row that starts again from it reads no memory. Measured (nsys graph nodes, 0.8B 8-row
+captured levels): `delta_rule_flow_stored_f32_d128` 33.7 → 23.7 µs a layer; mean level, three runs an arm
+alternating, 0.8B 7.95 → 7.83 ms, 2B 12.44 → 12.15, 9B (8-row flowing forward) 27.62 → 27.30
+(`~/swarmllm-gate/deep/fr/drrows_1124/`). Prior art: llama.cpp's `gated_delta_net.cu` is one row a warp with no
+chunked kernel yet ("TODO: Add chunked kernel"); a wave's tail is the wave-quantization effect the Stream-K paper
+(arXiv 2301.03598) sizes its grid against. What remains is the chain itself: ~2.4 µs an update.
 Scope `card_delta_rule_covers`: equal key and value widths of 64 or 128 (every
 Qwen 3.5 size has 128). Against llama.cpp master on the card (0.8B F32, 200 tokens, 8 decoded): worst cosine
 0.999999, median 1.000000, top-1 200/200 — the same as the composition on the card.

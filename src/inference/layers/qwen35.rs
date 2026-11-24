@@ -2573,6 +2573,41 @@ fn card_delta_rule_covers(kd: usize, vd: usize) -> bool {
     kd == vd && matches!(kd, 64 | 128)
 }
 
+/// State rows a warp owns in `kernels/delta_rule.cu`: four (its `_c4` entry
+/// points), one under `SWARMLLM_DELTA_RULE_ROWS=1` — the A/B, and the kernel
+/// before 2026-11-24. At one row a warp the 0.8B drafter's 2,048 warps a layer
+/// were more than an RTX 3070 Laptop holds at once (1,920), so the last ran as
+/// a second wave; four share each token's q, k and gates. Each row's
+/// arithmetic is the same, so the bits are. Read once.
+#[cfg(feature = "candle-cuda")]
+fn delta_rule_rows_a_warp() -> usize {
+    #[cfg(test)]
+    if let Some(rows) = tests::DELTA_RULE_ROWS.with(std::cell::Cell::get) {
+        return rows;
+    }
+    static ROWS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *ROWS.get_or_init(
+        || match std::env::var("SWARMLLM_DELTA_RULE_ROWS").as_deref() {
+            Ok("1") => 1,
+            _ => 4,
+        },
+    )
+}
+
+/// The entry point a launch of `base` (a `delta_rule_*_f32_d*` name) takes at
+/// [`delta_rule_rows_a_warp`] rows a warp, and its grid's z for state width
+/// `d`: four warps a block.
+#[cfg(feature = "candle-cuda")]
+fn delta_rule_entry(base: &str, d: usize) -> (std::borrow::Cow<'static, str>, u32) {
+    match delta_rule_rows_a_warp() {
+        1 => (std::borrow::Cow::Owned(base.to_owned()), (d / 4) as u32),
+        rows => (
+            std::borrow::Cow::Owned(format!("{base}_c{rows}")),
+            (d / (4 * rows)) as u32,
+        ),
+    }
+}
+
 /// PTX for the card kernel, compiled from `kernels/delta_rule.cu` by
 /// `build.rs` and loaded through candle's `get_or_load_custom_func`.
 #[cfg(feature = "candle-cuda")]
@@ -3550,17 +3585,18 @@ mod cuda {
         // stream per device, as `DeltaRule` writes its `state_out`.
         unsafe { builder.launch(cfg) }.w()?;
 
-        let rule = dev.get_or_load_custom_func(
+        let (name, grid_z) = super::delta_rule_entry(
             if kd == 64 {
                 "delta_rule_replay_f32_d64"
             } else {
                 "delta_rule_replay_f32_d128"
             },
-            "swarmllm_delta_rule",
-            super::DELTA_RULE_PTX,
-        )?;
+            kd,
+        );
+        let rule =
+            dev.get_or_load_custom_func(&name, "swarmllm_delta_rule", super::DELTA_RULE_PTX)?;
         let cfg = LaunchConfig {
-            grid_dim: (nv as u32, 1, (kd / 4) as u32),
+            grid_dim: (nv as u32, 1, grid_z),
             block_dim: (32, 4, 1),
             shared_mem_bytes: 0,
         };
@@ -3728,7 +3764,7 @@ mod cuda {
                 None => None,
             };
             let slots = table.as_ref().map(ParentsView::slice).transpose()?;
-            let func = dev.get_or_load_custom_func(
+            let (name, grid_z) = super::delta_rule_entry(
                 match (d, parents.is_some(), walks.is_some(), slots.is_some()) {
                     (64, true, true, true) => "delta_rule_flow_stored_f32_d64",
                     (_, true, true, true) => "delta_rule_flow_stored_f32_d128",
@@ -3739,11 +3775,12 @@ mod cuda {
                     (_, true, false, _) => "delta_rule_tree_f32_d128",
                     (_, true, true, false) => "delta_rule_flow_f32_d128",
                 },
-                "swarmllm_delta_rule",
-                super::DELTA_RULE_PTX,
-            )?;
+                d,
+            );
+            let func =
+                dev.get_or_load_custom_func(&name, "swarmllm_delta_rule", super::DELTA_RULE_PTX)?;
             let cfg = LaunchConfig {
-                grid_dim: (nv as u32, b as u32, (d / 4) as u32),
+                grid_dim: (nv as u32, b as u32, grid_z),
                 block_dim: (32, 4, 1),
                 shared_mem_bytes: 0,
             };
@@ -5617,6 +5654,112 @@ mod tests {
         let (as_chain, _, _) =
             delta_rule_into(&qk, 2, &v, &gates, &state, Some(&into), None, None).unwrap();
         assert!(max_abs_diff(&cpu(&as_chain), &on_host) > 1e-2);
+    }
+
+    #[cfg(feature = "candle-cuda")]
+    thread_local! {
+        /// This thread's [`super::delta_rule_rows_a_warp`], where a test sets one.
+        pub(super) static DELTA_RULE_ROWS: std::cell::Cell<Option<usize>> =
+            const { std::cell::Cell::new(None) };
+    }
+
+    /// Four state rows a warp (`delta_rule_*_c4`) are one row a warp's bits —
+    /// outputs and the state written — for a chain, a tree and a flow's walks,
+    /// at both widths: each row's arithmetic is the one-row update's, in its
+    /// order. The launch takes the entry point the setting names (checked on
+    /// [`super::delta_rule_entry`] itself), so the two runs are two kernels.
+    #[cfg(feature = "candle-cuda")]
+    #[test]
+    fn four_state_rows_a_warp_are_one_rows_bits() {
+        let Ok(device) = Device::new_cuda(0) else {
+            eprintln!("SKIPPED: no card");
+            return;
+        };
+        let with_rows = |rows: usize, f: &dyn Fn() -> (Tensor, Tensor)| {
+            DELTA_RULE_ROWS.with(|r| r.set(Some(rows)));
+            let out = f();
+            DELTA_RULE_ROWS.with(|r| r.set(None));
+            out
+        };
+        DELTA_RULE_ROWS.with(|r| r.set(Some(4)));
+        assert_eq!(
+            super::delta_rule_entry("delta_rule_f32_d128", 128),
+            ("delta_rule_f32_d128_c4".into(), 8)
+        );
+        DELTA_RULE_ROWS.with(|r| r.set(Some(1)));
+        assert_eq!(
+            super::delta_rule_entry("delta_rule_f32_d64", 64),
+            ("delta_rule_f32_d64".into(), 16)
+        );
+        DELTA_RULE_ROWS.with(|r| r.set(None));
+
+        let bits = |t: &Tensor| -> Vec<u32> {
+            t.flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap()
+                .into_iter()
+                .map(f32::to_bits)
+                .collect()
+        };
+        let parents = vec![
+            None,
+            Some(0),
+            Some(0),
+            Some(1),
+            Some(2),
+            Some(3),
+            Some(3),
+            Some(5),
+            Some(2),
+        ];
+        let (seq, nk, nv) = (parents.len(), 4, 8);
+        for d in [128, 64] {
+            let qk = l2_norm(
+                &Tensor::randn(0f32, 1.0, (1, seq, 2 * nk, d), &device).unwrap(),
+                1e-6,
+            )
+            .unwrap();
+            let v = Tensor::randn(0f32, 1.0, (1, seq, nv, d), &device).unwrap();
+            let g = Tensor::rand(0f32, 1.0, (1, seq, nv), &device)
+                .unwrap()
+                .neg()
+                .unwrap();
+            let beta = Tensor::rand(0f32, 1.0, (1, seq, nv), &device).unwrap();
+            let gates = Gates::apart(g, beta);
+            let state = Tensor::randn(0f32, 0.3, (1, nv, d, d), &device).unwrap();
+            let tree = TreeLines::new(parents.clone(), &device).unwrap();
+            let flow = TreeLines::for_flow(parents.clone(), &device).unwrap();
+            for (what, lines) in [
+                ("chain", None),
+                ("tree", Some(&tree)),
+                ("flow", Some(&flow)),
+            ] {
+                let run = || {
+                    let into = state.zeros_like().unwrap();
+                    let (out, new_state, written) =
+                        delta_rule_into(&qk, nk, &v, &gates, &state, Some(&into), lines, None)
+                            .unwrap();
+                    assert!(written, "{what}: the card's kernel wrote the state");
+                    (out, new_state)
+                };
+                let (one, one_state) = with_rows(1, &run);
+                let (four, four_state) = with_rows(4, &run);
+                assert!(bits(&one) == bits(&four), "{what} d{d}: outputs differ");
+                assert!(
+                    bits(&one_state) == bits(&four_state),
+                    "{what} d{d}: states differ"
+                );
+                // Null control: the comparison sees a one-row change.
+                let moved = one
+                    .broadcast_add(&Tensor::new(1e-3f32, &device).unwrap())
+                    .unwrap();
+                assert!(
+                    bits(&moved) != bits(&four),
+                    "{what} d{d}: the comparison is blind"
+                );
+            }
+        }
     }
 
     /// A flowing forward's kernels read the store where its rows sit, through
