@@ -92,7 +92,13 @@ so when it cannot. Probe: `RWG_TEST_STATE=draft RWG_TEST_CHANGED=src/main.rs`.
 out of the repo: bash reads a script by offset as it runs (gotchas #551, #813, #1153 —
 knowing did not stop the third). Write a temp file and `mv` it over. Probe: `--probe`.
 
-**All four fail OPEN** (unparseable payload, missing cargo, timeout — the commit
+`self-match-gate.sh` (2026-11-24) refuses a `pgrep -f` / `pkill -f` that can match the shell running it — the
+pattern sits in that shell's own command line, so a waiter on it never ends (gotchas #274, #283, #385; a fourth time
+on 11-24, a rig 13 min behind its own wait). It allows `-A` (`--ignore-ancestors`), `-P`, `-x` or a bracketed pattern
+(`'[r]un_x.sh'`), in a Bash command or a `.sh` written by Write/Edit; a heredoc's body counts only when a shell runs
+it or it becomes a `.sh`. Probe: `--probe`.
+
+**All five fail OPEN** (unparseable payload, missing cargo, timeout — the commit
 gate now SAYS so when a cold build outlasts it, #779), and **a hook is verified
 by its OUTPUT, never its exit code** (#614) — three hooks here sat
 inert for months looking healthy. After touching the gate's patterns run
