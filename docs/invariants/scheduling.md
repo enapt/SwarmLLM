@@ -6528,6 +6528,30 @@ forwards sent after it falls to 3/4 — the outcome the cut is for, checked (got
 undone, and none other tried while the far stays slow. The next reply starts from the link's window
 alone (`to_keep`): a far cut on trial never outlives it.
 
+**An answer that left behind our own rebase is not the far's queue** (2026-11-24, `dsd_flow::LeftBehind`;
+A/B `SWARMLLM_FLOW_FAR_BEHIND_REBASE=read`). A rebase's forward carries the path as well as the live
+rows (81-136 rows against a level's 24 on the 14B split, TH [0,24) ↔ AU [24,48), 0.5B Q8_0 drafting),
+and the guard never reads its time — but the forwards sent while it was out wait behind it in the
+stream's order, and the far's held time counts that wait. In `real_link_guard1124` a 133-row rebase
+held 135 ms at the far (24 rows: 31) and the next four, 7-25 rows each, held 129-145 ms: their least
+103 ms over the far's least of 26, so the far's window tried 8x128 → 8x64. The rebase's own end then
+"shortened" the queue, the trial stood, and the reply's walk waited on the far 391-414 ms (replies
+without a cut: 17-208). Across `real_link_rowsk1124` and `real_link_guard1124`, 10 of the 11 far cuts
+came within five answers of an 81-136-row forward. Karn's algorithm is the prior art (Karn & Partridge
+1987; RFC 6298 § 3: no round-trip sample from a segment the estimator cannot attribute): a forward
+that leaves while a rebase is out (`FlowRun::unsettled`) is read by the LINK's window — its delay less
+the far's time is the link's alone — and never by the far's (`FlowGuard::far_left_behind` counts them
+on the reply's line). The few sent after the rebase's answer arrived but before it was taken are
+skipped too: samples lost, never a wrong one. Measured in ONE binary (`real_link_farcut1124`, six
+sittings interleaved, 4 code + 3 prose a sitting, the owner's reply store off): the mechanism fired
+on every reply of the new rule (20-65 answers left behind a reply, none on the old) and its replies
+had no far cut after the first, against 9 of 21 replies with one on the old rule. Code with a cut on
+the old rule read 39.5-40.7 tok/s against 39.5-42.1 without; on the new rule after the first sitting
+41.1-43.0 (mean 41.7 against 40.9); prose 18.5 against 18.9 (misses 16.3 against 16.2 a reply, the
+per-forward costs the same) — both inside the sittings' spread. The first sitting's first reply ran
+at 2.3 tok/s with the far's own served time at 3.9 s a forward, its next three code replies at 37.8-41.0
+with no cut; the far's to explain, not counted.
+
 **The far's lever is the forwards out, not the rows a level** (2026-11-01 rig, processor only — a
 driver stop that boot kept the card off: `flow388.sh`, one binary, A/B `SWARMLLM_FLOW_SERVED_TIME=0`,
 Qwen2.5-Coder-7B split in halves at 385 ms, the coder 0.5B drafting, 400-token replies, three an

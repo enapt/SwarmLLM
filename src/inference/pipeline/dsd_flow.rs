@@ -192,6 +192,45 @@ fn served_time_on() -> bool {
     })
 }
 
+/// `SWARMLLM_FLOW_FAR_BEHIND_REBASE=read`: the far's window reads an answer
+/// whose forward left while a rebase was out, as it did before ([`LeftBehind`]).
+fn far_reads_behind_a_rebase() -> bool {
+    static READ: OnceLock<bool> = OnceLock::new();
+    *READ.get_or_init(|| {
+        matches!(
+            std::env::var("SWARMLLM_FLOW_FAR_BEHIND_REBASE")
+                .ok()
+                .as_deref(),
+            Some("read")
+        )
+    })
+}
+
+/// What a forward could wait behind at the far end, as it left here.
+///
+/// A rebase's forward carries the path as well as the live rows — 81-136 rows
+/// against a level's 24 on the 14B split (TH↔AU, 2026-11-24: one of 133 rows
+/// held 135 ms at the far against 31) — and the guard never reads its time
+/// (its `lead`). The forwards sent while it is out wait behind it in the
+/// stream's order, and the far's held time counts that wait (the stream's
+/// turn is the far's, `served_time`): the next four held 129-145 ms, their
+/// least 103 ms over the far's least, and the far's window tried a cut that
+/// the rebase's own end then "shortened", so it stood. 10 of the 11 far cuts
+/// of two sittings came within five answers of such a forward; a reply that
+/// took one waited on the far 391-414 ms against 17-208.
+///
+/// Prior art: Karn's algorithm (Karn & Partridge 1987; RFC 6298 § 3) takes no
+/// round-trip sample from a segment it cannot attribute. Here the wait is
+/// attributable — to our own rebase, which no window over the tree's
+/// forwards governs — so the far's window reads no answer that left behind
+/// one. The LINK's window still does: the delay less the far's time is the
+/// link's alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LeftBehind {
+    Nothing,
+    OurRebase,
+}
+
 /// The far computer's own time to take off an answer's delay, in ms — where
 /// it may be believed. It is a number the far chose, so it is believed only
 /// where what it leaves of the delay stays at or above the least round trip
@@ -371,6 +410,9 @@ struct FlowGuard {
     far_queue_ms_most: f64,
     far_cuts: u32,
     far_undone: u32,
+    /// Answers the far's window did not read: their forwards left behind a
+    /// rebase of ours ([`LeftBehind`]).
+    far_left_behind: u32,
 }
 
 /// Rows a level and live rows, fractional so a small rise accumulates.
@@ -510,6 +552,7 @@ impl FlowGuard {
             far_queue_ms_most: 0.0,
             far_cuts: 0,
             far_undone: 0,
+            far_left_behind: 0,
         };
         if let Some(kept) = kept.filter(|_| guarded) {
             let at = guard.snap(Window::at(kept.width, kept.live));
@@ -563,11 +606,13 @@ impl FlowGuard {
     /// A forward of the tree's own rows (never a rebase's), sent at `sent`,
     /// answered `delay_ms` after it left — `served_ms` of it the far's own
     /// time, where that is believed ([`believed_served_ms`]) — read at `now`.
+    /// `left_behind`: what it could have waited behind at the far as it left.
     fn answered(
         &mut self,
         sent: std::time::Instant,
         delay_ms: f64,
         served_ms: Option<f64>,
+        left_behind: LeftBehind,
         now: std::time::Instant,
     ) {
         if !self.guarded || !delay_ms.is_finite() {
@@ -576,8 +621,12 @@ impl FlowGuard {
         let served_ms = served_ms.filter(|s| s.is_finite() && (0.0..=delay_ms).contains(s));
         let link_cut = self.link_answered(sent, delay_ms - served_ms.unwrap_or(0.0), now);
         if let Some(far_ms) = served_ms {
-            self.served_read += 1;
-            self.far_answered(sent, far_ms, link_cut, now);
+            if left_behind == LeftBehind::OurRebase && !far_reads_behind_a_rebase() {
+                self.far_left_behind += 1;
+            } else {
+                self.served_read += 1;
+                self.far_answered(sent, far_ms, link_cut, now);
+            }
         }
         let at = self.at();
         self.least_width = self.least_width.min(at.width);
@@ -1193,6 +1242,8 @@ struct Sent {
     started: std::time::Instant,
     /// A rebase's forward: the tree's start it sets, settled when answered.
     rebases_to: Option<usize>,
+    /// Left while a rebase was out: it may have waited behind it at the far.
+    left_behind: LeftBehind,
     /// Where this node's own layers after the run draw its rows: what they
     /// are to read with the peers' answer.
     here: Option<Here>,
@@ -1629,6 +1680,7 @@ impl PipelineExecutor {
             far_queue_ms_most = format_args!("{:.0}", run.guard.far_queue_ms_most),
             far_cuts = run.guard.far_cuts,
             far_undone = run.guard.far_undone,
+            far_left_behind = run.guard.far_left_behind,
             copy = run.copy.is_some(),
             copied_runs = run.copied_runs,
             copied_rows = run.copied_rows,
@@ -2189,6 +2241,14 @@ impl FlowRun<'_, '_> {
             alone,
             started,
             rebases_to: rows.rebases_to,
+            // Set once a rebase's forward has gone and cleared when its answer
+            // is taken, so this also marks the few sent after it arrived but
+            // before it was read: a few samples lost, never a wrong one.
+            left_behind: if self.unsettled {
+                LeftBehind::OurRebase
+            } else {
+                LeftBehind::Nothing
+            },
             here,
         };
         let state = self.state.clone();
@@ -2698,8 +2758,13 @@ impl FlowRun<'_, '_> {
             let before = self.guard.at();
             let (cuts, far_cuts, far_undone) =
                 (self.guard.cuts, self.guard.far_cuts, self.guard.far_undone);
-            self.guard
-                .answered(sent.started, delay_ms, served_ms, std::time::Instant::now());
+            self.guard.answered(
+                sent.started,
+                delay_ms,
+                served_ms,
+                sent.left_behind,
+                std::time::Instant::now(),
+            );
             let after = self.guard.at();
             let why = if self.guard.far_undone > far_undone {
                 Some("DSD: a tree that flows takes back its far cut — fewer forwards out did not shorten the far computer's time")
@@ -2903,7 +2968,13 @@ mod tests {
     }
 
     fn feed(g: &mut FlowGuard, t0: Instant, sent_ms: u64, delay: f64) {
-        g.answered(at(t0, sent_ms), delay, None, at(t0, sent_ms + delay as u64));
+        g.answered(
+            at(t0, sent_ms),
+            delay,
+            None,
+            LeftBehind::Nothing,
+            at(t0, sent_ms + delay as u64),
+        );
     }
 
     /// A queue past the target narrows the levels first, to the least width,
@@ -2999,12 +3070,66 @@ mod tests {
     /// An answer `delay` ms after its forward left, `served` of it the far's
     /// own time (#388).
     fn feed_served(g: &mut FlowGuard, t0: Instant, sent_ms: u64, delay: f64, served: f64) {
+        feed_left(g, t0, sent_ms, delay, served, LeftBehind::Nothing);
+    }
+
+    fn feed_left(
+        g: &mut FlowGuard,
+        t0: Instant,
+        sent_ms: u64,
+        delay: f64,
+        served: f64,
+        left_behind: LeftBehind,
+    ) {
         g.answered(
             at(t0, sent_ms),
             delay,
             Some(served),
+            left_behind,
             at(t0, sent_ms + delay as u64),
         );
+    }
+
+    /// The 14B split's far cuts (TH↔AU, 2026-11-24): a rebase of 133 rows held
+    /// 135 ms at the far, and the four forwards sent while it was out held
+    /// 129-145 ms behind it — 93 ms of "queue" over the far's least. Left
+    /// behind our rebase, the far's window reads none of them and tries no cut;
+    /// the link's window reads them all, its share unmoved. The same answers
+    /// from forwards that left behind nothing try a cut, as before.
+    #[test]
+    fn answers_that_left_behind_our_rebase_try_no_far_cut() {
+        let t0 = Instant::now();
+        let full = GuardAt {
+            width: 8,
+            live: 128,
+        };
+        for (left_behind, far_cuts, unread) in
+            [(LeftBehind::OurRebase, 0, 4), (LeftBehind::Nothing, 1, 0)]
+        {
+            let mut g = FlowGuard::new(8, 128, true, None);
+            calm(&mut g, t0, 0);
+            for (i, served) in [135.0, 145.0, 135.0, 133.0].into_iter().enumerate() {
+                feed_left(
+                    &mut g,
+                    t0,
+                    1000 + i as u64 * 30,
+                    410.0 + served,
+                    served,
+                    left_behind,
+                );
+            }
+            assert_eq!(
+                (g.cuts, g.far_cuts, g.far_left_behind),
+                (0, far_cuts, unread),
+                "{left_behind:?}"
+            );
+            assert_eq!(g.served_read, 8 - unread, "{left_behind:?}");
+            if left_behind == LeftBehind::OurRebase {
+                assert_eq!(g.at(), full, "the flow keeps its whole window");
+            } else {
+                assert_ne!(g.at(), full, "a cut on trial binds");
+            }
+        }
     }
 
     fn calm(g: &mut FlowGuard, t0: Instant, from_ms: u64) {
@@ -3205,7 +3330,7 @@ mod tests {
         assert_eq!(g.far_delays.least, Some(40.0));
         // A far time past the delay itself is no reading.
         let mut h = FlowGuard::new(8, 128, true, None);
-        h.answered(t0, 400.0, Some(500.0), at(t0, 400));
+        h.answered(t0, 400.0, Some(500.0), LeftBehind::Nothing, at(t0, 400));
         assert_eq!((h.served_read, h.far_delays.least), (0, None));
         assert_eq!(h.link_delays.least, Some(400.0));
     }
@@ -3254,20 +3379,44 @@ mod tests {
         // Half the target's queue rises by half: once the least of the four
         // latest shows it and a round trip has passed.
         for ms in [600u64, 700, 800] {
-            g.answered(at(t0, ms - 430), 430.0, None, at(t0, ms));
+            g.answered(
+                at(t0, ms - 430),
+                430.0,
+                None,
+                LeftBehind::Nothing,
+                at(t0, ms),
+            );
         }
         assert_eq!(g.at().live, 40, "within a round trip of the last rise");
-        g.answered(at(t0, 900 - 430), 430.0, None, at(t0, 900));
+        g.answered(
+            at(t0, 900 - 430),
+            430.0,
+            None,
+            LeftBehind::Nothing,
+            at(t0, 900),
+        );
         assert_eq!(g.at().live, 44);
         let mut ms = 900;
         while g.at().live < 128 {
             ms += 450;
-            g.answered(at(t0, ms - 400), 400.0, None, at(t0, ms));
+            g.answered(
+                at(t0, ms - 400),
+                400.0,
+                None,
+                LeftBehind::Nothing,
+                at(t0, ms),
+            );
         }
         assert_eq!(g.at().width, 2, "the levels wait for the whole budget");
         for _ in 0..3 {
             ms += 450;
-            g.answered(at(t0, ms - 400), 400.0, None, at(t0, ms));
+            g.answered(
+                at(t0, ms - 400),
+                400.0,
+                None,
+                LeftBehind::Nothing,
+                at(t0, ms),
+            );
         }
         assert_eq!(
             g.at(),
@@ -3279,7 +3428,13 @@ mod tests {
         );
         for _ in 0..20 {
             ms += 450;
-            g.answered(at(t0, ms - 400), 400.0, None, at(t0, ms));
+            g.answered(
+                at(t0, ms - 400),
+                400.0,
+                None,
+                LeftBehind::Nothing,
+                at(t0, ms),
+            );
         }
         assert_eq!(
             g.at(),
