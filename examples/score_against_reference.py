@@ -45,7 +45,9 @@ for ANY reply, correct or not (measured 2026-09-25). Judge a SentencePiece
 family by rank-2 near-ties only, or use a BPE model (Llama-3.x, Qwen) where the
 re-tokenization is exact.
   replies.jsonl  one JSON object per line with a "content" field (what
-                 `split_rig.sh` writes); labels default to the line number.
+                 `split_rig.sh` writes); labels default to the line number. A
+                 "reasoning" field (`reply_ab.sh`) is scored too, ahead of the
+                 reply, where the template is a `<think>` one (Qwen3).
   prompt-file    the user's text, or a request body `{"messages": [...]}` for a
                  whole conversation (what `split_rig.sh splitcache` sends).
   The prompt is rendered with the GGUF's own chat template, as the node renders
@@ -112,9 +114,37 @@ def main():
     ptoks = llm.tokenize(rendered.encode(), add_bos=False, special=True)
     print(f"prompt tokens: {len(ptoks)}")
 
+    def text(s):
+        return llm.tokenize(s.encode(), add_bos=False, special=False)
+
+    def marker(s):
+        return llm.tokenize(s.encode(), add_bos=False, special=True)
+
+    # A thinking model (Qwen3's `<think>` templates) writes its reasoning
+    # BEFORE the reply, and the node hands it back apart (`reasoning`, as
+    # `reply_ab.sh` writes it). The reply alone, scored after a prompt the
+    # model answers with `<think>`, ranks its first token in the hundred
+    # thousands on ANY run, right or wrong (2026-11-24: Qwen3 1.7B, rank
+    # 132,701 on "The"), and a reply that is all reasoning is "empty". Score
+    # what the model wrote: the tags as their special tokens, the texts
+    # between them with none parsed (a literal "<|im_end|>" in a reply stays
+    # text). Re-tokenized this way a greedy Qwen3 reply read back rank 1 on
+    # 165 of 165 tokens.
+    thinks = "<think>" in llm.metadata["tokenizer.chat_template"]
+
     for label, row in zip(labels, rows):
         reply = row.get("content") or ""
-        rtoks = llm.tokenize(reply.encode(), add_bos=False, special=False)
+        reasoning = row.get("reasoning") or ""
+        if thinks and reasoning:
+            # One text piece between two tags, as the model's own tokens fell
+            # (a newline cut off on its own can merge differently).
+            if reply:
+                rtoks = (marker("<think>") + text("\n" + reasoning + "\n")
+                         + marker("</think>") + text("\n\n" + reply))
+            else:
+                rtoks = marker("<think>") + text("\n" + reasoning)
+        else:
+            rtoks = text(reply)
         if not rtoks:
             print(f"--- {label}: empty reply")
             continue
