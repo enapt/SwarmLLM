@@ -4536,7 +4536,7 @@ the measurement that can kill it), `docs/plans/split_speculation.md` (guess-and-
 kill ladder).
 
 #### #499 — A split reply that samples runs 9-25% slower than the greedy figure, where the offline replay said 2-4%
-`P2` · speed · **OPEN** — 2026-11-25 · seen: the first real-link sitting at the temperatures clients send
+`P3` · speed · **OPEN — README note left** (narrowed 2026-11-25) · seen: the first real-link sitting at the temperatures clients send
 
 Every split speed we publish is a greedy reply (`real_link.sh`, the README's across-computer rows). Most chat clients
 send a temperature of 0.7-1.0. The flow is exact at any temperature (a row's draw is the target's sample under noise
@@ -4559,10 +4559,16 @@ the walk (median 11 → 8 at T=1.0). The first guess is still taken 83% of the t
 so the shared noise is working; what the replay did not see is the flow. A miss costs ~5 forwards (the round trip),
 and a sampled take of the second or third guess leaves a thinner tree behind it, since the levels were grown
 best-first along the first.
-Next: replay the sitting's own trees offline (the `gumbeldump` tooling, `~/swarmllm-ref/spec/`) at the flow's shape
-(8 rows a level, 3 levels a forward), not one 128-row tree a round, to split the loss between misses and depth. Then
-weigh growing a sampled tree's later levels along the second guess too. Rank by what it gains at T=0.7, which is the
-reply users actually get.
+**Replayed the same night (`~/swarmllm-gate/deep/temp1125/{hist_sim,shape_sim}.py`)**: the flow simulator of the
+standing ring's step 3 (`ring_sim3`'s FrontierTree, `grow_flow`'s one best-first queue; this pair's stage times),
+each position's taken rank drawn from the sitting's own per-verdict shares and the tree RATED by those same shares
+(an oracle-calibrated tree). It gives code 42.4 / 38.3 / 32.7 tok/s (0.90 / 0.77 of greedy; the link 0.91 / 0.75) at
+1.63 / 1.47 / 1.26 tokens a forward (the link 1.57 / 1.45 / 1.19), and prose 0.87 at T=1.0 (the link 0.80-0.88). So the
+shift in ranks explains the loss, and no re-rating of the tree recovers it. No shape does either: 12 or 16 rows a level,
+2 or 4 levels a call, a 192-row cap, all within ±2% of today's 8 × 3 / 128 at both temperatures. What is left is what
+greedy prose already has: the drafter's agreement with the target, and the loop (`standing_ring.md` § 11).
+Residual: the README's across-computer figures are greedy, and the reader should be told that a sampled reply runs
+slower. Nothing to build on the tree.
 Prior art: Gumbo (NeurIPS 2026, "Gumbel Optimized High-Temperature Speculative Sampling") ranks a dynamic draft tree
 by the target's Gumbel scores, up to +26.7% at T=1.0 over EAGLE's greedy trees — our 10-23 rating already does this.
 OPT-Tree (arXiv 2406.17276) and D-Loop (arXiv 2610.06011) both read a smaller acceptance length at T=1 than at T=0.
