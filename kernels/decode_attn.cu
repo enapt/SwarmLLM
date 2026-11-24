@@ -21,6 +21,8 @@
 // partials in parallel, merge them with the log-sum-exp rescale.
 //   decode_attn_f32 / _f16kv grid (batch * n_kv_head, n_chunks), DA_THREADS
 //   decode_attn_combine_f32  grid (batch * n_head), at every length (see `partial`)
+//   decode_attn_combine_staged_f32  grid (batch * n_head, ⌈d / 128⌉): the same
+//                            merge bit for bit, its runs' weights staged (default)
 // One block holds ONE KV head and EVERY query head of its group, so each K and
 // V row of its chunk is read once for the group — the rule the CPU kernel
 // (`inference::decode_attn`) learned the hard way (#119: once per query head
@@ -1000,6 +1002,137 @@ extern "C" __global__ void decode_attn_combine_f32(
             den += w * part[1];
             num += w * part[2 + j];
         }
+        out[(long long)bh * d + j] = den > 0.0f ? num / den : 0.0f;
+    }
+}
+
+// THE MERGE WITH THE RUNS' WEIGHTS STAGED (2026-11-25, FUTURE_WORK #309's
+// residual). Above, every thread walks the runs itself — the run's max, then
+// its sum and output, an `expf` between, ~60 runs at ~1,000 positions in 16s
+// — and the grid is one block a query head (28 on a 7B, 8 on Gemma 2 2B), so
+// the merge took 9.7 µs a layer at ~928 positions on the 7B and 14.4 at
+// ~4,128 on Gemma 2 2B: nearly what the tensor-core attention before it
+// costs. Here a block finds the max with its threads reading runs side by
+// side, stages each tile of runs' (max, sum) and weight `expf(m - M)` in
+// shared memory ONCE, and a thread's walk over its output reads only the
+// runs' `Σexp·v`, eight loads in flight (32 were slower: 9.5 against 8.4 µs
+// on the 7B, 196 registers); grid.y spreads the dims over
+// blocks of `DA_MERGE_TILE`. Each output adds the same products in the same
+// order as `decode_attn_combine_f32` (the weight is the same `expf` of the
+// same operands; the same runs skipped; `fmaxf`'s max does not depend on
+// the order it is taken in), so its answer is that kernel's bit for bit
+// (`decode_attn::tests::the_staged_merge_is_the_serial_one_bit_for_bit`).
+// `SWARMLLM_DECODE_ATTN_MERGE=serial` keeps the kernel above.
+// Prior art: llama.cpp's `flash_attn_combine_results` (fattn-common.cuh)
+// stages its (max, sum) pairs in shared memory the same way; its threads
+// still take an `expf` a run, over the handful of parallel blocks it splits
+// a cache into, where ours merges one run per 16-64 positions.
+#define DA_MERGE_TILE 128
+#define DA_MERGE_UNROLL 8
+extern "C" __global__ void __launch_bounds__(DA_MERGE_TILE) decode_attn_combine_staged_f32(
+    const float *__restrict__ partial,
+    float *__restrict__ out,
+    const int n_kv_head,
+    const int n_rep,
+    const int d,
+    const int n_chunks,
+    const __half *__restrict__ past_o,
+    const float *__restrict__ past_lse,
+    const int past_runs,
+    const float *__restrict__ sinks
+) {
+    __shared__ float tile_m[DA_MERGE_TILE];
+    __shared__ float tile_l[DA_MERGE_TILE];
+    __shared__ float tile_w[DA_MERGE_TILE];
+    __shared__ float warp_max[DA_MERGE_TILE / 32];
+    const int bh = blockIdx.x;
+    const int n_head = n_kv_head * n_rep;
+    const int bi = bh / n_head;
+    const int hh = bh % n_head;
+    const int g = bi * n_kv_head + hh / n_rep;
+    const int r = hh % n_rep;
+    const int row = d + 2;
+    const int sq = bi * n_rep + r;
+    const int n_sq = (gridDim.x / n_head) * n_rep;
+    const int kvh = hh / n_rep;
+    const int j = blockIdx.y * DA_MERGE_TILE + threadIdx.x;
+    const bool mine = j < d;
+    // Run c of this query head: `((g * n_chunks + c) * n_rep + r) * row`.
+    const float *run0 = partial + ((long long)g * n_chunks * n_rep + r) * row;
+    const long long run_stride = (long long)n_rep * row;
+
+    const float sink = sinks ? sinks[hh] : -INFINITY;
+    float big_m = sink;
+    for (int c = threadIdx.x; c < n_chunks; c += DA_MERGE_TILE) {
+        big_m = fmaxf(big_m, run0[c * run_stride]);
+    }
+    for (int u = threadIdx.x; u < past_runs; u += DA_MERGE_TILE) {
+        const float m = past_lse[((long long)u * n_kv_head + kvh) * n_sq + sq];
+        if (isfinite(m)) {
+            big_m = fmaxf(big_m, m);
+        }
+    }
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) {
+        big_m = fmaxf(big_m, __shfl_xor_sync(0xffffffffu, big_m, o));
+    }
+    if ((threadIdx.x & 31) == 0) {
+        warp_max[threadIdx.x >> 5] = big_m;
+    }
+    __syncthreads();
+#pragma unroll
+    for (int w = 0; w < DA_MERGE_TILE / 32; w++) {
+        big_m = fmaxf(big_m, warp_max[w]);
+    }
+
+    float num = 0.0f;
+    float den = sinks ? expf(sink - big_m) : 0.0f;
+    if (mine) {
+        for (int u = 0; u < past_runs; u++) {
+            const float m = past_lse[((long long)u * n_kv_head + kvh) * n_sq + sq];
+            if (!isfinite(m)) {
+                continue;
+            }
+            const float w = expf(m - big_m);
+            den += w;
+            num += w * __half2float(past_o[(((long long)u * n_sq + sq) * n_kv_head + kvh) * d + j]);
+        }
+    }
+    for (int t0 = 0; t0 < n_chunks; t0 += DA_MERGE_TILE) {
+        const int tn = min(DA_MERGE_TILE, n_chunks - t0);
+        // The tile before is read by every thread before it is replaced.
+        __syncthreads();
+        if (threadIdx.x < tn) {
+            const float *part = run0 + (long long)(t0 + threadIdx.x) * run_stride;
+            const float m = part[0];
+            tile_m[threadIdx.x] = m;
+            tile_l[threadIdx.x] = part[1];
+            tile_w[threadIdx.x] = m == -INFINITY ? 0.0f : expf(m - big_m);
+        }
+        __syncthreads();
+        if (mine) {
+            const float *xs = run0 + (long long)t0 * run_stride + 2 + j;
+            for (int c0 = 0; c0 < tn; c0 += DA_MERGE_UNROLL) {
+                float x[DA_MERGE_UNROLL];
+#pragma unroll
+                for (int u = 0; u < DA_MERGE_UNROLL; u++) {
+                    x[u] = c0 + u < tn ? xs[(long long)(c0 + u) * run_stride] : 0.0f;
+                }
+#pragma unroll
+                for (int u = 0; u < DA_MERGE_UNROLL; u++) {
+                    const int c = c0 + u;
+                    // The kernel above skips exactly these: a run that saw
+                    // nothing (a NaN max is NOT skipped there either).
+                    if (c < tn && tile_m[c] != -INFINITY) {
+                        const float w = tile_w[c];
+                        den += w * tile_l[c];
+                        num += w * x[u];
+                    }
+                }
+            }
+        }
+    }
+    if (mine) {
         out[(long long)bh * d + j] = den > 0.0f ? num / den : 0.0f;
     }
 }

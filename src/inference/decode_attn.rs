@@ -346,6 +346,18 @@ fn combine_every_length() -> bool {
         std::env::var("SWARMLLM_DECODE_ATTN_COMBINE").as_deref() != Ok("when-needed")
     })
 }
+
+/// Whether the merge stages its runs' weights in shared memory
+/// (`decode_attn_combine_staged_f32`, `kernels/decode_attn.cu`) — the same
+/// answer as the serial merge bit for bit, in a fraction of the time once a
+/// cache spans dozens of runs (FUTURE_WORK #309's residual).
+/// `SWARMLLM_DECODE_ATTN_MERGE=serial` keeps `decode_attn_combine_f32` for an
+/// A/B inside one binary.
+#[cfg(feature = "candle-cuda")]
+fn staged_merge() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SWARMLLM_DECODE_ATTN_MERGE").as_deref() != Ok("serial"))
+}
 /// Whether a decode step's attention may run on the tensor cores
 /// (`kernels/decode_attn.cu`, "ONE WARP A RUN OF POSITIONS"; FUTURE_WORK #309)
 /// where [`mma_takes`] the call. `SWARMLLM_DECODE_ATTN_MMA=0` keeps every call
@@ -500,6 +512,7 @@ pub fn gqa_decode_attention_cuda(
             scale,
             softcap: softcap.unwrap_or(0.0),
             combine_one_chunk: combine_every_length(),
+            staged_merge: staged_merge(),
             chunk: fixed_chunk(),
             tensor_cores: tensor_cores_decode(),
             tree: None,
@@ -876,6 +889,7 @@ pub(crate) fn gqa_tree_attention_cuda(
             scale,
             softcap: softcap.unwrap_or(0.0),
             combine_one_chunk: combine_every_length(),
+            staged_merge: staged_merge(),
             chunk: fixed_chunk(),
             tensor_cores: false,
             tree: Some(cuda::TreeOperands {
@@ -963,6 +977,9 @@ mod cuda {
         /// A one-chunk cache goes through the combine too
         /// ([`super::combine_every_length`]).
         pub(super) combine_one_chunk: bool,
+        /// The merge stages its runs' weights ([`super::staged_merge`]); the
+        /// same bits either way.
+        pub(super) staged_merge: bool,
         /// Positions per block, one of [`super::CARD_CHUNKS`]; `None` =
         /// [`super::chunk_for`] the call's shape ([`super::fixed_chunk`]).
         pub(super) chunk: Option<usize>,
@@ -1395,13 +1412,27 @@ mod cuda {
                 }
             }
             if let Some(p) = partial.as_ref() {
+                // The staged merge spreads the dims over blocks of 128 (its
+                // `DA_MERGE_TILE`); the serial one walks them in one block.
                 let combine = dev.get_or_load_custom_func(
-                    "decode_attn_combine_f32",
+                    if self.staged_merge {
+                        "decode_attn_combine_staged_f32"
+                    } else {
+                        "decode_attn_combine_f32"
+                    },
                     "swarmllm_decode_attn",
                     super::DECODE_ATTN_PTX,
                 )?;
                 let cfg = LaunchConfig {
-                    grid_dim: ((b * n_head) as u32, 1, 1),
+                    grid_dim: (
+                        (b * n_head) as u32,
+                        if self.staged_merge {
+                            d.div_ceil(128) as u32
+                        } else {
+                            1
+                        },
+                        1,
+                    ),
                     block_dim: (128, 1, 1),
                     shared_mem_bytes: 0,
                 };
@@ -1708,6 +1739,7 @@ mod tests {
                     scale,
                     softcap: softcap.unwrap_or(0.0),
                     combine_one_chunk: true,
+                    staged_merge: true,
                     chunk: Some(chunk),
                     tensor_cores: false,
                     tree: None,
@@ -1806,8 +1838,9 @@ mod tests {
                 candle_core::DType::F16,
                 true,
             ),
-            // 256 dims, two warps a run: Gemma 2's group of 2 with a cap that
-            // bites, Qwen 3.6 27B's 6 (24 / 4) at one run and many, a long cache.
+            // 256 dims, the query in shared memory: Gemma 2's group of 2 with a
+            // cap that bites, Qwen 3.6 27B's 6 (24 / 4) at one run and many, a
+            // long cache, a group of 16 (the shared rows 8-15 written).
             (
                 1,
                 8,
@@ -1821,6 +1854,7 @@ mod tests {
             (1, 24, 4, 37, 256, None, candle_core::DType::F16, true),
             (1, 24, 4, 961, 256, None, candle_core::DType::F16, true),
             (2, 8, 4, 4099, 256, None, candle_core::DType::F16, true),
+            (1, 32, 2, 700, 256, None, candle_core::DType::F16, true),
             // Declined: Phi-3.5's 96 dims, an f32 cache.
             (1, 32, 32, 300, 96, None, candle_core::DType::F16, false),
             (1, 28, 4, 961, 128, None, candle_core::DType::F32, false),
@@ -1871,6 +1905,7 @@ mod tests {
                     scale,
                     softcap: softcap.unwrap_or(0.0),
                     combine_one_chunk: true,
+                    staged_merge: true,
                     chunk,
                     tensor_cores,
                     tree: None,
@@ -2289,32 +2324,47 @@ mod tests {
                 .chain(tiled_arm)
                 .chain(flash_arms)
             {
-                let op = cuda::DecodeAttn {
-                    scale,
-                    softcap: softcap.unwrap_or(0.0),
-                    combine_one_chunk: true,
-                    chunk,
-                    tensor_cores: false,
-                    tree: Some(cuda::TreeOperands {
-                        visibility: vis.clone(),
-                        rows: seq,
-                        base,
-                        tiled,
-                        past: runs.map(|runs| cuda::PastOnFlash {
-                            q: flash_queries(&q_rows, seq, n_kv_head, n_rep, d).unwrap(),
-                            runs,
-                            run_len: base / runs,
+                let through = |staged_merge: bool| {
+                    let op = cuda::DecodeAttn {
+                        scale,
+                        softcap: softcap.unwrap_or(0.0),
+                        combine_one_chunk: true,
+                        staged_merge,
+                        chunk,
+                        tensor_cores: false,
+                        tree: Some(cuda::TreeOperands {
+                            visibility: vis.clone(),
+                            rows: seq,
+                            base,
+                            tiled,
+                            past: runs.map(|runs| cuda::PastOnFlash {
+                                q: flash_queries(&q_rows, seq, n_kv_head, n_rep, d).unwrap(),
+                                runs,
+                                run_len: base / runs,
+                            }),
                         }),
-                    }),
-                    sinks: None,
+                        sinks: None,
+                    };
+                    q_rows
+                        .apply_op3_no_bwd(&kc, &vc, &op)
+                        .unwrap()
+                        .reshape((1, seq, n_head, d))
+                        .unwrap()
+                        .transpose(1, 2)
+                        .unwrap()
                 };
-                let got = q_rows
-                    .apply_op3_no_bwd(&kc, &vc, &op)
-                    .unwrap()
-                    .reshape((1, seq, n_head, d))
-                    .unwrap()
-                    .transpose(1, 2)
-                    .unwrap();
+                let got = through(true);
+                // The staged merge is the serial one's answer, bit for bit,
+                // with flash's runs in it too.
+                let serial = flat(through(false));
+                assert!(
+                    flat(got.clone())
+                        .iter()
+                        .zip(&serial)
+                        .all(|(a, b)| a.to_bits() == b.to_bits()),
+                    "the staged merge is not the serial one's bits (heads {n_head}/{n_kv_head} \
+                     d={d} base {base} rows {seq} chunk {chunk:?} tiled {tiled} runs {runs:?})"
+                );
                 arms.push((
                     match (chunk, runs) {
                         (Some(c), _) => format!("{c}-position chunks"),
@@ -2350,9 +2400,17 @@ mod tests {
                 .unwrap()
             });
             for (arm, got, on_flash) in arms {
-                let (want, most_abs, most_rel) = match (&want_half_q, on_flash) {
-                    (Some(w), true) => (w, 2e-3, 2e-2),
-                    _ => (&want, 1e-5, 1e-4),
+                // The relative gap is taken over a value of at least `floor`;
+                // below it the absolute bound judges (numpy's and torch's
+                // `atol + rtol·|b|`). A flash arm's floor is its bounds' ratio
+                // (0.1): at 0.05 an output near zero was held to 1e-3
+                // absolute, half the arm's own bound, and a 512-row tree over
+                // random values crossed it once in ~30 runs (abs 1.0e-3, rel
+                // 0.0202; 2026-11-25, in the binaries before and after the
+                // tensor-core decode kernels alike).
+                let (want, most_abs, most_rel, floor) = match (&want_half_q, on_flash) {
+                    (Some(w), true) => (w, 2e-3, 2e-2, 0.1),
+                    _ => (&want, 1e-5, 1e-4, 0.05),
                 };
                 assert_eq!(got.len(), want.len());
                 let worst_abs = got
@@ -2363,7 +2421,7 @@ mod tests {
                 let worst_rel = got
                     .iter()
                     .zip(want)
-                    .map(|(a, b)| (a - b).abs() / a.abs().max(b.abs()).max(0.05))
+                    .map(|(a, b)| (a - b).abs() / a.abs().max(b.abs()).max(floor))
                     .fold(0f32, nan_max);
                 if on_flash {
                     eprintln!(
@@ -2517,6 +2575,7 @@ mod tests {
                                 scale,
                                 softcap: 0.0,
                                 combine_one_chunk: true,
+                                staged_merge: true,
                                 chunk: None,
                                 tensor_cores: false,
                                 tree: Some(cuda::TreeOperands {
@@ -2615,6 +2674,7 @@ mod tests {
                                 scale,
                                 softcap: 0.0,
                                 combine_one_chunk: true,
+                                staged_merge: true,
                                 chunk: None,
                                 tensor_cores: false,
                                 tree: Some(cuda::TreeOperands {
@@ -2654,6 +2714,101 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The staged merge (`decode_attn_combine_staged_f32`) must be the serial
+    /// one's answer BIT FOR BIT ([`super::staged_merge`]): a decode step over
+    /// more runs than one tile of 128 (16-position chunks at 4,099 positions:
+    /// 257 runs, the last tile part-filled), one run, both caches, the tensor
+    /// cores and the per-position kernels, 64/96/128/256 dims (the dims over
+    /// two blocks at 256), a soft cap, gpt-oss's sinks, two batches. Trees —
+    /// flash's past runs among them — are compared in
+    /// `cuda_tree_kernel_matches_the_masked_matmul_path`.
+    ///
+    /// ⚠ Gated, like the tests around it: run it on a card with `--nocapture`
+    /// and look for the SKIPPED line before believing a pass.
+    #[cfg(feature = "candle-cuda")]
+    #[test]
+    fn the_staged_merge_is_the_serial_one_bit_for_bit() {
+        use candle_core::DType;
+        let card = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("SKIPPED decode attention staged merge: no CUDA device ({e})");
+                return;
+            }
+        };
+        let mut compared = 0;
+        // (batch, heads, KV heads, positions, dims, cap, sinks, cache, tensor cores)
+        for (b, n_head, n_kv_head, s_len, d, softcap, sinks, cache_dtype, tensor_cores) in [
+            (
+                1usize,
+                28usize,
+                4usize,
+                4099usize,
+                128usize,
+                None,
+                false,
+                DType::F16,
+                true,
+            ),
+            (1, 28, 4, 4099, 128, None, false, DType::F16, false),
+            (1, 8, 4, 4099, 256, Some(2.0f32), false, DType::F16, true),
+            (2, 24, 4, 961, 256, None, false, DType::F16, true),
+            (2, 64, 8, 700, 64, None, true, DType::F16, false),
+            (1, 64, 8, 2100, 64, None, true, DType::F16, true),
+            (1, 32, 32, 300, 96, None, false, DType::F16, false),
+            (1, 28, 4, 961, 128, None, false, DType::F32, false),
+            (1, 14, 2, 9, 64, None, false, DType::F16, true),
+        ] {
+            let q = Tensor::randn(0f32, 1.0, (b, n_head, 1, d), &card).unwrap();
+            let cache = || {
+                Tensor::randn(0f32, 1.0, (b, n_kv_head, s_len + 9, d), &card)
+                    .unwrap()
+                    .to_dtype(cache_dtype)
+                    .unwrap()
+                    .narrow(2, 0, s_len)
+                    .unwrap()
+            };
+            let (k, v) = (cache(), cache());
+            let sink_values = sinks.then(|| Tensor::randn(0f32, 1.0, n_head, &card).unwrap());
+            for chunk in [Some(16), None] {
+                let run = |staged_merge: bool| {
+                    let op = cuda::DecodeAttn {
+                        scale: 1.0 / (d as f32).sqrt(),
+                        softcap: softcap.unwrap_or(0.0),
+                        combine_one_chunk: true,
+                        staged_merge,
+                        chunk,
+                        tensor_cores,
+                        tree: None,
+                        sinks: sink_values.clone(),
+                    };
+                    q.apply_op3_no_bwd(&k, &v, &op)
+                        .unwrap()
+                        .flatten_all()
+                        .unwrap()
+                        .to_vec1::<f32>()
+                        .unwrap()
+                };
+                let (serial, staged) = (run(false), run(true));
+                let differ = serial
+                    .iter()
+                    .zip(&staged)
+                    .filter(|(a, b)| a.to_bits() != b.to_bits())
+                    .count();
+                assert_eq!(
+                    differ,
+                    0,
+                    "b={b} heads {n_head}/{n_kv_head} S={s_len} d={d} softcap={softcap:?} \
+                     sinks {sinks} cache {cache_dtype:?} tensor cores {tensor_cores} chunk \
+                     {chunk:?}: {differ} of {} differ",
+                    serial.len()
+                );
+                compared += 1;
+            }
+        }
+        eprintln!("STAGED MERGE: {compared} shapes, every output the serial merge's bits");
     }
 
     /// A cache of ONE chunk merged by the combine kernel must equal the direct
@@ -2699,6 +2854,7 @@ mod tests {
                             scale: 1.0 / (d as f32).sqrt(),
                             softcap: softcap.unwrap_or(0.0),
                             combine_one_chunk,
+                            staged_merge: true,
                             chunk: Some(CUDA_CHUNK),
                             tensor_cores: false,
                             tree: None,

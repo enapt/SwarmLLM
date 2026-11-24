@@ -5297,9 +5297,26 @@ and a 1,548-token prompt's replies move and pass (worst gap 0.037 / 0.046 agains
 new) — a near-tie the old kernel missed too. The daemon's 0.8B code reply moves between arms as well: the switch
 acts there.
 
-**Next.** The merge now costs nearly what the kernel does (llama.cpp's fixup is 3.0 µs); at 256 dims
-llama.cpp's transposed tile (P^T moved to a B fragment by `movmatrix`) would free the registers a deeper
-K pipeline needs.
+**The merge stages its runs' weights** (`decode_attn_combine_staged_f32`, 2026-11-25; `decode_attn::staged_merge`,
+A/B `SWARMLLM_DECODE_ATTN_MERGE=serial`). The serial merge had every thread walk the runs itself — a run's max, then
+its sum and output, an `expf` between: two dependent loads a run, ~58 runs at ~928 positions in 16s — in a grid of one
+block a query head (28 on the 7B, 8 on Gemma 2 2B). Staged: the max with the threads reading runs side by side, each
+tile of 128 runs' (max, sum, weight) in shared memory once, each output's walk reading only `Σexp·v` with eight loads
+in flight (32 were slower: 9.5 against 8.4 µs, 196 registers), the dims over blocks of 128. Every output adds the same
+products in the same order, so the answer is the serial merge's BIT FOR BIT: `the_staged_merge_is_the_serial_one_bit_for_bit`
+(18 shapes — 257 runs, gpt-oss's sinks, both caches, both attention kernels, 64-256 dims, two batches) and every arm
+of `cuda_tree_kernel_matches_the_masked_matmul_path` (flash's past runs included); a control adding each group of
+eight runs in reverse FAILS both (3,279 of 3,584 outputs differ; `dec1125/run_mergectl.out`). nsys, µs a call,
+serial → staged, over three sittings (`dec1125/run_merge.out`, `run_merge3.out`): Gemma 2 2B at ~4,128 positions
+14.7-15.4 → 8.5 (8 blocks became 16, each walk a fraction as long), the 7B at ~928 9.6-10.2 → 8.4-9.1, at ~4,128 11.6
+→ 10.4. Decode reads inside a warming card's spread: in ABBA order (`run_merge3.out`) Gemma 2 2B from a 4,096-token
+prompt +4.5 % in the first block and +0.4 % in the second, the 7B and the 3B level, while the 7B at 4,096 fell 56 → 48
+tok/s across the sitting in BOTH arms — Gemma's 6.7 µs × 26 layers is ~1.5 % of its token.
+llama.cpp's `flash_attn_combine_results` stages its (max, sum) pairs the same way; its threads still take an `expf` a
+run, over the handful of parallel blocks it splits a cache into.
+
+**Next.** At 256 dims llama.cpp's transposed tile (P^T moved to a B fragment by `movmatrix`) would free the registers
+a deeper K pipeline needs; the merge could fold into the attention kernel's last run (llama.cpp's stream-K fixup).
 
 **From the rules file (moved 2026-10-02):**
 
@@ -5809,7 +5826,8 @@ would show a row its siblings).
 
 **Tests**: `cuda_tree_kernel_matches_the_masked_matmul_path` — flash arms at 1, 3, 7 and 16 runs on
 every half-cache shape with base ≥ runs, against the matmul path over the same half-rounded queries
-(abs < 2e-3, rel < 2e-2; worst 1.1e-3 over 52 arms), the entry point's own choice included;
+(abs < 2e-3, rel < 2e-2 over values of at least 0.1 — at a 0.05 floor a 512-row tree crossed the relative
+bound once in ~30 runs at abs 1.0e-3, 2026-11-25; worst 1.1e-3 over 52 arms), the entry point's own choice included;
 `tree_context_on_flash_timing` (`#[ignore]`, the op by run count).
 
 **Moved from `arch-inference.md` (trimmed 2026-11-17):** 2026-10-23, `decode_attn::past_runs`: every row sees the positions before the tree's base whole, so FA2 reads them non-causally in `auto_past_runs` runs - FlashInfer's cascade, merged by log-sum-exp in the one combine - from `PAST_FLASH_FROM` work; the run count never depends on the context's length because a captured check's allocations must not move.

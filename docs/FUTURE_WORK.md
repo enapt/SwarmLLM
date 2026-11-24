@@ -3981,8 +3981,11 @@ query staged in shared memory, but a call still takes 3x the 7B's for the same h
 dims (Gemma 2 2B at ~4,128: 94.2 µs against 132.7 before, the 7B's 31): a K step's 64 registers beside
 256 outputs leave one step's loads in flight. llama.cpp's transposed tile (positions as the 16 rows,
 query heads as 8 columns: 64 output registers; P^T into a B fragment by `movmatrix`) frees them. (2)
-The merge (`decode_attn_combine_f32`, 9.7 µs a layer at ~928 on the 7B) costs nearly what the
-attention does, against llama.cpp's 3.0 µs fixup. (3) Gemma 4's global layers (512 dims) stay on the
+The merge, with its runs' weights staged (`decode_attn_combine_staged_f32`, bit for bit the serial
+one's; Gemma 2 2B at ~4,128 15.2 → 8.5 µs), still takes 8.4-9.1 µs a layer on the 7B at ~928 against
+llama.cpp's 3.0 µs fixup: folding it
+into the attention kernel's last run (stream-K's fixup) would drop the launch and the reread of the
+runs. (3) Gemma 4's global layers (512 dims) stay on the
 per-position kernels. Prior art for all three: llama.cpp `fattn-mma-f16.cuh` (its D = 256 / 512
 configs, `Q_in_reg`; stream-K's fixup only for the runs that share an output tile).
 
@@ -3995,8 +3998,10 @@ decode from a 4,096-token prompt 48.5-49.2 → 56.7-57.9 tok/s (llama-bench `-d 
 3B at 4,096 68.0-71.7 → 84.0-94.1, level at short caches. **At 256 dims the same night**: the
 group's query staged once a block in shared memory (two warps a run, half the dims each, read K twice
 and gained 1-3 %, not landed): Gemma 2 2B's attention 132.7 → 94.2 µs a call at ~4,128, decode from a
-4,096-token prompt 79.1-81.1 → 86.1-87.9 tok/s, Qwen3.5-4B 66.5-68.0 → 69.9-71.4. The history of the
-attempts before it:
+4,096-token prompt 79.1-81.1 → 86.1-87.9 tok/s, Qwen3.5-4B 66.5-68.0 → 69.9-71.4. **And the merge**: its runs'
+weights staged once a block, bit for bit the serial merge's (`decode_attn_combine_staged_f32`, A/B
+`SWARMLLM_DECODE_ATTN_MERGE=serial`): Gemma 2 2B's 15.2 → 8.5 µs a call at ~4,128, the 7B's 9.6-10.2 → 8.4-9.1 at ~928;
+decode inside the noise of a warming card. The history of the attempts before it:
 
 **Re-measured 2026-11-25: decode attention was still the gap, on the 7B too, and it grew with the
 cache.** nsys, Qwen2.5-Coder-7B Q4_K_M at ~960 positions, RTX 3070 Laptop, live node stopped
