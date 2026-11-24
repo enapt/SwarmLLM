@@ -290,8 +290,9 @@ DA_ENTRY(decode_attn_f16kv, __half)
 // half cache runs on the tensor cores").
 //
 // Here one warp owns a run of `chunk` positions of one KV head and every query
-// head of its group, sixteen positions a step, with no shared memory and no
-// barrier: the query heads are the 16 rows of `mma.m16n8k16` (a group of up to
+// head of its group, sixteen positions a step — up to 128 dims with no shared
+// memory and no barrier (at 256 the group's query is staged once a block in
+// shared memory, `DaMmaQuery`): the query heads are the 16 rows of `mma.m16n8k16` (a group of up to
 // 16; rows past `n_rep` are zeros and never written), so
 //   S^T[head][pos] = Q[head][dim] · K^T  — K's rows are B's columns as they lie
 //                    (`.col`), read as 32-bit pairs straight from the cache;
@@ -309,7 +310,7 @@ DA_ENTRY(decode_attn_f16kv, __half)
 // against f32 attention by
 // `decode_attn::tests::the_tensor_core_decode_kernel_matches_f32_attention`.
 //
-// Requires a half cache, D of 64 or 128, n_rep <= 16, every K/V row starting
+// Requires a half cache, D of 64, 128 or 256, n_rep <= 16, every K/V row starting
 // on 4 bytes (the caller checks; `decode_attn::mma_takes`), sm_80+.
 // Prior art: llama.cpp `fattn-mma-f16.cuh` (`ncols2`: a KV head's query heads
 // are the rows of one tile; stream-K for the cache) and FlashAttention-2
@@ -345,6 +346,20 @@ static __device__ __forceinline__ unsigned da_halves_bits(const __half lo, const
 }
 #endif
 
+// Up to 128 dims a warp keeps the group's query in registers (KS × 4). At
+// 256 the query (64), one step's K (64) and all 256 outputs (128) pass a
+// thread's registers, so the query is staged ONCE a block in shared memory —
+// every warp of a block serves the same KV head — and each k-step's fragment
+// read from there: the same half bits, so the same answer. Rows sit
+// `D / 2 + 4` words apart: a fragment's eight rows then fall in different
+// banks. (Two warps a run, each half the dims, read K twice and gained 1-3 %:
+// `docs/invariants/inference.md` § "A decode step over the half cache".)
+template <int D>
+struct DaMmaQuery {
+    static constexpr bool IN_SHARED = D > 128;
+    static constexpr int ROW_WORDS = D / 2 + 4;
+};
+
 template <int D>
 static __device__ __forceinline__ void decode_attn_mma_body(
     const float *__restrict__ q,
@@ -371,6 +386,23 @@ static __device__ __forceinline__ void decode_attn_mma_body(
     const int h = g % n_kv_head;
     const int lane = threadIdx.x & 31;
     const int c = blockIdx.y * DA_MMA_WARPS + (threadIdx.x >> 5);
+    const float *qg = q + (long long)g * n_rep * D;
+    constexpr bool Q_SHARED = DaMmaQuery<D>::IN_SHARED;
+    constexpr int QW = DaMmaQuery<D>::ROW_WORDS;
+    // 16 rows of the group's query as half pairs, scaled, rounded to half;
+    // rows past `n_rep` zero. Staged before any warp returns: the barrier
+    // needs every thread of the block.
+    __shared__ unsigned q_shared[Q_SHARED ? 16 * QW : 1];
+    if constexpr (Q_SHARED) {
+        for (int i = threadIdx.x; i < 16 * (D / 2); i += DA_MMA_WARPS * 32) {
+            const int r = i / (D / 2);
+            const int w = i % (D / 2);
+            q_shared[r * QW + w] = r < n_rep
+                ? da_half2_bits(qg[r * D + 2 * w] * scale, qg[r * D + 2 * w + 1] * scale)
+                : 0u;
+        }
+        __syncthreads();
+    }
     if (c >= n_chunks) {
         return;
     }
@@ -382,17 +414,20 @@ static __device__ __forceinline__ void decode_attn_mma_body(
     const int tig = lane & 3;
 
     // The query heads as A: rows gid and gid + 8, scaled, rounded to half.
-    unsigned qa[KS][4];
-    const float *qg = q + (long long)g * n_rep * D;
+    // Fragment f of k-step ks: row gid + 8 (f & 1), the half pair at column
+    // 16 ks + 2 tig + 8 (f >> 1).
+    unsigned qa[Q_SHARED ? 1 : KS][4];
+    if constexpr (!Q_SHARED) {
 #pragma unroll
-    for (int ks = 0; ks < KS; ks++) {
+        for (int ks = 0; ks < KS; ks++) {
 #pragma unroll
-        for (int f = 0; f < 4; f++) {
-            const int r = gid + 8 * (f & 1);
-            const int col = ks * 16 + 2 * tig + 8 * (f >> 1);
-            qa[ks][f] = r < n_rep
-                ? da_half2_bits(qg[r * D + col] * scale, qg[r * D + col + 1] * scale)
-                : 0u;
+            for (int f = 0; f < 4; f++) {
+                const int r = gid + 8 * (f & 1);
+                const int col = ks * 16 + 2 * tig + 8 * (f >> 1);
+                qa[ks][f] = r < n_rep
+                    ? da_half2_bits(qg[r * D + col] * scale, qg[r * D + col + 1] * scale)
+                    : 0u;
+            }
         }
     }
 
@@ -433,9 +468,28 @@ static __device__ __forceinline__ void decode_attn_mma_body(
             for (int i = 0; i < 4; i++) {
                 s[t][i] = 0.0f;
             }
+        }
+        // Each tile adds its k-steps in order, whichever way the query is held.
+        if constexpr (Q_SHARED) {
 #pragma unroll
             for (int ks = 0; ks < KS; ks++) {
-                da_mma_16816(s[t], qa[ks], kf[t][ks][0], kf[t][ks][1]);
+                unsigned a_shared[4];
+#pragma unroll
+                for (int f = 0; f < 4; f++) {
+                    a_shared[f] = q_shared[(gid + 8 * (f & 1)) * QW + ks * 8 + tig + 4 * (f >> 1)];
+                }
+#pragma unroll
+                for (int t = 0; t < 2; t++) {
+                    da_mma_16816(s[t], a_shared, kf[t][ks][0], kf[t][ks][1]);
+                }
+            }
+        } else {
+#pragma unroll
+            for (int t = 0; t < 2; t++) {
+#pragma unroll
+                for (int ks = 0; ks < KS; ks++) {
+                    da_mma_16816(s[t], qa[ks], kf[t][ks][0], kf[t][ks][1]);
+                }
             }
         }
         // Accumulator i of tile t: row gid + 8 (i >> 1), position
@@ -551,6 +605,8 @@ static __device__ __forceinline__ void decode_attn_mma_body(
 
 DA_MMA_ENTRY(decode_attn_mma_f16kv_d64, 64)
 DA_MMA_ENTRY(decode_attn_mma_f16kv_d128, 128)
+// Gemma 2/3, Gemma 4's windowed layers, Qwen 3.5/3.6's attention layers.
+DA_MMA_ENTRY(decode_attn_mma_f16kv_d256, 256)
 
 // A TREE's rows TILED over the half cache (#134 (b)): one block stages ONE KV
 // head's chunk of K and V in shared memory and serves a tile of the tree's

@@ -5201,15 +5201,15 @@ spread, no shift; Qwen 3.5 0.8B one each.
 
 ### A decode step over the half cache runs on the tensor cores (2026-11-25, FUTURE_WORK #309)
 
-**What.** `decode_attn_mma_f16kv_d{64,128}`: one WARP owns a run of `chunk` positions of one KV
-head and every query head of its group, sixteen positions a step, with no shared memory and no
-barrier. The query heads are the 16 rows of `mma.m16n8k16` (a group of up to 16; rows past
+**What.** `decode_attn_mma_f16kv_d{64,128,256}`: one WARP owns a run of `chunk` positions of one KV
+head and every query head of its group, sixteen positions a step — at 64 and 128 dims with no shared
+memory and no barrier (256: § "At 256 dims" below). The query heads are the 16 rows of `mma.m16n8k16` (a group of up to 16; rows past
 `n_rep` are zeros and never written), so the scores are `Q · K^T` with K's rows read as B's
 columns straight from the cache in 32-bit half pairs, and `Σ P·V` takes the two score tiles'
 accumulators as its A fragment (FlashAttention-2's register reuse) with V's pairs gathered from
 two rows. An online softmax runs over the run's 16-position steps and the run writes the old
 kernels' `partial` layout, so `decode_attn_combine_f32` merges it unchanged. **`decode_attn::mma_takes`**
-is the one rule: a decode step (no tree), the half cache, merged, d 64 or 128, ≤ 16 query heads, every
+is the one rule: a decode step (no tree), the half cache, merged, d 64, 128 or 256, ≤ 16 query heads, every
 K/V row on 4 bytes, a PTX of sm_80+ (build.rs hands `SWARMLLM_KERNEL_PTX_CAP` to the crate). It reads
 neither the cache length nor the card, so a captured step keeps one kernel as the cache grows (§ "Its
 chunk follows the cache length": the kernel may not change in an update) and which kernel runs
@@ -5232,7 +5232,7 @@ products accumulate in f32 — llama.cpp's three roundings. Against f32 attentio
 cache (`the_tensor_core_decode_kernel_matches_f32_attention`, nine shapes × every chunk: groups of 1,
 7, 8, 16, two batches, a soft cap, 37-4,099 positions) the worst gap is 3.5e-4 abs / 1.3e-2 rel, held to
 the flash arms' 2e-3 / 2e-2; the test also proves it RAN (its bits are not the per-position kernels'
-anywhere, the entry point's are its own) and that a declined call (d 256, an f32 cache) is the old
+anywhere, the entry point's are its own) and that a declined call (d 96, an f32 cache) is the old
 kernels' bit for bit. Its soft-cap case caps at 2, not Gemma 2's 50 (which moves an N(0, 1) score by ~1e-2
 and passes with the cap skipped — llama.cpp's own test caps at 10 over scores of ~0.3): a body with the cap
 removed FAILS it at 8.3e-2 abs against 3.6e-5 (`dec1125/run_mmactl.out`). The entry point's tolerance in the other card tests follows `mma_takes`
@@ -5258,15 +5258,48 @@ three and Mistral 7B two of three the same in both arms; Mistral's code reply 16
 choice against 166, worst rank 3 and gap 1.311 in both. GLM-4 9B (a group of 16): the code reply moves (110 tokens,
 9 off the first choice, against 145 and 10), the same worst gap (17.8) in both arms — a disagreement with llama.cpp
 the old kernel had. Qwen3 1.7B: the OLD arm's two runs differ from each other (gotcha #1168); the new arm's worst
-rank 2, gaps 0.152-0.244 against 0.176-0.260. Gemma 2 2B (d 256) and Phi-3.5 (d 96), declined: byte for byte.
+rank 2, gaps 0.152-0.244 against 0.176-0.260. Gemma 2 2B (d 256 — declined then) and Phi-3.5 (d 96), declined:
+byte for byte.
 
 **The chunk stays `chunk_for`'s.** A fixed 32 or 64 under the tensor cores (`SWARMLLM_DECODE_ATTN_CHUNK`)
 was level or slower everywhere: at ~928 a 32 halves the merge (6.2 against 9.9 µs) but the decode
 reads the same; TinyLlama at 200 is 187-200 in 32 and 192-193 in 64 against 207-215.
 
-**Next.** The merge now costs nearly what the kernel does (llama.cpp's fixup is 3.0 µs); a head width
-of 256 (Gemma 2/3) stays on the per-position kernels — two warps a run, or the output split across
-them, would bring it over.
+**At 256 dims** (Gemma 2/3, Gemma 4's windowed layers, Qwen 3.5/3.6's attention layers — `key_length` 256 in
+the 0.8B's, 4B's and 27B's headers). One warp holding the query (64 registers), a step's K (64) and all 256
+outputs (128) passes a thread's registers. **Two warps a run, half the dims each** (grid z 2: each computes the
+same scores, so K is read twice) passed every test and gained 1-3 % (Gemma 2 2B at ~4,128 positions 124.3 against
+127.5 µs a call; `dec1125/run_256.out`, patch `zsplit_256.patch`) — not landed. **What landed: one warp a run with
+the group's query staged ONCE A BLOCK in shared memory** (the block's four warps serve one KV head; rows `D/2 + 4`
+words apart, so a fragment's eight rows fall in different banks; 8,448 B, one barrier before any warp returns;
+168 registers, no spills) — llama.cpp's own choice where it cannot keep Q in registers (`Q_in_reg = false`,
+`fattn-mma-f16.cuh`). The fragments' half bits are the register version's; d 64/128's machine code is unchanged
+(`cuobjdump -sass`, instruction for instruction). Measured (`dec1125/run_256q.out`, two interleaved rounds):
+
+| | tensor cores | per-position |
+|---|---|---|
+| Gemma 2 2B attention, nsys at ~4,128 (µs a call) | 94.2 | 132.7 |
+| Gemma 2 2B, 4,096-token prompt | 86.1-87.9 | 79.1-81.1 |
+| Gemma 2 2B, 200 | 104.4-110.1 | 102.1-103.9 |
+| Qwen3.5-4B, 4,096 (an attention layer in four) | 69.9-71.4 | 66.5-68.0 |
+| Qwen3.5-4B, 200 | 73.8-76.0 | 73.6-74.0 |
+| Qwen2.5-Coder 7B, 4,096 (the 128 path, unchanged) | 56.0-57.0 | 47.9-48.5 |
+
+Qwen3.5-0.8B read 142-168 tok/s at 200 and 114-151 at 4,096 across BOTH arms — host-bound and too noisy to
+call. Still 3x the 7B's time a call for the same heads and twice the dims: a K step's 64 registers leave
+one step's loads in flight, where llama.cpp's transposed tile (positions as rows, query heads as 8 columns)
+keeps the output at 64 registers. **Replies at 256** (`dec1125/run_256_replies.out`, `run_256_ids.out`): Gemma
+2 2B the same in both arms, every token llama.cpp's first choice but one 0.179 near-tie in the code reply, in
+both. Qwen 3.5 (llama-cpp-python cannot load it) by exact ids against llama.cpp master (`~/llama.cpp-ref/
+score_ids_dump.py`, margin 0.05; `test-split` on the card, 100 tokens): the 0.8B's short reply the same, its code
+and a 1,548-token prompt's replies move and pass (worst gap 0.037 / 0.046 against 0 / 0.001); the 4B's short and
+1,546-token replies the same and pass; its code reply one token past the margin in BOTH arms (0.095 old, 0.159
+new) — a near-tie the old kernel missed too. The daemon's 0.8B code reply moves between arms as well: the switch
+acts there.
+
+**Next.** The merge now costs nearly what the kernel does (llama.cpp's fixup is 3.0 µs); at 256 dims
+llama.cpp's transposed tile (P^T moved to a B fragment by `movmatrix`) would free the registers a deeper
+K pipeline needs.
 
 **From the rules file (moved 2026-10-02):**
 

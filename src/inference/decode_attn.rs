@@ -368,7 +368,8 @@ fn kernel_ptx_cap() -> u32 {
 
 /// Does the tensor-core decode kernel take this call? The ONE rule, asked by
 /// the launch and the tests: a decode step (no tree) over the half cache,
-/// merged by the combine, a head width it is built for (64 or 128), a group of
+/// merged by the combine, a head width it is built for (64, 128, or 256 — the
+/// query staged in shared memory there), a group of
 /// at most 16 query heads (one tile's rows), every K/V row starting on 4 bytes
 /// (it reads half pairs as 32-bit words), and a PTX of sm_80 or later.
 /// `offsets` are the K/V views' start and their batch and head strides, in
@@ -376,7 +377,7 @@ fn kernel_ptx_cap() -> u32 {
 #[cfg(feature = "candle-cuda")]
 fn mma_takes(d: usize, n_rep: usize, merged: bool, offsets: [usize; 6]) -> bool {
     merged
-        && (d == 64 || d == 128)
+        && matches!(d, 64 | 128 | 256)
         && n_rep <= 16
         && offsets.iter().all(|o| o.is_multiple_of(2))
         && kernel_ptx_cap() >= 80
@@ -1279,16 +1280,17 @@ mod cuda {
                     );
                 };
                 let func = dev.get_or_load_custom_func(
-                    if d == 64 {
-                        "decode_attn_mma_f16kv_d64"
-                    } else {
-                        "decode_attn_mma_f16kv_d128"
+                    match d {
+                        64 => "decode_attn_mma_f16kv_d64",
+                        128 => "decode_attn_mma_f16kv_d128",
+                        _ => "decode_attn_mma_f16kv_d256",
                     },
                     "swarmllm_decode_attn",
                     super::DECODE_ATTN_PTX,
                 )?;
                 let cfg = LaunchConfig {
-                    // One warp a run of `chunk` positions, four runs a block.
+                    // One warp a run of `chunk` positions, four runs a block
+                    // (one KV head: at 256 dims they share the staged query).
                     grid_dim: ((b * n_kv_head) as u32, n_chunks.div_ceil(4) as u32, 1),
                     block_dim: (128, 1, 1),
                     shared_mem_bytes: 0,
@@ -1310,7 +1312,7 @@ mod cuda {
                 builder.arg(&self.softcap);
                 builder.arg(&chunk_i);
                 builder.arg(&n_chunks_i);
-                // SAFETY: ffi. `mma_takes` checked the head width (64/128), the
+                // SAFETY: ffi. `mma_takes` checked the head width (64/128/256), the
                 // group (<= 16 query heads, one tile's rows) and that every K/V
                 // row starts on 4 bytes; the caller checked the shapes and
                 // strides. The kernel reads `b` batches × `n_kv_head` heads ×
@@ -1745,11 +1747,13 @@ mod tests {
     /// RUN OF POSITIONS") against f32 attention over the same half cache: the
     /// 7B's group of 7 at one run and many (a part-filled last run and a
     /// part-filled last 16 of it), gpt-oss's 8 at d 64, no grouping, a group
-    /// of 16, two batches, a soft cap, a narrowed cache; every chunk. Held to
+    /// of 16, two batches, a soft cap, a narrowed cache; at 256 dims (the
+    /// query in shared memory) Gemma 2's 2 with a soft cap, Qwen 3.6 27B's 6
+    /// at one run and many, two batches at 4,099; every chunk. Held to
     /// the flash arms' bound (the query and the weights are rounded to half,
     /// as llama.cpp's MMA kernel rounds them). That it RAN: its answer is not
     /// the per-position kernels' bit for bit anywhere, the entry point's
-    /// answer IS its own, and a call it declines (d 256, an f32 cache) is the
+    /// answer IS its own, and a call it declines (d 96, an f32 cache) is the
     /// per-position kernels' answer bit for bit. ⚠ Gated: run it on a card
     /// with `--nocapture` and look for the SKIPPED line before believing a pass.
     #[cfg(feature = "candle-cuda")]
@@ -1802,16 +1806,23 @@ mod tests {
                 candle_core::DType::F16,
                 true,
             ),
+            // 256 dims, two warps a run: Gemma 2's group of 2 with a cap that
+            // bites, Qwen 3.6 27B's 6 (24 / 4) at one run and many, a long cache.
             (
                 1,
                 8,
                 4,
                 700,
                 256,
-                Some(50.0f32),
+                Some(2.0f32),
                 candle_core::DType::F16,
-                false,
+                true,
             ),
+            (1, 24, 4, 37, 256, None, candle_core::DType::F16, true),
+            (1, 24, 4, 961, 256, None, candle_core::DType::F16, true),
+            (2, 8, 4, 4099, 256, None, candle_core::DType::F16, true),
+            // Declined: Phi-3.5's 96 dims, an f32 cache.
+            (1, 32, 32, 300, 96, None, candle_core::DType::F16, false),
             (1, 28, 4, 961, 128, None, candle_core::DType::F32, false),
         ] {
             let (b, n_head, n_kv_head, s_len, d, softcap, cache_dtype, taken) = case;

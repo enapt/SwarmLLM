@@ -3975,14 +3975,16 @@ link). The drafter choice already avoids it where a quantized copy is held.
 #### #309 — Small dense models decoded at 0.80-0.83 of llama.cpp on a card; 0.94-1.00 since the attention chunk follows the cache, Gemma 4 E2B 0.87
 `P3` · perf-local · **PARTIAL** — 2026-10-19, the tensor-core body 2026-11-25 · history: #307's sweep
 
-**Residual (2026-11-25, after the tensor-core body):** a head width of 256 still decodes on the
-per-position kernels — Gemma 2/3, Gemma 4's global layers, and **Qwen 3.5 / 3.6's attention layers
-(`key_length` 256 in the 4B's and the 27B's headers), so the popular 27B and 35B-A3B gain nothing
-yet** — the body keeps a run's output in one
-warp's registers (164 at d 128), so 256 needs the output split across two warps; and the merge
-(`decode_attn_combine_f32`, 9.7 µs a layer at ~928 on the 7B) now costs nearly what the attention
-does, against llama.cpp's 3.0 µs fixup. Prior art for both: llama.cpp `fattn-mma-f16.cuh` (its
-D = 256 configs; stream-K's fixup only for the runs that share an output tile).
+**Residual (2026-11-25, after the tensor-core bodies at 64, 128 and 256 dims):** (1) at 256 dims
+(Gemma 2/3, Gemma 4's windowed layers, Qwen 3.5 / 3.6's attention layers) the body runs, the group's
+query staged in shared memory, but a call still takes 3x the 7B's for the same heads and twice the
+dims (Gemma 2 2B at ~4,128: 94.2 µs against 132.7 before, the 7B's 31): a K step's 64 registers beside
+256 outputs leave one step's loads in flight. llama.cpp's transposed tile (positions as the 16 rows,
+query heads as 8 columns: 64 output registers; P^T into a B fragment by `movmatrix`) frees them. (2)
+The merge (`decode_attn_combine_f32`, 9.7 µs a layer at ~928 on the 7B) costs nearly what the
+attention does, against llama.cpp's 3.0 µs fixup. (3) Gemma 4's global layers (512 dims) stay on the
+per-position kernels. Prior art for all three: llama.cpp `fattn-mma-f16.cuh` (its D = 256 / 512
+configs, `Q_in_reg`; stream-K's fixup only for the runs that share an output tile).
 
 **Done 2026-11-25: decode on the tensor cores** (`decode_attn_mma_f16kv_d{64,128}`,
 `decode_attn::mma_takes`, A/B `SWARMLLM_DECODE_ATTN_MMA=0`; `docs/invariants/inference.md` § "A
@@ -3990,7 +3992,11 @@ decode step over the half cache runs on the tensor cores"). One warp a run of po
 query heads as the rows of `mma.m16n8k16`, FlashAttention-2's score-to-weights register reuse, the
 old partial layout and merge. The 7B's attention 41.7 → 12.5 µs a call at ~928 (llama.cpp 13.7);
 decode from a 4,096-token prompt 48.5-49.2 → 56.7-57.9 tok/s (llama-bench `-d 4096` 60.5), Llama 3.2
-3B at 4,096 68.0-71.7 → 84.0-94.1, level at short caches. The history of the attempts before it:
+3B at 4,096 68.0-71.7 → 84.0-94.1, level at short caches. **At 256 dims the same night**: the
+group's query staged once a block in shared memory (two warps a run, half the dims each, read K twice
+and gained 1-3 %, not landed): Gemma 2 2B's attention 132.7 → 94.2 µs a call at ~4,128, decode from a
+4,096-token prompt 79.1-81.1 → 86.1-87.9 tok/s, Qwen3.5-4B 66.5-68.0 → 69.9-71.4. The history of the
+attempts before it:
 
 **Re-measured 2026-11-25: decode attention was still the gap, on the 7B too, and it grew with the
 cache.** nsys, Qwen2.5-Coder-7B Q4_K_M at ~960 positions, RTX 3070 Laptop, live node stopped
