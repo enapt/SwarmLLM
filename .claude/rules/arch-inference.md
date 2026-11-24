@@ -64,7 +64,7 @@ measured at, and what a change must keep — lives in `docs/invariants/`.
 Judge a change by launch count (`SWARMLLM_COUNT_KERNELS=1`, never on in a benchmark), not the clock; `SWARMLLM_ZERO_QMATMUL_BUFFERS=1` = old behaviour.
 
 - **`CudaDevice::alloc_fully_overwritten`** only for a buffer the next kernel fully assigns.
-- **`QMatMul::forward_shared`** — Q/K/V and gate/up share ONE activation; BOTH `mul_mat_vec_via_q8_1` and `mul_mat_via_q8_1` must; LoRA after it.
+- **`QMatMul::forward_shared`** — Q/K/V, gate/up and a DeltaNet layer's `wqkv` + `wz` share ONE activation; BOTH `mul_mat_vec_via_q8_1` and `mul_mat_via_q8_1` must; LoRA after it.
 - **`layers::value_for_matmul`** — never `.contiguous()` a KV cache view before a matmul (`matmul_reads_rhs_in_place`).
 - ⚠⚠ **ONE CUDA STREAM PER DEVICE** (`SWARMLLM_CUDA_OWN_STREAM`, `=0` legacy); a second needs `SWARMLLM_CUDA_EVENT_TRACKING=1`. The ONE exception: `CudaDevice::clone_htod_beside`'s copy stream (#138 (1d)), touching only its copy RING; never hand it a buffer candle frees (gotcha #836); a split's prompt copies reach it only via `layers::sent_to_card` / `QMatMul::weight_on`; a `to_device` to ANOTHER card is ordered on both streams in the vendored `transfer_to_device` (gotcha #828). ⛔ Moving off legacy SHIPPED BROKEN in v0.3.199 — reproduce under `--features cuda` on a real generation. Guard: `the_vendored_attention_kernels_launch_on_the_devices_stream`.
 - **Fused kernels** (`kernels/*.cu`) are bit-identical to the candle ops they replace (except `decode_attn.cu`, `delta_rule.cu`: judged against llama.cpp); a layer-end residual is `Residual::Pending` → `Residual::add_norm`.

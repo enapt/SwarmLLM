@@ -220,3 +220,10 @@ fills in a 12-level trace 3,527 → 2,447 and launches 26,325 → 25,245 (90 eac
 (what a reply pays — a median hides the growth levels) 0.8B 8.39-8.85 → 7.77-8.17 ms, the slowest third 9.98-11.12
 → 8.24-9.10; 2B 12.71-12.97 → 12.28-12.63, slowest third 14.16-14.58 → 12.78-13.22; captured against ordinary bit for
 bit on the 0.8B, 2B and 9B, and the processor's flowing tests red with the kept rows' slots rotated by one.
+
+**And a DeltaNet layer quantizes its input once for both projections** (2026-11-24): `wqkv` and `wz` read the same
+`x` and each quantized it for itself; both now go through `QMatMul::forward_shared`, in a step and in a flowing
+forward (`forward_deltanet_into`, `forward_flowing`). Quantize launches per traced 0.8B level 145.4 with nothing
+shared (`SWARMLLM_SHARE_PROJECTIONS=0`), 118.7 before, 103.4 after — one fewer a recurrent layer, every Qwen 3.5
+step on a card too; ~2.8 µs each with its gap, under a pace run's noise, so judged by the count. Captured against
+ordinary bit for bit on the 0.8B, 2B and 9B; every `qwen35` card test passes (`~/swarmllm-gate/deep/fr/shared_1124/`).

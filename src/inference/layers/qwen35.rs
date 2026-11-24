@@ -439,8 +439,11 @@ impl DeltaNetWeights {
             self.v_head_dim,
         );
 
-        let mixed = self.wqkv.forward(x)?; // [b, seq, 2·nk·kd + nv·vd]
-        let z = self.wz.forward(x)?; // [b, seq, nv·vd]
+        // One activation, quantized once for both (`QMatMul::forward_shared`).
+        let [mixed, z]: [Tensor; 2] = QMatMul::forward_shared(x, &[&self.wqkv, &self.wz])?
+            .try_into()
+            .map_err(|_| candle_core::Error::Msg("two projections, two outputs".into()))?;
+        // mixed [b, seq, 2·nk·kd + nv·vd], z [b, seq, nv·vd]
         let gates = self.gates(x)?;
         // A tree of guesses (#437): each row's parent among the step's rows —
         // its convolution reads up its own line and its delta rule starts
@@ -640,8 +643,9 @@ impl DeltaNetWeights {
         let flow = held.flow_mut().expect("set by flow_from");
         flow.check_walk(walk, before, &parents)?;
 
-        let mixed = self.wqkv.forward(x)?;
-        let z = self.wz.forward(x)?;
+        let [mixed, z]: [Tensor; 2] = QMatMul::forward_shared(x, &[&self.wqkv, &self.wz])?
+            .try_into()
+            .map_err(|_| candle_core::Error::Msg("two projections, two outputs".into()))?;
         let gates = self.gates(x)?;
         // The walk's row may be one an earlier forward read: the anchor goes
         // there first, so fewer rows are read again.
