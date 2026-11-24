@@ -227,3 +227,14 @@ forward (`forward_deltanet_into`, `forward_flowing`). Quantize launches per trac
 shared (`SWARMLLM_SHARE_PROJECTIONS=0`), 118.7 before, 103.4 after — one fewer a recurrent layer, every Qwen 3.5
 step on a card too; ~2.8 µs each with its gap, under a pace run's noise, so judged by the count. Captured against
 ordinary bit for bit on the 0.8B, 2B and 9B; every `qwen35` card test passes (`~/swarmllm-gate/deep/fr/shared_1124/`).
+
+**Measured and dropped: a stream-k grid of every resident block** (2026-11-24). A captured 0.8B level is 5.3-5.4 ms
+of kernels: the trunk's 138 products 2.27 ms (16.5 µs each, ~250 GB/s against the head's ~330), the head 0.81, the
+delta rule 0.61 (18 × 33.9 µs), the stream-k fixups 0.35 (138 × 2.5 µs; in a graph there is no gap around them).
+llama.cpp launches stream-k as one block per SM (its rule, unchanged since PR #22298: tile when tiling loses ≤ 10%,
+else `nsm` blocks and a fixup), and two of the 8-row kernel's blocks fit an SM here (118 registers, ~40 KB shared),
+so the grid was made SMs × resident blocks, as CUTLASS's stream-k swizzle sizes it. Per product: 16.45 → 16.52 µs
+(no gain), the fixup 2.53 → 3.60 µs (twice the slots); mean level 0.8B 7.97 → 8.11 ms, 2B 12.23 → 12.27 (three runs an
+arm, alternating; `~/swarmllm-gate/deep/fr/persm_1124/`). Reverted: a second resident block does not read the weight
+faster. Still open on the same products: the fixup's 0.35 ms folded into the product (the last block to finish a
+tile sums its parts in the fixup's order — the same bits, no block waits on another).
