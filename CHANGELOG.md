@@ -1,5 +1,53 @@
 # Changelog
 
+## [0.3.309-alpha] — 2026-11-24
+
+**A Qwen 3.5 split's own layers run a little faster.** The computer holding a split's first layers runs them on
+every row its guessing model grew in one call: two levels of 8 rows, so 16. Steps of up to 8 rows already went to
+the card as one recorded graph; these 16-row steps went one card launch at a time, and now they go as a graph too.
+On the Thailand-Australia Qwen3.5 9B split this computer's part of each step took about 1.1 ms less (18.5-19.0
+against 19.6-20.6 ms for prose); reply speeds stayed within the runs' spread, since the guessing model's time
+varies more than that. On the card, a recorded 16-row step's output matches the same step run one launch at a time
+exactly (Qwen3.5 9B and 0.8B). A model with experts (Qwen3.6 35B-A3B) keeps 8-row graphs: its expert kernel was
+never checked inside a recorded graph at 16 rows. `SWARMLLM_TREE_GRAPH_WIDE=0` turns it off.
+
+**A Qwen 3.5 guessing model's steps take less time on the computer.** Each step of the guessing model moves its
+starting point along the rows the other computer accepted, in each of its 18 recurrent layers. It copied those rows
+out of where they were kept, one copy a kind of row per layer, even when they were one row sitting in place. Now a
+run of rows next to each other is read where it is. On this laptop's card a step of Qwen3.5-0.8B took 7.7 ms against
+8.4 (recorded as a graph) and 10.9 against 13.1 (one launch at a time), of the 2B 12.1 against 13.0; every output
+is the same bit for bit. `SWARMLLM_FLOW_PATH=gathered` turns it off.
+
+**The larger Qwen 3.5 guessing model is measured on the split, and kept.** On the Thailand-Australia Qwen3.5 9B
+split, a computer holding the Qwen3.5-2B guessing model already chooses it over the 0.8B. Measured: prose about a
+sixth to a fifth faster (15.9-18.3 against 13.4-14.9 tok/s), code 23-31 tok/s, its prose misses about halved.
+
+**A model put on the processor while the card was busy moves back to the card, as much of it as fits.** A computer
+that placed its part of a model entirely on its processor, because its card was full at that moment, kept it there
+for as long as it ran unless the card could later take the whole part. Now it also moves once the card would take at
+least half its layers, split between the card and the processor. On this laptop, Mistral 7B moved from the processor
+to 20 of its 32 layers on the card when the room appeared: the same 48-token reply in 2.7 s against 6.8 s, after one
+reload. The published release kept it on the processor. If a move lands on the processor anyway, it is not tried
+again for that worker. The case that prompted it: a 27B split ran at 2-4 tokens a second because one computer held
+47 layers on its processor beside 10 GB of free card memory.
+
+**You can see why another computer runs a model on its processor.** The dashboard's peer list
+(`/api/admin/peers`, `resident[].on_processor_because`) shows the reason that computer recorded: its owner's
+setting, missing graphics drivers, a card the build cannot use, a weight format only its processor reads, or a card
+that was full when it placed the model. Older computers simply do not say.
+
+**New, off by default: `SWARMLLM_FLOW_DEPTH=<p>`.** A guessing call grows a later level of its tree only while the
+level it just proposed is at least `p` likely to be reached. On the link above, where this computer is the slower
+side, it read inside the spread for prose and under the fixed two levels for code, so it stays off. It is kept for
+a link whose far end is the slower side.
+
+**For diagnosing:** a card probe (test builds, `SWARMLLM_PACE_RELAUNCH=<n>`) launches a recorded guessing step's
+graph again unchanged: an 8-row step of Qwen3.5-0.8B 5.0 ms against ~8.8 ms recorded, of the 2B 9.4-10.0 against
+13.9-14.9, every relaunched step's output keeping the recorded bits. That is the graph alone. Replaying whole steps,
+measured outside this release, bought only 2-4%: a step first prepares its inputs, and the card already works while
+the next part is recorded. Timing those parts found the copies the fix above removes (`docs/plans/level_replay.md`).
+A card build's clippy passes again (no behaviour change).
+
 ## [0.3.308-alpha] — 2026-11-23
 
 **A Qwen 3.5 split's first reply after a computer starts guesses ahead again.** A computer restarts at every update,
