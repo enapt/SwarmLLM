@@ -268,3 +268,9 @@ and the activation's stage is copied once a block. 4-24 rows of a Q4_K weight of
 replies of two Q4_K_M models score against llama.cpp as before (`docs/invariants/inference.md` § "4-24 rows of a large
 Q4_K weight"). Next on the same products: Q5_K (the 9B's `attn_qkv` and `ssm_out`, 48 a forward still on MMQ), then
 Q6_K.
+
+**Q5_K on the same kernel** (2026-11-24): the fifth bit OR'd in from the block's `qh`; the 9B's captured level 27.96-28.31
+→ 27.06-27.48 ms at 16 rows and 22.85-23.25 → 22.18-22.36 at 8 (`SWARMLLM_QMATMUL_ROWS_TC_K=q4k` against both,
+interleaved, cooled). What MMQ still runs in a level: the Q6_K `ffn_down` of 16 layers and `attn_v`, the 1,024-row keys
+and values (each with an 8.5 µs stream-k fixup), and the head — Q6_K next (`docs/invariants/inference.md` § "Q5_K on
+the same kernel").

@@ -9104,11 +9104,11 @@ mod card_quantized_products {
     /// weights here take the vector kernel, a 16,384-row one of every type
     /// takes it below its type's line and MMQ from it (inside a CUDA graph
     /// capture too: `a_few_rows_product_takes_mmq_inside_a_capture`) — except
-    /// 2-8 rows of a Q8_0 weight and 4-24 of a Q4_K one of 4,096+ rows whose
-    /// columns are a multiple of 256, which go to the tensor-core row kernels
-    /// ahead of both (`rows_tc_takes`, pinned in
+    /// 2-8 rows of a Q8_0 weight and 4-24 of a Q4_K or Q5_K one of 4,096+ rows
+    /// whose columns are a multiple of 256, which go to the tensor-core row
+    /// kernels ahead of both (`rows_tc_takes`, pinned in
     /// `a_few_rows_q8_0_product_on_the_tensor_cores_is_each_rows_own` and
-    /// `a_few_rows_q4_k_product_on_the_tensor_cores_is_each_rows_own`).
+    /// `a_few_rows_k_quant_product_on_the_tensor_cores_is_each_rows_own`).
     #[test]
     fn many_rows_on_the_card_match_the_f32_product_of_the_same_weight() {
         let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
@@ -9341,8 +9341,8 @@ mod card_quantized_products {
     /// row's for the other's) is off by far more than the bound. Fails on the
     /// kernels before it: MMQ answers 7-8 rows and the vector kernel 2, in
     /// different orders. The rule's other side is pinned too: one row, nine,
-    /// a width not a multiple of 256, a Q6_K weight and a Q4_K one outside its
-    /// own line keep the kernels before it.
+    /// a width not a multiple of 256, a Q6_K weight and a Q4_K or Q5_K one
+    /// outside their own line keep the kernels before it.
     #[test]
     fn a_few_rows_q8_0_product_on_the_tensor_cores_is_each_rows_own() {
         use candle_core::cuda_backend::cudarc::driver::{result, sys};
@@ -9372,6 +9372,9 @@ mod card_quantized_products {
             (GgmlDType::Q4K, 3, 4096, 512),
             (GgmlDType::Q4K, 25, 4096, 512),
             (GgmlDType::Q4K, 8, 4096, 640),
+            (GgmlDType::Q5K, 8, 4095, 512),
+            (GgmlDType::Q5K, 3, 4096, 512),
+            (GgmlDType::Q5K, 25, 4096, 512),
             (GgmlDType::Q6K, 4, 4096, 1024),
         ] {
             assert!(
@@ -9499,21 +9502,26 @@ mod card_quantized_products {
             );
         }
     }
-    /// 4-24 rows of a Q4_K weight of 4,096+ rows on the tensor-core row kernel
-    /// (vendored candle `mul_mat_via_rows_tc`, `mul_mat_q4_k_rows_tc_{8,16,24}`):
+    /// 4-24 rows of a Q4_K or Q5_K weight of 4,096+ rows on the tensor-core row
+    /// kernel (vendored candle `mul_mat_via_rows_tc`,
+    /// `mul_mat_q{4,5}_k_rows_tc_{8,16,24}`):
     /// each row's outputs are that row's alone, bit for bit — the same whichever
     /// of the three widths carries it (4-8 rows ride the 8-row kernel, 9-16 the
     /// 16, 17-24 the 24) — a captured product is the uncaptured one's bits, a
     /// group sharing one activation (`QMatMul::forward_shared`) across the row
-    /// kernel and MMQ (a 1,024-row key) gives each its own product's bits, and
+    /// kernel of BOTH types and MMQ (a 1,024-row key) gives each its own
+    /// product's bits — a Qwen 3.5's Q4_K gate and Q5_K QKV read one input — and
     /// every answer is the f64 product of the same quantized weight to the 8-bit
     /// activation. Shapes: 4,096 × 512 (two superblocks a row) and 4,136 × 1,024,
     /// whose last block of 64 rows holds 40. Each weight row and each activation
     /// row is scaled by its own power of three, so a scale, minimum or sum paired
     /// with the wrong row is off by far more than the bound. Fails on the kernels
-    /// before it: MMQ answers every width here, in another order.
+    /// before it: MMQ answers every width here, in another order. The captured
+    /// 24-row Q5_K product is also the check that raising its kernel's
+    /// shared-memory limit (54,528 bytes, past the 48 KB any launch may ask
+    /// for) does not invalidate a capture.
     #[test]
-    fn a_few_rows_q4_k_product_on_the_tensor_cores_is_each_rows_own() {
+    fn a_few_rows_k_quant_product_on_the_tensor_cores_is_each_rows_own() {
         use candle_core::cuda_backend::cudarc::driver::{result, sys};
         use candle_core::quantized::cuda::{rows_tc_products, rows_tc_takes};
         let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
@@ -9525,8 +9533,9 @@ mod card_quantized_products {
             unreachable!("new_cuda made a card device")
         };
         assert!(
-            rows_tc_takes(GgmlDType::Q4K, 24, 4096, 512)
-                && rows_tc_takes(GgmlDType::Q4K, 4, 4096, 512),
+            [GgmlDType::Q4K, GgmlDType::Q5K]
+                .iter()
+                .all(|&t| rows_tc_takes(t, 24, 4096, 512) && rows_tc_takes(t, 4, 4096, 512)),
             "SWARMLLM_QMATMUL_ROWS_TC(_K) is set: nothing below means anything"
         );
         // Row r of a matrix times 3^(r % 5): neighbours' scales differ by 3x.
@@ -9537,29 +9546,37 @@ mod card_quantized_products {
             }
             v
         };
-        let quantized = |seed: &mut u64, n: usize, k: usize, scale: bool| {
+        let quantized = |seed: &mut u64, dtype: GgmlDType, n: usize, k: usize, scale: bool| {
             let v = values(seed, n * k);
             let v = if scale { scaled(v, k) } else { v };
-            QTensor::quantize(&Tensor::from_vec(v, (n, k), &card).unwrap(), GgmlDType::Q4K).unwrap()
+            QTensor::quantize(&Tensor::from_vec(v, (n, k), &card).unwrap(), dtype).unwrap()
         };
         let mut seed: u64 = 0x2f8a_61c3_9d04_b7e5;
-        for (n, k) in [(4096usize, 512usize), (4136, 1024)] {
-            let q = quantized(&mut seed, n, k, true);
+        let cases = [GgmlDType::Q4K, GgmlDType::Q5K]
+            .into_iter()
+            .flat_map(|t| [(t, 4096usize, 512usize), (t, 4136, 1024)]);
+        for (dtype, n, k) in cases {
+            let other = if dtype == GgmlDType::Q4K {
+                GgmlDType::Q5K
+            } else {
+                GgmlDType::Q4K
+            };
+            let q = quantized(&mut seed, dtype, n, k, true);
             let wq = q
                 .dequantize(&Device::Cpu)
                 .unwrap()
                 .to_vec2::<f32>()
                 .unwrap();
             let mm = QMatMul::from_qtensor(q).unwrap();
-            let twin = QMatMul::from_qtensor(quantized(&mut seed, n, k, false)).unwrap();
-            let key = QMatMul::from_qtensor(quantized(&mut seed, 1024, k, false)).unwrap();
+            let twin = QMatMul::from_qtensor(quantized(&mut seed, other, n, k, false)).unwrap();
+            let key = QMatMul::from_qtensor(quantized(&mut seed, dtype, 1024, k, false)).unwrap();
             let a = scaled(values(&mut seed, 24 * k), k);
             let x24 = Tensor::from_vec(a.clone(), (24, k), &card).unwrap();
             let before = rows_tc_products();
             let all = mm.forward(&x24).unwrap().to_vec2::<f32>().unwrap();
             assert!(
                 rows_tc_products() > before,
-                "{n} x {k}: 24 rows did not take the row kernel"
+                "{dtype:?} {n} x {k}: 24 rows did not take the row kernel"
             );
             // Each output against the size of ITS terms; every third weight
             // row, and the last block's.
@@ -9581,7 +9598,7 @@ mod card_quantized_products {
             }
             assert!(
                 worst < 0.05,
-                "{n} x {k}: off by {worst:.4} of an output's own terms"
+                "{dtype:?} {n} x {k}: off by {worst:.4} of an output's own terms"
             );
             // Each width's rows are the 24-row product's rows, bit for bit.
             for rows in 4..24 {
@@ -9590,33 +9607,33 @@ mod card_quantized_products {
                 let got = mm.forward(&x).unwrap().to_vec2::<f32>().unwrap();
                 assert!(
                     rows_tc_products() > before,
-                    "{n} x {k}: {rows} rows took another kernel"
+                    "{dtype:?} {n} x {k}: {rows} rows took another kernel"
                 );
                 assert_eq!(
                     got[..],
                     all[..rows],
-                    "{n} x {k}: {rows} rows are not the 24-row product's first {rows}"
+                    "{dtype:?} {n} x {k}: {rows} rows are not the 24-row product's first {rows}"
                 );
             }
-            // One group across both kernels: the row kernel, MMQ, the row kernel
-            // again (reading the activation the first one quantized).
+            // One group across both kernels: the row kernel, MMQ, the other
+            // type's row kernel (reading the activation the first one quantized).
             let group = QMatMul::forward_shared(&x24, &[&mm, &key, &twin]).unwrap();
             let key_alone = key.forward(&x24).unwrap().to_vec2::<f32>().unwrap();
             let twin_alone = twin.forward(&x24).unwrap().to_vec2::<f32>().unwrap();
             assert_eq!(
                 group[0].to_vec2::<f32>().unwrap(),
                 all,
-                "{n} x {k}: shared, row kernel"
+                "{dtype:?} {n} x {k}: shared, row kernel"
             );
             assert_eq!(
                 group[1].to_vec2::<f32>().unwrap(),
                 key_alone,
-                "{n} x {k}: shared, MMQ"
+                "{dtype:?} {n} x {k}: shared, MMQ"
             );
             assert_eq!(
                 group[2].to_vec2::<f32>().unwrap(),
                 twin_alone,
-                "{n} x {k}: shared, twin"
+                "{dtype:?} {n} x {k}: shared, twin"
             );
             // Captured: the uncaptured product's bits.
             let stream = dev.cuda_stream();
@@ -9636,7 +9653,10 @@ mod card_quantized_products {
             // SAFETY: the stream this thread began capturing.
             let graph = unsafe { result::stream::end_capture(stream.cu_stream()) }.unwrap();
             let out = out.unwrap();
-            assert!(!graph.is_null(), "{n} x {k}: the capture was invalidated");
+            assert!(
+                !graph.is_null(),
+                "{dtype:?} {n} x {k}: the capture was invalidated"
+            );
             let mut exec: sys::CUgraphExec = std::ptr::null_mut();
             // SAFETY: a complete captured graph, flags 0, launched on the
             // stream it was captured from; both destroyed after the read back.
@@ -9654,11 +9674,11 @@ mod card_quantized_products {
             }
             assert!(
                 in_capture > 0,
-                "{n} x {k}: the captured product took another kernel"
+                "{dtype:?} {n} x {k}: the captured product took another kernel"
             );
             assert_eq!(
                 got, all,
-                "{n} x {k}: the graph's answer is not the uncaptured product's"
+                "{dtype:?} {n} x {k}: the graph's answer is not the uncaptured product's"
             );
         }
     }

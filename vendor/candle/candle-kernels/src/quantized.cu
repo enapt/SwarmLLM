@@ -4839,22 +4839,24 @@ extern "C" __global__ void __launch_bounds__(32 * 3) mul_mat_q8_0_rows_tc(
 #endif
 }
 
-// SwarmLLM patch: a product of 4-24 activation rows against a Q4_K weight of 4,096+ rows on the
-// int8 tensor cores (`quantized/cuda.rs` `mul_mat_via_rows_tc`; A/B SWARMLLM_QMATMUL_ROWS_TC_K=0).
+// SwarmLLM patch: a product of 4-24 activation rows against a Q4_K or Q5_K weight of 4,096+ rows
+// on the int8 tensor cores (`quantized/cuda.rs` `mul_mat_via_rows_tc`; A/B
+// SWARMLLM_QMATMUL_ROWS_TC_K=0).
 //
 // llama.cpp's MMQ reads such a weight at 1.35-2.4x the time of streaming its bytes once at 8-24
 // rows (RTX 3070 Laptop, 2026-11-24): it unpacks every tile's nibbles and scales into shared
-// memory before its mma. Here the raw 144-byte blocks reach shared memory by 16-byte cp.async and
-// a nibble mask in registers makes each 32-value sub-block ONE mma.m16n8k32 operand; a block's 4
-// warps own 16 weight rows each at the SAME k, so the activation's stage is copied once a block
-// for all four (each warp re-reading it from L2 was the whole gap of an earlier version: with no
-// activation reads it streamed at 1.05-1.2x). Each output is ONE thread's sum over the
-// superblocks and sub-blocks in order, fused in a fixed order, so it is the same bits every
-// launch, captured or not, whatever other rows ride with it. No split of k, so no fixup launch.
+// memory before its mma. Here the raw blocks (144 bytes, Q5_K 176) reach shared memory by 16-byte
+// cp.async and a nibble mask in registers makes each 32-value sub-block ONE mma.m16n8k32 operand
+// (Q5_K's fifth bit OR'd in from qh, as llama.cpp's load_tiles_q5_K does); a block's 4 warps own
+// 16 weight rows each at the SAME k, so the activation's stage is copied once a block for all four
+// (each warp re-reading it from L2 was the whole gap of an earlier version: with no activation
+// reads it streamed at 1.05-1.2x). Each output is ONE thread's sum over the superblocks and
+// sub-blocks in order, fused in a fixed order, so it is the same bits every launch, captured or
+// not, whatever other rows ride with it. No split of k, so no fixup launch.
 //
-// Prior art: llama.cpp's MMQ (load_tiles_q4_K + vec_dot_q4_K_q8_1_mma) and its q8_1 "DS4"
+// Prior art: llama.cpp's MMQ (load_tiles_q4_K / _q5_K + vec_dot_q4_K_q8_1_mma) and its q8_1 "DS4"
 // activation, which this copies: d = amax/127 by its reciprocal, q = round(x * 127/amax), and
-// beside d the sum of the row's 32 floats (half2), which carries the Q4_K minimum.
+// beside d the sum of the row's 32 floats (half2), which carries the k-quant minimum.
 //   qs int8  [KB][2][NR][16] (half h: a block's bytes 16h..16h+15, row by row), then
 //   ds half2 [KB][NR]
 // NR = 8, 16 or 24 (rows past the real ones zero). Needs K % 256 == 0 and sm_80.
@@ -4879,15 +4881,18 @@ extern "C" __global__ void quantize_q8_1_rows_k(
     }
 }
 
-// Grid (ceil(nrows_x / 64)), block (32, 4), dynamic shared 3 * (9,216 + 288 * NR) bytes (48,384
-// at NR = 24: under the 48 KB a launch may ask for). dst [nrows_act][nrows_x]: every element
-// assigned once.
-template <int NT>
-static __device__ __forceinline__ void swarm_q4_k_rows_tc(
+// Grid (ceil(nrows_x / 64)), block (32, 4), dynamic shared 3 * (64 * BQ + 288 * NR) bytes: Q4_K
+// 48,384 at NR = 24 (under the 48 KB a launch may ask for), Q5_K 54,528 (the launcher raises the
+// kernel's limit first). dst [nrows_act][nrows_x]: every element assigned once.
+// Q5 = false: block_q4_K (d, dmin, 12 scale bytes, qs[128]); true: block_q5_K (the same, then
+// qh[32] before qs: value l of sub-block j is its nibble plus bit j of qh[l] as 16).
+template <int NT, bool Q5>
+static __device__ __forceinline__ void swarm_k_rows_tc(
     const uint8_t *__restrict__ vx, const int8_t *__restrict__ act, float *__restrict__ dst,
     const int ncols_x, const int nrows_x, const int nrows_act) {
 #if __CUDA_ARCH__ >= 800
-    constexpr int NR = 8 * NT, STAGES = SWARM_ROWS_K_STAGES, W = SWARM_ROWS_K_WARPS, BQ = 144;
+    constexpr int NR = 8 * NT, STAGES = SWARM_ROWS_K_STAGES, W = SWARM_ROWS_K_WARPS;
+    constexpr int BQ = Q5 ? 176 : 144, PIECES = BQ / 16, QS = Q5 ? 48 : 16;
     constexpr int WB = W * 16 * BQ, AQB = 256 * NR, ASB = 32 * NR, STB = WB + AQB + ASB;
     extern __shared__ __align__(16) uint8_t swarm_rows_k_smem[];
     const int warp = threadIdx.y, lane = threadIdx.x, tid = warp * 32 + lane;
@@ -4899,8 +4904,8 @@ static __device__ __forceinline__ void swarm_q4_k_rows_tc(
 
     auto issue = [&](int s) {
         uint8_t *st = swarm_rows_k_smem + (s % STAGES) * STB;
-        for (int c = tid; c < 9 * 16 * W; c += 32 * W) {
-            const int row = c / 9, piece = c % 9;
+        for (int c = tid; c < PIECES * 16 * W; c += 32 * W) {
+            const int row = c / PIECES, piece = c % PIECES;
             const bool ok = n0 + row < nrows_x;
             swarm_cp_async16(st + row * BQ + piece * 16,
                              vx + (size_t)(ok ? n0 + row : n0) * row_bytes + (size_t)s * BQ + piece * 16, ok);
@@ -4937,18 +4942,29 @@ static __device__ __forceinline__ void swarm_q4_k_rows_tc(
         const uint32_t sc_lo8 = hg8.y & 0x3f3f3f3fu, m_lo8 = hg8.z & 0x3f3f3f3fu;
         const uint32_t sc_hi8 = (hg8.w & 0x0f0f0f0fu) | ((hg8.y >> 2) & 0x30303030u);
         const uint32_t m_hi8 = ((hg8.w >> 4) & 0x0f0f0f0fu) | ((hg8.z >> 2) & 0x30303030u);
+        // Q5_K: qh[l] for this thread's l = 4t..4t + 3 and 16 + 4t..16 + 4t + 3 (unused for Q4_K).
+        const uint32_t q0 = Q5 ? *(const uint32_t *)(rg + 16 + 4 * t) : 0u;
+        const uint32_t q2 = Q5 ? *(const uint32_t *)(rg + 32 + 4 * t) : 0u;
+        const uint32_t q1 = Q5 ? *(const uint32_t *)(rg8 + 16 + 4 * t) : 0u;
+        const uint32_t q3 = Q5 ? *(const uint32_t *)(rg8 + 32 + 4 * t) : 0u;
 #pragma unroll
         for (int p = 0; p < 4; p++) {
             // Sub-blocks 2p (low nibbles) and 2p + 1 (high) share the 32 bytes qs[32p..32p + 31].
-            const uint32_t w0 = *(const uint32_t *)(rg + 16 + 32 * p + 4 * t);
-            const uint32_t w2 = *(const uint32_t *)(rg + 32 + 32 * p + 4 * t);
-            const uint32_t w1 = *(const uint32_t *)(rg8 + 16 + 32 * p + 4 * t);
-            const uint32_t w3 = *(const uint32_t *)(rg8 + 32 + 32 * p + 4 * t);
+            const uint32_t w0 = *(const uint32_t *)(rg + QS + 32 * p + 4 * t);
+            const uint32_t w2 = *(const uint32_t *)(rg + QS + 16 + 32 * p + 4 * t);
+            const uint32_t w1 = *(const uint32_t *)(rg8 + QS + 32 * p + 4 * t);
+            const uint32_t w3 = *(const uint32_t *)(rg8 + QS + 16 + 32 * p + 4 * t);
 #pragma unroll
             for (int hi = 0; hi < 2; hi++) {
                 const int j = 2 * p + hi, sh = 4 * hi, by = 8 * (j & 3);
-                const uint32_t a0 = (w0 >> sh) & 0x0F0F0F0Fu, a2 = (w2 >> sh) & 0x0F0F0F0Fu;
-                const uint32_t a1 = (w1 >> sh) & 0x0F0F0F0Fu, a3 = (w3 >> sh) & 0x0F0F0F0Fu;
+                uint32_t a0 = (w0 >> sh) & 0x0F0F0F0Fu, a2 = (w2 >> sh) & 0x0F0F0F0Fu;
+                uint32_t a1 = (w1 >> sh) & 0x0F0F0F0Fu, a3 = (w3 >> sh) & 0x0F0F0F0Fu;
+                if (Q5) {
+                    a0 |= ((q0 >> j) << 4) & 0x10101010u;
+                    a2 |= ((q2 >> j) << 4) & 0x10101010u;
+                    a1 |= ((q1 >> j) << 4) & 0x10101010u;
+                    a3 |= ((q3 >> j) << 4) & 0x10101010u;
+                }
                 const float fs = __fmul_rn(dm.x, (float)(((j < 4 ? sc_lo : sc_hi) >> by) & 0xff));
                 const float fm = __fmul_rn(dm.y, (float)(((j < 4 ? m_lo : m_hi) >> by) & 0xff));
                 const float fs8 = __fmul_rn(dm8.x, (float)(((j < 4 ? sc_lo8 : sc_hi8) >> by) & 0xff));
@@ -4999,15 +5015,30 @@ static __device__ __forceinline__ void swarm_q4_k_rows_tc(
 extern "C" __global__ void __launch_bounds__(32 * SWARM_ROWS_K_WARPS) mul_mat_q4_k_rows_tc_8(
     const uint8_t *__restrict__ vx, const int8_t *__restrict__ act, float *__restrict__ dst,
     const int ncols_x, const int nrows_x, const int nrows_act) {
-    swarm_q4_k_rows_tc<1>(vx, act, dst, ncols_x, nrows_x, nrows_act);
+    swarm_k_rows_tc<1, false>(vx, act, dst, ncols_x, nrows_x, nrows_act);
 }
 extern "C" __global__ void __launch_bounds__(32 * SWARM_ROWS_K_WARPS) mul_mat_q4_k_rows_tc_16(
     const uint8_t *__restrict__ vx, const int8_t *__restrict__ act, float *__restrict__ dst,
     const int ncols_x, const int nrows_x, const int nrows_act) {
-    swarm_q4_k_rows_tc<2>(vx, act, dst, ncols_x, nrows_x, nrows_act);
+    swarm_k_rows_tc<2, false>(vx, act, dst, ncols_x, nrows_x, nrows_act);
 }
 extern "C" __global__ void __launch_bounds__(32 * SWARM_ROWS_K_WARPS) mul_mat_q4_k_rows_tc_24(
     const uint8_t *__restrict__ vx, const int8_t *__restrict__ act, float *__restrict__ dst,
     const int ncols_x, const int nrows_x, const int nrows_act) {
-    swarm_q4_k_rows_tc<3>(vx, act, dst, ncols_x, nrows_x, nrows_act);
+    swarm_k_rows_tc<3, false>(vx, act, dst, ncols_x, nrows_x, nrows_act);
+}
+extern "C" __global__ void __launch_bounds__(32 * SWARM_ROWS_K_WARPS) mul_mat_q5_k_rows_tc_8(
+    const uint8_t *__restrict__ vx, const int8_t *__restrict__ act, float *__restrict__ dst,
+    const int ncols_x, const int nrows_x, const int nrows_act) {
+    swarm_k_rows_tc<1, true>(vx, act, dst, ncols_x, nrows_x, nrows_act);
+}
+extern "C" __global__ void __launch_bounds__(32 * SWARM_ROWS_K_WARPS) mul_mat_q5_k_rows_tc_16(
+    const uint8_t *__restrict__ vx, const int8_t *__restrict__ act, float *__restrict__ dst,
+    const int ncols_x, const int nrows_x, const int nrows_act) {
+    swarm_k_rows_tc<2, true>(vx, act, dst, ncols_x, nrows_x, nrows_act);
+}
+extern "C" __global__ void __launch_bounds__(32 * SWARM_ROWS_K_WARPS) mul_mat_q5_k_rows_tc_24(
+    const uint8_t *__restrict__ vx, const int8_t *__restrict__ act, float *__restrict__ dst,
+    const int ncols_x, const int nrows_x, const int nrows_act) {
+    swarm_k_rows_tc<3, true>(vx, act, dst, ncols_x, nrows_x, nrows_act);
 }

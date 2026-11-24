@@ -4744,7 +4744,8 @@ products a layer of the 28, and the head).
 - A/B `SWARMLLM_QMATMUL_ROWS_TC=0`; `rows_tc_products()` proves it fired. Test
   `card_quantized_products::a_few_rows_q8_0_product_on_the_tensor_cores_is_each_rows_own`.
 - Not covered: K % 256 != 0 (a Qwen2.5-0.5B drafter's 896 stays on MMQ / the vector kernel); the
-  Q4_K weights have a kernel of their own (§ "4-24 rows of a large Q4_K weight"), Q5_K and Q6_K none yet.
+  Q4_K and Q5_K weights have a kernel of their own (§ "4-24 rows of a large Q4_K weight", § "Q5_K on the same
+  kernel"), Q6_K none yet.
 
 ### 4-24 rows of a large Q4_K weight: four warps share one staged activation (2026-11-24)
 
@@ -4801,11 +4802,60 @@ speculative checks.
 - `rows_tc_takes(dtype, rows, n, k)` reads the weight's rows: below 4,096 the kernel loses.
 - The shared group holds one activation per layout (`SHARED_Q8` is a list): a Q4_K query on this kernel and its key
   and value on MMQ read two, and before it one slot made the second layout quantize again for every weight after.
-- A/B `SWARMLLM_QMATMUL_ROWS_TC_K=0` (this kernel only); test
-  `card_quantized_products::a_few_rows_q4_k_product_on_the_tensor_cores_is_each_rows_own` (each width's rows the
-  24-row product's bit for bit, a group across both kernels, a capture, f64).
-- Not covered: Q5_K (the same scales plus a high bit from `qh`; next — the 9B's 48 products a forward), Q6_K (210-byte
-  blocks: a stage of one superblock is not 16-byte aligned), 25+ rows, and the 1,024-row weights.
+- A/B `SWARMLLM_QMATMUL_ROWS_TC_K=0` (the k-quant kernels), `=q4k` (this one alone); test
+  `card_quantized_products::a_few_rows_k_quant_product_on_the_tensor_cores_is_each_rows_own` (each width's rows the
+  24-row product's bit for bit, a group across both types and MMQ, a capture, f64).
+- Not covered: Q6_K (210-byte blocks: a stage of one superblock is not 16-byte aligned), 25+ rows, and the 1,024-row
+  weights.
+
+### Q5_K on the same kernel (2026-11-24)
+
+**Why it matters.** A Q4_K_M file stores a FUSED QKV as Q5_K (llama.cpp's quantizer rule for `attn_qkv`): a Qwen 3.5's
+`attn_qkv` 8,192 × 4,096 and `ssm_out` 4,096 × 4,096 (48 products a 9B forward), a Phi-3.5's 9,216 × 3,072, a
+Phi-4-mini's 5,120 × 3,072 — and every weight of a Q5_K_M file. A tensor census of the test set
+(`gguf_header.bin`, 2026-11-24): Q5_K in the Qwen 3.5 and the two Phis only; Q6_K `ffn_down` (half the layers) and
+`attn_v` in EVERY Q4_K_M file.
+
+**Prior art.** llama.cpp's `load_tiles_q5_K` (`mmq-load-tiles.cuh`): the 176-byte block is Q4_K's (d, dmin, 12 bytes
+of 6-bit scales and minimums) then `qh[32]` then `qs[128]`, and value l of sub-block j is its nibble with bit j of
+`qh[l]` as 16 — `((qh >> j) << 4) & 0x10101010` a word at a time, which this copies into the register that feeds the
+mma. FlashAttention (`flash_fwd_launch_template.h`) raises a kernel's dynamic shared-memory limit right before each
+launch past 48 KB, inside the graphs vLLM and PyTorch capture.
+
+**The kernel.** `swarm_k_rows_tc<NT, Q5>`: the Q4_K kernel with 11 copies of 16 bytes a row instead of 9, the qs read
+32 bytes later, and the `qh` words OR'd in; the min term, the fused order and the activation (one layout for both
+types, so a Q4_K gate and a Q5_K QKV reading one input share one quantize) unchanged. At 24 rows its three stages
+are 54,528 bytes, past the 48 KB any launch may ask for: the launcher raises the kernel's limit before each such
+launch (`CudaFunction::set_attribute`). MMQ's few-rows rule keeps every raise off the capturing thread by caution
+(gotcha #841 was a POOL query that invalidated a capture); a function attribute is not a stream operation, and the
+card test's captured 24-row Q5_K product — the raise inside a THREAD_LOCAL capture, as `cuda_graph` captures — gives
+a valid graph and the uncaptured product's bits. Two stages fit under 48 KB but were 3-24% slower at 24 rows.
+
+**Bench** (`~/swarmllm-gate/deep/fr/rowstc_1124/rowstc_q5k.cu`, `q5k.log`; MMQ type 13 → this kernel, four warps and
+three stages as shipped, the floor in brackets, µs, one pass over K): 9B `attn_qkv` at 8 rows 91.3 → 68.4, 16 rows
+98.7 → 74.5, 24 rows 103.9 → 102.1 (63.7); `ssm_out` at 16 rows 54.9 → 37.5 (32.5); Phi-3.5 QKV at 24 rows 105.2 →
+84.5 (53.8); a Q5_K_M 14B's feed-forward down 5,120 × 13,824 at 24 rows 241.1 → 156.4 (132.5), a 27B's up at 16 rows
+241.8 → 184.7 (166.7). 0.65-0.98x of MMQ's time on every 4,096+-row weight at 8, 16 and 24 rows; a 1,024-row key
+15.7-21.3 against 17.8-20.8, so the same 4,096-row line.
+
+**In a captured flowing level** (the whole Qwen3.5-9B, `SWARMLLM_QMATMUL_ROWS_TC_K=q4k` — main before it — and `1`
+interleaved ×10 in ONE binary, each arm started with the card under 65 C, two passes' medians an arm;
+`~/swarmllm-gate/deep/fr/rowstc_q5k_1124/`): 16 rows 27.96-28.31 → 27.06-27.48 ms (one pass 28.41), 8 rows
+22.85-23.25 → 22.18-22.36. The trace at 16 rows: `mul_mat_q5_k_rows_tc_16` 1,248 × 77.2 µs on `attn_qkv` and 1,248 ×
+43.7 on `ssm_out` inside the graphs; MMQ down from 6,656 products to 4,160 (the Q6_K weights and the 1,024-row keys
+and values, 40.0 µs on average, each with an 8.5 µs stream-k fixup). 24 layers × ~33 µs a level is the 0.7-0.8 ms
+measured. Captured = ordinary: worst logit difference 0.
+
+**In replies** (card daemon, live node stopped, greedy, 200 tokens, the switch q4k 1 q4k 1,
+`examples/score_against_reference.py`): Phi-3.5-mini and Phi-4-mini Q4_K_M wrote the same three replies in all four
+runs each; Phi-4-mini's are llama.cpp's first choice at every token but one near-tie (gap 0.075, the same on both
+arms); Phi-3.5's first token ranks 4-16 on EVERY arm (the scorer's, not the kernel's) and later tokens differ only at
+gaps ≤ 2.7, identically on both arms. In a real Phi-3.5 reply (`SWARMLLM_COUNT_KERNELS=1`) `mul_mat_q5_k_rows_tc_24`
+and `_8` each ran once a layer (the prompt, then the speculative checks).
+
+**What a change must keep** — the Q4_K kernel's list, and: the raise of the limit stays before the launch that needs
+it (a module loaded on a new card starts at 48 KB); A/B `SWARMLLM_QMATMUL_ROWS_TC_K=q5k` (this type alone) /
+`=q4k` (the other alone).
 
 ### Tried and reverted: smaller MMQ tiles for 9-40 rows (2026-10-22)
 

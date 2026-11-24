@@ -1158,16 +1158,18 @@ fn mul_mat_via_mmq_mma(
 /// [`mul_mat_via_rows_tc`] reads for a Q8_0 weight (`quantize_q8_1_rows_tc`).
 const ROWS_TC_LAYOUT: i32 = -2;
 
-/// [`SharedQ8::layout`] of the one it reads for a Q4_K weight
+/// [`SharedQ8::layout`] of the one it reads for a Q4_K or Q5_K weight — one
+/// layout for both, so a Q4_K and a Q5_K weight reading the same input share it
 /// (`quantize_q8_1_rows_k`: 8, 16 or 24 rows, each k-block's scale beside the
 /// sum of its 32 floats).
 const ROWS_TC_K_LAYOUT: i32 = -3;
 
-/// The fewest weight rows a Q4_K product on [`mul_mat_via_rows_tc`] has. The
-/// kernel gives each block 64 of them over the whole of K, so a 1,024-row key
-/// or value is 16 blocks on a card of 40 or more processors and ran at
-/// 25-45 µs where MMQ takes 18-20; from 4,096 rows (64 blocks) it beat MMQ at
-/// every width measured (RTX 3070 Laptop, 2026-11-24, `mul_mat_via_rows_tc`).
+/// The fewest weight rows a Q4_K or Q5_K product on [`mul_mat_via_rows_tc`]
+/// has. The kernel gives each block 64 of them over the whole of K, so a
+/// 1,024-row key or value is 16 blocks on a card of 40 or more processors and
+/// ran at 25-45 µs where MMQ takes 18-20 (Q5_K 15.7-21.3 against 17.8-20.8:
+/// no gain); from 4,096 rows (64 blocks) both beat MMQ at every width measured
+/// (RTX 3070 Laptop, 2026-11-24, `mul_mat_via_rows_tc`).
 const ROWS_TC_K_LEAST_WEIGHT_ROWS: usize = 4096;
 
 /// Products [`mul_mat_via_rows_tc`] has enqueued in this process.
@@ -1186,13 +1188,15 @@ pub fn rows_tc_products() -> usize {
 /// blocks at 16-byte aligned offsets):
 ///
 /// - a Q8_0 weight, 2-8 rows (one row stays on the vector kernel);
-/// - a Q4_K weight of at least [`ROWS_TC_K_LEAST_WEIGHT_ROWS`] rows, 4-24
-///   activation rows — MMQ's own line for a k-quant starts at 4 rows, and past
-///   24 its tiles have caught up (1.02x of ours on a 27B's feed-forward up).
+/// - a Q4_K or Q5_K weight of at least [`ROWS_TC_K_LEAST_WEIGHT_ROWS`] rows,
+///   4-24 activation rows — MMQ's own line for a k-quant starts at 4 rows, and
+///   past 24 its tiles have caught up (1.02x of ours on a 27B's Q4_K
+///   feed-forward up).
 ///
-/// `SWARMLLM_QMATMUL_ROWS_TC=0` keeps the kernels before both (the vector
-/// kernel, or MMQ from its few-rows line) and `SWARMLLM_QMATMUL_ROWS_TC_K=0`
-/// before the Q4_K one only — the A/B in one binary. The kernels need the int8
+/// `SWARMLLM_QMATMUL_ROWS_TC=0` keeps the kernels before all of them (the
+/// vector kernel, or MMQ from its few-rows line) and `SWARMLLM_QMATMUL_ROWS_TC_K=0`
+/// before the k-quant ones only; `SWARMLLM_QMATMUL_ROWS_TC_K=q4k` (or `q5k`)
+/// keeps the row kernel for that type alone — the A/B in one binary. The kernels need the int8
 /// tensor cores and `cp.async` of compute 8.0 (the release's floor, SwarmLLM
 /// `gpu_support`) and are built to a trap below it, so a module whose PTX
 /// targets less ([`quantized_ptx_target`]: a build for an older card) never
@@ -1200,23 +1204,28 @@ pub fn rows_tc_products() -> usize {
 /// compiled-in PTX: nothing here touches the driver, so a captured product
 /// takes it as an uncaptured one does.
 pub fn rows_tc_takes(dtype: GgmlDType, rows: usize, n: usize, k: usize) -> bool {
-    static ON: std::sync::OnceLock<(bool, bool)> = std::sync::OnceLock::new();
-    let (on, k_quant_on) = *ON.get_or_init(|| {
-        let off = |name: &str| {
-            matches!(
-                std::env::var(name).ok().as_deref(),
-                Some("0") | Some("off") | Some("false")
-            )
+    static ON: std::sync::OnceLock<(bool, bool, bool)> = std::sync::OnceLock::new();
+    let (on, q4k_on, q5k_on) = *ON.get_or_init(|| {
+        let off = |value: Option<&str>| matches!(value, Some("0") | Some("off") | Some("false"));
+        let on = !off(std::env::var("SWARMLLM_QMATMUL_ROWS_TC").ok().as_deref())
+            && quantized_ptx_target().is_some_and(|sm| sm >= 80);
+        // Unset or on: both k-quants; off: neither; else the types it names.
+        let k = std::env::var("SWARMLLM_QMATMUL_ROWS_TC_K").ok().map(|v| v.to_ascii_lowercase());
+        let (q4, q5) = match k.as_deref() {
+            None | Some("1") | Some("on") | Some("true") => (true, true),
+            v if off(v) => (false, false),
+            Some(list) => (list.contains("q4k"), list.contains("q5k")),
         };
-        let on = !off("SWARMLLM_QMATMUL_ROWS_TC") && quantized_ptx_target().is_some_and(|sm| sm >= 80);
-        (on, on && !off("SWARMLLM_QMATMUL_ROWS_TC_K"))
+        (on, on && q4, on && q5)
     });
     if !on || k == 0 || k % 256 != 0 {
         return false;
     }
+    let k_quant = |type_on: bool| type_on && (4..=24).contains(&rows) && n >= ROWS_TC_K_LEAST_WEIGHT_ROWS;
     match dtype {
         GgmlDType::Q8_0 => (2..=8).contains(&rows),
-        GgmlDType::Q4K => k_quant_on && (4..=24).contains(&rows) && n >= ROWS_TC_K_LEAST_WEIGHT_ROWS,
+        GgmlDType::Q4K => k_quant(q4k_on),
+        GgmlDType::Q5K => k_quant(q5k_on),
         _ => false,
     }
 }
@@ -1247,9 +1256,9 @@ fn rows_tc_warps(groups: usize, stages: usize) -> usize {
     }
 }
 
-/// SwarmLLM patch: a product of a few activation rows against a Q8_0 or Q4_K
-/// weight on the int8 tensor cores near the card's streaming rate
-/// (`mul_mat_q8_0_rows_tc`, `mul_mat_q4_k_rows_tc_{8,16,24}`, candle-kernels
+/// SwarmLLM patch: a product of a few activation rows against a Q8_0, Q4_K or
+/// Q5_K weight on the int8 tensor cores near the card's streaming rate
+/// (`mul_mat_q8_0_rows_tc`, `mul_mat_q{4,5}_k_rows_tc_{8,16,24}`, candle-kernels
 /// `quantized.cu`; [`rows_tc_takes`] says when).
 ///
 /// **What it replaced.** At 8 rows llama.cpp's MMQ read a Qwen 3.5 0.8B
@@ -1278,6 +1287,14 @@ fn rows_tc_warps(groups: usize, stages: usize) -> usize {
 /// MMQ's within 2% (9B 148.2 → 150.1, 27B 234.0 → 239.5) and every other
 /// shape faster, so a forward of 17-24 rows still gains.
 ///
+/// **A Q5_K weight**, the same kernel with the fifth bit OR'd in from the
+/// block's `qh` (a Qwen 3.5's `attn_qkv` and `ssm_out`, a Phi's fused QKV, all
+/// of a Q5_K_M file): 0.65-0.98x of MMQ's time on every 4,096+-row weight at 8,
+/// 16 and 24 rows, four warps and three stages as shipped. 9B `attn_qkv` 8,192 × 4,096 at 8 rows 91.3 → 68.4, 16 rows
+/// 98.7 → 74.5, 24 rows 103.9 → 102.1 (63.7); `ssm_out` 4,096 × 4,096 at 16
+/// rows 54.9 → 37.5 (32.5); a 14B's feed-forward down 5,120 × 13,824 at 24
+/// rows 241.1 → 156.4 (132.5); same bench, `rowstc_q5k.cu`.
+///
 /// Each output is ONE thread's sum over its k-blocks in order (for Q8_0 the
 /// warps of a group added in warp order): the same bits every launch,
 /// captured or not, and a row's outputs do not depend on how many rows ride
@@ -1300,8 +1317,8 @@ fn mul_mat_via_rows_tc(
     if y.len() != k * rows || !rows_tc_takes(dtype, rows, x_rows, k) {
         crate::bail!("rows-tc: {rows} rows of {k} (y {}) are not its shape", y.len())
     }
-    if dtype == GgmlDType::Q4K {
-        return mul_mat_q4_k_via_rows_tc(data, y, x_rows, k, rows, dev);
+    if matches!(dtype, GgmlDType::Q4K | GgmlDType::Q5K) {
+        return mul_mat_k_quant_via_rows_tc(data, dtype, y, x_rows, k, rows, dev);
     }
     let blocks = k / 32;
     // `quantize_q8_1_rows_tc` writes every byte: 8 rows a block (zeros past
@@ -1347,11 +1364,12 @@ fn mul_mat_via_rows_tc(
     Ok(CudaStorage::wrap_cuda_slice(dst, dev.clone()))
 }
 
-/// [`mul_mat_via_rows_tc`]'s Q4_K half: the activation quantized to 8, 16 or
-/// 24 rows (zeros past `rows`) by `quantize_q8_1_rows_k`, then ONE launch of
-/// the kernel of that width, 64 weight rows a block.
-fn mul_mat_q4_k_via_rows_tc(
+/// [`mul_mat_via_rows_tc`]'s Q4_K and Q5_K half: the activation quantized to
+/// 8, 16 or 24 rows (zeros past `rows`) by `quantize_q8_1_rows_k`, then ONE
+/// launch of the kernel of that type and width, 64 weight rows a block.
+fn mul_mat_k_quant_via_rows_tc(
     data: &PaddedCudaSlice,
+    dtype: GgmlDType,
     y: &CudaView<f32>,
     x_rows: usize,
     k: usize,
@@ -1386,19 +1404,34 @@ fn mul_mat_q4_k_via_rows_tc(
     // Every element is assigned once: each block's rows < x_rows, each
     // activation row < rows.
     let dst = dev.alloc_fully_overwritten::<f32>(x_rows * rows)?;
-    let name = match tiles {
-        1 => "mul_mat_q4_k_rows_tc_8",
-        2 => "mul_mat_q4_k_rows_tc_16",
-        _ => "mul_mat_q4_k_rows_tc_24",
+    let (name, block_bytes) = match (dtype, tiles) {
+        (GgmlDType::Q5K, 1) => ("mul_mat_q5_k_rows_tc_8", 176),
+        (GgmlDType::Q5K, 2) => ("mul_mat_q5_k_rows_tc_16", 176),
+        (GgmlDType::Q5K, _) => ("mul_mat_q5_k_rows_tc_24", 176),
+        (_, 1) => ("mul_mat_q4_k_rows_tc_8", 144),
+        (_, 2) => ("mul_mat_q4_k_rows_tc_16", 144),
+        _ => ("mul_mat_q4_k_rows_tc_24", 144),
     };
     let func = dev.get_or_load_func(name, &candle_kernels::QUANTIZED)?;
-    // Three stages of four warps' 16 rows (144 bytes a row) and the
-    // activation's 8 k-blocks (36 bytes a row): 48,384 bytes at 24 rows,
-    // under the 48 KB a launch may ask for without raising the kernel's limit.
+    // Three stages of four warps' 16 rows and the activation's 8 k-blocks (36
+    // bytes a row): Q4_K's 48,384 bytes at 24 rows fit the 48 KB any launch
+    // may ask for; Q5_K's 54,528 at 24 rows need the kernel's limit raised
+    // first. That is not a stream operation, so a capture may see it (as
+    // FlashAttention raises it before each launch vLLM and PyTorch capture);
+    // `card_quantized_products` captures a 24-row Q5_K product to keep it so.
+    // Three stages, not two, because two were 3-24% slower at 24 rows.
+    let shared = 3 * (4 * 16 * block_bytes + 288 * width);
+    if shared > 48 * 1024 {
+        func.set_attribute(
+            cudarc::driver::sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+            shared as i32,
+        )
+        .w()?;
+    }
     let cfg = cudarc::driver::LaunchConfig {
         grid_dim: (x_rows.div_ceil(64) as u32, 1, 1),
         block_dim: (WARP_SIZE as u32, 4, 1),
-        shared_mem_bytes: (3 * (4 * 16 * 144 + 288 * width)) as u32,
+        shared_mem_bytes: shared as u32,
     };
     let mut builder = func.builder();
     builder.arg(&data.inner);
@@ -1942,8 +1975,8 @@ impl QCudaStorage {
             _ => usize::MAX,
         };
         // SwarmLLM patch: 2-8 rows of a Q8_0 weight and 4-24 of a large Q4_K
-        // one go to the tensor-core row kernels ([`rows_tc_takes`]), ahead of
-        // both the vector kernel and MMQ.
+        // or Q5_K one go to the tensor-core row kernels ([`rows_tc_takes`]),
+        // ahead of both the vector kernel and MMQ.
         if let Ok((n, k)) = self_shape.dims2() {
             if max_bm == 8 && rows_tc_takes(self.dtype, rows, n, k) && self.data.starts_aligned_to(16) {
                 let src = storage.as_cuda_slice::<f32>()?;
