@@ -5246,7 +5246,12 @@ pub struct ModelProcessPool {
     >,
     /// Whether this node detected a GPU at startup (`SharedState::gpu_info`).
     /// Defaults to `true` so nothing changes for a pool nobody told; the daemon
-    /// sets it once. See `charges_ram`.
+    /// sets it once. See `charges_ram`. A TEST's pool starts with none: every
+    /// reader also asks whether the build drives a card, so the default build's
+    /// tests never saw one, and a CUDA build's tests took this machine's real
+    /// card instead — nine of them failed there and pass with this ("room is
+    /// left", 2026-11-25). A test of a card says so (`test_card_in_play`,
+    /// `set_gpu_detected`).
     gpu_detected: std::sync::atomic::AtomicBool,
     /// KV budget handed to each CPU worker at spawn (`--kv-budget-bytes`):
     /// the model's typical-context KV charge plus the RAM budget still
@@ -5558,7 +5563,7 @@ impl ModelProcessPool {
             vram_reserved_mb: dashmap::DashMap::new(),
             ram_budget_mb: std::sync::atomic::AtomicU64::new(0),
             ram_budget_provider: std::sync::OnceLock::new(),
-            gpu_detected: std::sync::atomic::AtomicBool::new(true),
+            gpu_detected: std::sync::atomic::AtomicBool::new(!cfg!(test)),
             cpu_kv_budget_bytes: dashmap::DashMap::new(),
             ram_budget_note: std::sync::Mutex::new(String::new()),
             ram_reserved_mb: dashmap::DashMap::new(),
