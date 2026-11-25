@@ -443,6 +443,28 @@ the model's own reply, scored against llama.cpp with `examples/score_against_ref
 its cheapest form: no judge to train. Next, only when that mode is built: replies under τ 0.5 and
 1.0 scored against llama.cpp, then the link.
 
+**Free-running, measured 2026-11-25** (the open limit above; `~/swarmllm-ref/spec/relaxed_gen.py`,
+Qwen2.5-Coder-7B Q4_K_M checked by its 0.5B Q8_0 drafting 12 ahead, six cached prompts, 120 tokens
+each, llama-cpp-python on the processor; `relaxed_d05.{log,json}`). The script's τ is a ratio of
+probabilities, so 0.25 and 0.5 nats ran as 0.78 and 0.61:
+
+| τ | corrections / 100 tokens | round trips (6 replies) | the target's own NLL of the reply |
+|---|---|---|---|
+| exact | 25.14 | 192 | 0.2494 |
+| 0.25 nats | 23.33 (+1.8 points kept) | 181 (−5.7%) | 0.2541 |
+| 0.5 nats | 20.83 (+4.3 points kept) | 166 (−13.5%) | 0.2716 |
+
+(the target's greedy reply: 0.2739). Free-running holds what the per-position count promised at 0.5
+nats (+4.3 points against +4.8) and loses most of it at 0.25 (+1.8 against +2.8): 0.25 is below
+the Fable debate's kill line (+3 points), 0.5 passes it at ~15% fewer round trips, its replies as
+likely to the target as the target's own greedy reply and 9% less likely than exact speculation's.
+⚠ The exact arm is not byte-for-byte the greedy reply (0 of 6, and 2 of 6 with the target drafting
+for itself, 2026-09-28): llama.cpp's batched and one-token logits part at near-ties on the
+processor, so likelihood — not identity — is the quality reading here; the code case that does not
+compile fails in every arm. Still open before building the mode: the second kill line (replies
+scored against llama.cpp with `score_against_reference.py`), and a drafter the size users get (the
+1.5B-3B, `engine_drafter::largest_that_can_draft`), whose first choice is kept more often already.
+
 **7.4 Fewer bytes a row without losing anything: ~8% is all there is.** For a large model on a
 home uplink the rows, not the round trip, set the tree's width: a 70B row is 8,192 values, ~8.7 KB
 at Q8_0, so 64 guesses a round at ~6.5 rounds a second is ~29 Mbit/s a hop, past most home uploads,
