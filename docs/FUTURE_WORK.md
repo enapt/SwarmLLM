@@ -7029,7 +7029,10 @@ back's 11), the 96-token asks 6.7-9.0 s then 4.5-7.0; old — "Hybrid placement:
 5..22 on the processor", 77-79 ms, 13.3-15.0 s. Both arms' replies are the model's by llama.cpp
 (`score_against_reference.py`: 95 of 96 tokens at rank 1 each; the old reply leaves the reference's first choice at
 its second token, rank 2, gap 0.104). Not yet seen on the real link: it needs the far computer on a release carrying
-it. **Left**: a far computer that two shapes
+it. **The pre-release review the same day** found the step-aside could REFUSE what the split had served — a fresh spawn
+that does not load in the worker's place, or a conversation taking the worker before the retirement decision (#461's
+containment step-aside, v0.3.292 on, the same); where the retirement cannot happen the split now serves after all
+(`split_after_all`; test `an_overlapping_range_the_worker_cannot_be_replaced_for_is_split_not_refused`). **Left**: a far computer that two shapes
 use in turn now reloads at each switch past the conversation gap; their union (`[12..48)`, 36 layers, against the
 58 the two copies held) would serve both as views (#449) — a respawn as the HULL where it fits whole on the card
 (only where the union is contiguous, and Petals-like: every placement there is one span, `choose_best_blocks`). It

@@ -3473,7 +3473,18 @@ beside it. Tests `a_range_overlapping_a_held_one_is_placed_afresh_not_beside_it`
 A/B/B/A, Qwen2.5-Coder-7B, B capped at 5,000 MB): B holding `[6..28)` asked
 `[0..22)` — fixed, retired and loaded whole 2.4 s later, its forwards 10 ms;
 old, 5 of 22 layers on the card, 77-79 ms; both replies the model's by
-llama.cpp (95 of 96 tokens at rank 1). Left: two shapes used in turn reload
+llama.cpp (95 of 96 tokens at rank 1). **And where the retirement cannot
+happen, the split serves** (pre-release review, same day; #461's containment
+step-aside had the same gap since v0.3.292): after the step-aside, a fresh spawn
+that would not load in the worker's place, or a conversation registered between
+the step-aside and `retirement_decision` (`Keep`), returned the refusal the
+split rung would have avoided. The split rung now says why it declined
+(`SplitRung`), and `split_after_all` runs it without the step-aside there. Test
+`an_overlapping_range_the_worker_cannot_be_replaced_for_is_split_not_refused`
+(the card pinned off for the model, so a fresh spawn is priced on the processor
+the machine cannot take; red with the fallback off). Prior art: Kubernetes
+keeps a pod running as it is where an in-place resize cannot be granted now
+(`Deferred`). Left: two shapes used in turn reload
 at each switch past the conversation gap, where their union would serve both as
 views (#449) in less memory than the two copies (FUTURE_WORK #461). The
 retirement's worse-placement guard follows.

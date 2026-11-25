@@ -585,6 +585,18 @@ enum Growth {
     Respawn,
 }
 
+/// What `ModelProcessPool::charge_segment_as_split`, growth's split rung, did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SplitRung {
+    /// The worker now holds the range across the card and the processor.
+    Took,
+    /// No part of the range fits the card, or the split cannot be priced.
+    Declined,
+    /// It stood aside so an idle worker is retired and the range placed afresh
+    /// (#461): the range takes in, or partly overlaps, one the worker holds.
+    SteppedAside,
+}
+
 /// How long a GPU-resident model must have gone unused before another model
 /// may take the card from it.
 ///
@@ -9503,10 +9515,11 @@ impl ModelProcessPool {
         handle: &Arc<WorkerHandle>,
         requester: Requester,
         shape: RunShape,
-    ) -> Result<bool, GrowthRefused> {
+        may_step_aside: bool,
+    ) -> Result<SplitRung, GrowthRefused> {
         let _guard = self.spawn_lock.lock().await;
         if handle.serves_segment(segment, shape) {
-            return Ok(true);
+            return Ok(SplitRung::Took);
         }
         // A range taking in one charged in the worker's base would be sized
         // below on the room BESIDE that range, though the worker drops it
@@ -9524,7 +9537,8 @@ impl ModelProcessPool {
         // cannot fit in place falls back to recreating the pod (VPA's
         // eviction), never to running it starved.
         // A/B `SWARMLLM_GROWTH_OVER_BASE_RANGE=split` keeps the old split.
-        if handle.takes_in_a_range_charged_in_its_base(segment)
+        if may_step_aside
+            && handle.takes_in_a_range_charged_in_its_base(segment)
             && !handle.in_use(self.conversation_window())
             && std::env::var("SWARMLLM_GROWTH_OVER_BASE_RANGE").as_deref() != Ok("split")
         {
@@ -9534,7 +9548,7 @@ impl ModelProcessPool {
                 "This range takes in the one this model's worker was started with — placing it \
                  afresh rather than beside it, so the memory that range frees counts"
             );
-            return Ok(false);
+            return Ok(SplitRung::SteppedAside);
         }
         // Likewise a range that shares layers with one the worker holds, where
         // neither holds the other: the worker keeps both, so the split rung
@@ -9550,7 +9564,8 @@ impl ModelProcessPool {
         // place of the old (`block_selection.py`, `should_choose_other_blocks`),
         // never a second span beside it. A/B
         // `SWARMLLM_GROWTH_ACROSS_HELD_RANGE=split` keeps the old split.
-        if shape == RunShape::Plain
+        if may_step_aside
+            && shape == RunShape::Plain
             && handle.partly_overlaps_a_charged_range(segment)
             && !handle.in_use(self.conversation_window())
             && std::env::var("SWARMLLM_GROWTH_ACROSS_HELD_RANGE").as_deref() != Ok("split")
@@ -9561,16 +9576,16 @@ impl ModelProcessPool {
                 "This range shares layers with one this model's worker holds — placing it \
                  afresh rather than beside a copy of the layers they share"
             );
-            return Ok(false);
+            return Ok(SplitRung::SteppedAside);
         }
         let Some((split, room_mb)) = self.growth_split(model_id, segment, handle, 0) else {
-            return Ok(false);
+            return Ok(SplitRung::Declined);
         };
         let (Some((_, card_per_layer_mb)), Some((_, host_per_layer_mb))) = (
             self.segment_cost_curve(model_id, true),
             self.segment_cost_curve(model_id, false),
         ) else {
-            return Ok(false);
+            return Ok(SplitRung::Declined);
         };
         let subsumed = handle.subsumed_charge(segment);
         let cost = split_growth_cost(
@@ -9588,7 +9603,7 @@ impl ModelProcessPool {
         // Sized to the room just read, so this refuses only when the card has
         // shrunk since: no split, and the caller's refusal stands.
         if !self.admit_to_gpu(model_id, net.mb) {
-            return Ok(false);
+            return Ok(SplitRung::Declined);
         }
         let admitted = self.admit_to_cpu(model_id, net.host_mb, requester);
         if !admitted {
@@ -9636,7 +9651,7 @@ impl ModelProcessPool {
              and the processor, as a fresh worker would be"
         );
         Self::tell_worker_where(handle, model_id, segment, Some(placement)).await;
-        Ok(true)
+        Ok(SplitRung::Took)
     }
 
     /// Give a live worker a range it has not held before — and when the card
@@ -9697,6 +9712,9 @@ impl ModelProcessPool {
             Ok(()) => return Ok(Growth::Grown(handle)),
             Err(r) => r,
         };
+        // Whether the split rung stood aside for the retirement below: where
+        // that retirement then cannot happen, the split serves after all.
+        let mut stepped_aside = false;
         if refused.on_gpu {
             // Outside `spawn_lock` — the charge above took and released it —
             // because a reclaim unloads workers and waits for their processes to
@@ -9752,11 +9770,12 @@ impl ModelProcessPool {
             // of report #037, a request's second local run — can never be
             // retired.
             match self
-                .charge_segment_as_split(model_id, segment, &handle, requester, shape)
+                .charge_segment_as_split(model_id, segment, &handle, requester, shape, true)
                 .await
             {
-                Ok(true) => return Ok(Growth::Grown(handle)),
-                Ok(false) => {}
+                Ok(SplitRung::Took) => return Ok(Growth::Grown(handle)),
+                Ok(SplitRung::SteppedAside) => stepped_aside = true,
+                Ok(SplitRung::Declined) => {}
                 Err(r) => refused = r,
             }
         } else if std::env::var("SWARMLLM_RAM_GROWTH_RETIRE").as_deref() == Ok("0") {
@@ -9771,6 +9790,11 @@ impl ModelProcessPool {
             self.a_fresh_spawn_fits_in_place_of_the_worker(model_id, segment, requester)
         });
         if !fits_in_its_place {
+            if stepped_aside {
+                return self
+                    .split_after_all(model_id, segment, handle, requester, shape, refused)
+                    .await;
+            }
             return Err(refused.error);
         }
         // Decide under the spawn lock — the one every charge takes — so a
@@ -9779,6 +9803,12 @@ impl ModelProcessPool {
         // see, but its charge moved the total (pre-release review 2026-09-27).
         let guard = self.spawn_lock.lock().await;
         match self.retirement_decision(model_id, &handle, &refused) {
+            Retirement::Keep if stepped_aside => {
+                drop(guard);
+                return self
+                    .split_after_all(model_id, segment, handle, requester, shape, refused)
+                    .await;
+            }
             Retirement::Keep => return Err(refused.error),
             // Replaced meanwhile: the slow path finds the replacement.
             Retirement::AlreadyReplaced => return Ok(Growth::Respawn),
@@ -9799,6 +9829,39 @@ impl ModelProcessPool {
         self.unload_model(model_id).await;
         drop(guard);
         Ok(Growth::Respawn)
+    }
+
+    /// The split rung after all, where it stood aside for a retirement that
+    /// then could not happen: a fresh spawn would not load in the worker's
+    /// place, or a conversation took the worker meanwhile. A slow copy beats
+    /// a refused request — the rule the up-front weighing keeps for the forward
+    /// (`replacement_keeps_the_card`) — and before the step-aside (#461) the
+    /// split served these. Found in the pre-release review, 2026-11-25. Prior
+    /// art: Kubernetes keeps a pod running as it is where an in-place resize
+    /// cannot be granted now (`Deferred`), never kills it for the resize.
+    async fn split_after_all(
+        &self,
+        model_id: &ModelId,
+        segment: (u32, u32),
+        handle: Arc<WorkerHandle>,
+        requester: Requester,
+        shape: RunShape,
+        refused: GrowthRefused,
+    ) -> Result<Growth, SwarmError> {
+        tracing::info!(
+            model = %model_id,
+            layers = format!("[{}..{})", segment.0, segment.1),
+            "This model's worker cannot be replaced for the range asked for — taking it \
+             across the card and the processor beside what it holds instead"
+        );
+        match self
+            .charge_segment_as_split(model_id, segment, &handle, requester, shape, false)
+            .await
+        {
+            Ok(SplitRung::Took) => Ok(Growth::Grown(handle)),
+            Ok(SplitRung::Declined | SplitRung::SteppedAside) => Err(refused.error),
+            Err(r) => Err(r.error),
+        }
     }
 
     /// Would a fresh spawn of `segment` be admitted once this model's worker,
@@ -25334,6 +25397,36 @@ mod admission_tests {
             .expect("a worker in use still takes the range");
         assert!(matches!(grown, Growth::Grown(_)));
         assert!(h.serves_segment((12, 36), RunShape::Plain));
+    }
+
+    /// ...and where the retirement the split rung stood aside for cannot
+    /// happen, the split serves after all: a slow copy beats a refused request
+    /// (pre-release review, 2026-11-25). Here the card failed this model since
+    /// its spawn (a pin), so a fresh spawn is priced as a processor run the
+    /// machine cannot take, while the split's processor share fits.
+    #[tokio::test]
+    async fn an_overlapping_range_the_worker_cannot_be_replaced_for_is_split_not_refused() {
+        let (p, m, h, _worker_end) =
+            fourteen_b_spawned_as_0_24("fourteen-b-461-overlap-no-room").await;
+        p.cpu_pins.pin(
+            &m,
+            crate::inference::worker_ipc::PermanentGpuFailure::OutOfMemory,
+            None,
+        );
+        let fresh_mb = p.fresh_spawn_machine_mb(&m, (12, 36), Requester::Owner);
+        p.set_ram_budget_mb(fresh_mb.saturating_sub(1));
+        assert!(
+            !p.a_fresh_spawn_fits_in_place_of_the_worker(&m, (12, 36), Requester::Owner),
+            "fixture: a fresh spawn ({fresh_mb} MB on the processor) does not load in its place"
+        );
+
+        let grown = p
+            .grow_worker(&m, (12, 36), h.clone(), Requester::Owner, RunShape::Plain)
+            .await
+            .expect("the split serves where the worker cannot be replaced");
+        assert!(matches!(grown, Growth::Grown(_)));
+        assert!(h.serves_segment((12, 36), RunShape::Plain));
+        assert!(p.workers.get(&m).is_some(), "the worker was kept");
     }
 
     /// Only a PARTIAL overlap: a run inside a held range is served from it
