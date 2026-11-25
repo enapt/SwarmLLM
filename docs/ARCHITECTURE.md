@@ -3061,7 +3061,7 @@ User guide: `docs/book/src/api/claude-subscription.md` (configuration, setup, re
 - `DELETE /api/admin/models/{id}/shards/{index}` — Delete a single shard
 - `GET/PUT /api/admin/models/{id}/auto-manage` — Per-model auto-manage policy (incl. prune toggle); a PUT changes only the fields it names
 - `PUT    /api/admin/models/{id}/shards/{index}/lock` — Lock/unlock a shard (prevent auto-pruning)
-- `POST   /api/admin/models/{id}/shards/{index}/download` — Download a single shard from P2P network
+- `POST   /api/admin/models/{id}/shards/{index}/download` — Download a single shard from P2P network (the owner's download: pins the model, as the other two download paths do)
 - `POST   /api/admin/models/{id}/shards/{index}/load` — Load a shard into memory (expands shard window, restarts worker)
 - `POST   /api/admin/models/{id}/shards/{index}/unload` — Unload a shard from memory (narrows shard window, restarts worker, frees RAM/VRAM)
 - `GET    /api/admin/models/{id}/pipeline-plan` — Pipeline assembly plan: ordered segments + holder candidates per shard window. **A preview, so "there is no route right now" is an ANSWER, not a failure**: it returns 200 with `routable: false` and a `reason` carrying the same `message` / `hint` / `hint_key` a real request would have been given, and the dashboard renders that where the route line would go. Only a model id this node has never heard of is still an error (404). It used to report every routing outcome as a failed request, which both hid the reason from the user and filled the node's log with `API request failed status=503` lines that no user request produced

@@ -432,6 +432,21 @@ pub async fn download_shard(
             .and_then(|p| p.peer_id_bytes.clone());
 
         if let Some(bytes) = peer_id_bytes {
+            // The owner's download pins the model, as the dashboard's Download
+            // and a HuggingFace download of some parts both do
+            // (`SharedState::owner_fetches`). Without it the part was nobody's:
+            // a copy from a peer that cannot be checked (no hash yet) is thrown
+            // away for the origin's, and that origin fetch goes through the
+            // automatic pass, which drops a part prune would delete again — at
+            // 94% storage pressure, four asked-for parts were dropped and the
+            // download read "stalled" (2026-11-25). Prior art: IPFS keeps what
+            // any operation fetched only as a cache its garbage collector
+            // removes, and an owner keeps content by PINNING it
+            // (docs.ipfs.tech, "Pin files"); here the owner's download is that
+            // pin, on all three download paths.
+            if let Err(e) = shared.owner_fetches(&mid) {
+                tracing::warn!(error = %e, model = %mid.0, "Failed to persist model trust pin — may be lost on restart");
+            }
             // Fold this shard into whatever download of this model is already
             // in flight, rather than replacing it.
             //
@@ -647,5 +662,60 @@ mod download_progress_tests {
         // early and the figures below are what must survive it.
         assert_eq!(st.total_shards, 1);
         assert_eq!(st.total_bytes, 500);
+    }
+
+    /// A part asked of a peer is the owner's, like any other download: the
+    /// model is pinned, so neither the fetch pass (which takes over when the
+    /// peer's copy cannot be checked) nor prune gives it up.
+    #[tokio::test]
+    async fn a_part_asked_of_a_peer_pins_its_model() {
+        let app = crate::api::route_test_support::test_app();
+        let shared = app.state.shared_state.clone();
+        let mid = ModelId("m".into());
+        let peer = crate::types::NodeId([7u8; 32]);
+        shared.model_registry.record_shard_holder(
+            crate::types::ShardId {
+                model_id: mid.clone(),
+                index: 0,
+            },
+            peer.clone(),
+        );
+        shared.peer_registry.insert(
+            peer.clone(),
+            crate::types::PeerInfo {
+                node_id: peer.clone(),
+                addresses: vec![],
+                capability: None,
+                last_seen: chrono::Utc::now(),
+                latency_ms: Some(20),
+                trust_score: 0.5,
+                peer_id_bytes: Some(vec![1, 2, 3]),
+                ack_srtt_ms: None,
+                active_request_count: 0,
+                first_seen: 0,
+                verified_transaction_count: 0,
+                is_lan_peer: false,
+                goodput_bytes_per_sec: None,
+                goodput_samples: 0,
+            },
+        );
+        assert!(!shared.owner_fetched(&mid));
+
+        // `ApiError` is not `Debug`, so no `expect` (the pattern of
+        // `admin.rs`'s reload tests).
+        let Ok(axum::Json(reply)) = super::download_shard(
+            axum::extract::State(app.state.clone()),
+            axum::extract::Path(("m".to_string(), 0)),
+        )
+        .await
+        else {
+            panic!("a held part is asked of its holder");
+        };
+
+        assert_eq!(reply["status"], "downloading");
+        assert!(
+            shared.owner_fetched(&mid),
+            "a part the owner asked for must not be left for prune to judge as surplus"
+        );
     }
 }
