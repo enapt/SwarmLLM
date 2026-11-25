@@ -4653,8 +4653,25 @@ match every arm's misses (14B pair prose 18.5 against 18-21, one-card loops 5.8-
 priced at the pair's loop move prose by −5..+5%, and the sim underprices the few winners (more levels a call). Checked
 against the 11-15 arms, it has the right direction and a third to a half of the loss. A stronger prose drafter priced
 the same way: the 1.5B instruct's prose m(8, deep) is 0.166 against 0.241, misses a reply fall from 18.5 to 7, and at
-its ×1.6 a call the model reads prose +4..+19%. **Next** (needs AU): a real-link A/B, `flowhalf` (0.5B) against `flowq`
-with the 1.5B and the 3B.
+its ×1.6 a call the model reads prose +4..+19%.
+
+**The real-link drafter A/B, 2026-11-25 (published v0.3.311, Qwen2.5-14B, Thailand ↔ Australia 118-121 ms, the
+owner's reply store off, 160-token greedy replies; each arm's drafter read from its log, on the card).** Sitting
+`n311d`, ABBA: prose — `flowhalf` 0.5B with [0,26) here 18.19 / 17.27; `flowq` 0.5B with [0,16) here 18.67 / 17.70 (so
+the balance alone moves nothing); `flowq` 1.5B Q8_0 21.61 / 21.14 (+17%); `flowq` 3B Q4_K_M 21.76 / 19.43 (+16%). Code —
+40.86 / 37.92; 37.42 / 39.46; 56.54 / 44.46; 44.07 / 41.85. The sim's +4..+19% holds on the real link: a larger drafter
+lifts this pair's prose past 20 tok/s. **The 1.5B against the 3B**: sitting `n311e` (8 arms ABBA, the far computer then
+slower — it held the whole 14B with 36 of 48 layers on its card, left by sitting `n311c`): prose 16.85 / 14.92 / 15.09 /
+16.13 against 14.72 / 13.24 / 16.01 / 14.64 (+7.5%), code 31.14 / 34.14 / 31.16 / 31.03 against 28.47 / 31.14 / 28.75 /
+30.35 (+7.4%); `n311c`'s planner-chosen code splits 28.17 / 32.9 against 22.59 / 20.85. The 1.5B matches or beats the
+3B in 7 of 8 pairings. A user's node today picks and fetches the 3B (`engine_drafter::largest_that_can_draft`, largest
+`size_proxy` that fits the card; `drafter_to_acquire` ≤ 2 GiB) and the planner leaves it room (`n311c`: 19 layers here
+beside the 3B, 20 beside the 1.5B, 24 beside the 0.5B) — so users already get most of the gain. Prior art on WHICH
+drafter: Yan et al., "Decoding Speculative Decoding" (arXiv 2402.01528) — a draft's latency, driven by its DEPTH,
+matters more than its language-modelling accuracy (the 3B has 36 layers against the 1.5B's 28, at about the same bytes
+read a guess). **Next**: a cross-family A/B before `largest_that_can_draft` weighs depth (a rule from one family would
+also move Qwen 3.5's 9B from its 2B to the 0.8B, unmeasured) — the 9B pair with the 0.8B against the 2B, and a
+one-card 7B with the 0.5B against the 1.5B. Logs: `~/swarmllm-gate/deep/fr/real_link_n311{d,e,c}/`.
 
 Prior art: none taken as the design, by the owner's direction; the debate checked each idea against our own
 measured kills instead (lanes, twins, a drafter guild, verdict taps, scout-and-stitch: the plan's appendix), and

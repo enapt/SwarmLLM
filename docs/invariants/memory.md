@@ -156,7 +156,23 @@ failed with a 503 ("turned it down"). With the fix, B logged "released a
 cancelled request's KV cache … freed_mb=420" and then answered go ahead. That arm
 was a debug build, which reads a 7,000-token prompt about 7x slower than a
 release, so its replies outlived the 105 s segment wait. The verdict at the
-question is what the fix changes; the next field run shows the replies.
+question is what the fix changes. On the published v0.3.311 (an optimised
+build, 2026-11-25) the same rig served all three: q2 and q3 answered 200, B
+released q2's 420 MB and answered go ahead, A re-planned nothing
+(`~/swarmllm-gate/deep/lease1125/b2b/rel311.console`). In the field the same
+evening, "Start and finish on this computer" on the 14B (Thailand ↔ Australia)
+served every back-to-back prose and code request it was asked, none refused —
+on v0.3.310 it had refused them.
+
+**A second cancel of a retried id releases again** (the .311 review): the loop
+remembers each cancel MARK it acted on by the moment the mark was made, never by
+request id alone (`ReleasedForCancel`). A router retry keeps the id (#749); by id
+alone, a retry's own cancel read as the first one, already released, and the
+retry's cache waited out the TTL. The usual fix for that shape — a value removed
+and put back reads as unchanged, the ABA problem — is a version tag beside the
+value; a mark's `Instant` is that tag. Test
+`a_second_cancel_of_a_retried_id_releases_its_cache` (red with the id-only
+bookkeeping put back).
 Guard `a_worker_settles_the_cancels_before_each_message_it_handles` (planted
 self-test `the_cancel_order_guard_catches_a_message_handled_before_the_cancels`).
 
