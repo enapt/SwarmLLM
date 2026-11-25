@@ -1496,6 +1496,12 @@ fn flowing_levels_pace_captured_and_op_by_op() {
                 seen.len()
             );
         }
+        // The levels that skipped the device reading (`KvCacheStore::leased_flow_budget`;
+        // `SWARMLLM_FLOW_ROOM=per-level` reads it at every level, so stays 0).
+        eprintln!(
+            "flowing levels pace: {} levels weighed against a leased budget so far this process",
+            super::super::kv_cache::flow_levels_leased()
+        );
         if let DecodeGraphSlot::On(graph) = &model.decode_graph {
             let (launched, refused) = graph.launches();
             let (made, updated) = graph.made_and_updated();

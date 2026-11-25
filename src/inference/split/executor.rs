@@ -1995,15 +1995,42 @@ impl SplitModel {
                 // load-time figure capped by what the device actually has
                 // left (`kv_budget_now`). Asked only here, at a growth
                 // boundary, so the device query stays off the per-token path.
-                let occ = kv_cache_store.occupancy();
-                let budget = self
-                    .kv_budget_now(home, occ.allocated_in(home), occ.external_in(home))
-                    .0
-                    .unwrap_or(load_time_budget);
+                let budget_now = || {
+                    let occ = kv_cache_store.occupancy();
+                    self.kv_budget_now(home, occ.allocated_in(home), occ.external_in(home))
+                        .0
+                        .unwrap_or(load_time_budget)
+                };
+                // A flowing level that newly allocates no position claims the
+                // walk's checkpoint pair again, no growth boundary: it reuses
+                // the budget a level of no smaller a claim read within the
+                // lease (`KvCacheStore::leased_flow_budget`, 2026-11-25). A
+                // lease never refuses — a claim it would refuse is weighed
+                // against the device as it stands first.
+                let leasable = claiming == 0 && super::kv_cache::flow_room_is_leased();
+                let leased = if leasable {
+                    kv_cache_store.leased_flow_budget(home, flowing)
+                } else {
+                    None
+                };
+                let mut fresh = leased.is_none();
+                let mut budget = match leased {
+                    Some(budget) => budget,
+                    None => budget_now(),
+                };
                 // Live caches PLUS the prefix cache's snapshots: the same
                 // device memory, and charged nowhere until gotcha #440 —
                 // and evictable, which `claim_room` does before refusing.
-                if let Err(refused) = kv_cache_store.claim_room(home, budget, claim, request_id) {
+                let mut claimed = kv_cache_store.claim_room(home, budget, claim, request_id);
+                if claimed.is_err() && !fresh {
+                    budget = budget_now();
+                    fresh = true;
+                    claimed = kv_cache_store.claim_room(home, budget, claim, request_id);
+                }
+                if leasable && fresh && claimed.is_ok() {
+                    kv_cache_store.lease_flow_budget(home, flowing, budget);
+                }
+                if let Err(refused) = claimed {
                     let in_use = refused.in_use_bytes;
                     // Whether OTHER conversations hold the room this one needs
                     // — read before `clear_request` below takes this request's

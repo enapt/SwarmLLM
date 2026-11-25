@@ -2167,6 +2167,36 @@ exist) has nothing of ours to miss and is left alone. Guard:
 source planted in `the_free_memory_sync_guard_catches_an_unsynchronized_read`
 — the arm is CUDA-gated, so no default build or test compiles it.
 
+**A flowing level leases its budget** (2026-11-25). From 2026-11-22 every
+flowing forward's head-room claim counts the walk's checkpoint pair
+(`bytes_a_flowing_forward_may_add`, a security review's fix), so every level of
+a recurrent drafter's tree, and every flowing forward of a target, read the
+device: a synchronize and `cuMemGetInfo` (85-105 µs, Fable pass 11-24) — ON the
+per-level path this section keeps the reading off, for the same bytes again
+each level (the pair is taken as the last is let go). *Now*: a level whose
+forward newly allocates no position and claims no more flowing bytes than one
+that read the device within `kv_cache::FLOW_ROOM_LEASE` (250 ms, the
+processor reading's `SYSTEM_MEMORY_TTL`) is weighed against that reading's
+budget (`KvCacheStore::leased_flow_budget`, per memory); a claim the lease
+would refuse reads the device first, so a lease never refuses or clears
+anything. Sound because the reconciled budget, `min(load-time, ours + free −
+margin)`, does not move when THIS store's caches grow or its snapshots go; what
+a lease cannot see is memory another program took in the last quarter second,
+which an ordinary decode step between growth boundaries never re-reads either.
+*Measured* (the pace probe `flowing_levels_pace_captured_and_op_by_op`, 8 rows,
+the card 60-66 °C before each run, four runs an arm interleaved,
+`~/swarmllm-gate/deep/lease1125/run_lease.console`): a captured level, median
+of runs, 0.8B 5.62 → 5.44 ms (best 5.53 → 5.33), 2B 9.66 → 9.45 (9.50 → 9.31);
+150-154 of the probe's 160 levels leased, 0 under the switch. *Must keep*: the
+claim itself is weighed every level against the store's occupancy as it is;
+a larger flowing claim (the flow's store grew — a real allocation) or any new
+position reads the device. A/B `SWARMLLM_FLOW_ROOM=per-level`; test
+`a_flowing_levels_budget_is_leased_only_for_no_larger_a_claim_and_a_quarter_second`
+(fails with the claim-size condition removed). Prior art: PyTorch's CUDA
+caching allocator reads the device's free memory only to word an
+out-of-memory error, after its cache, `cudaMalloc`, a flush and a retry have
+failed (`c10/cuda/CUDACachingAllocator.cpp`).
+
 ### A reply is reserved by what it can reach (#122)
 
 `ensure_room_for_prompt` takes the reply's reserve as a REQUIRED argument:

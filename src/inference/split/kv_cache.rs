@@ -1196,6 +1196,40 @@ pub struct KvCacheStore {
     awaiting_first_step: dashmap::DashMap<String, std::time::Instant>,
     /// How long a request in `awaiting_first_step` keeps its caches past `ttl`.
     prompt_pass_hold: std::time::Duration,
+    /// The budget a flowing level's head-room claim was last weighed against,
+    /// by memory ([`KvHome::index`]): [`Self::leased_flow_budget`].
+    flow_room_lease: std::sync::Mutex<[Option<FlowRoomLease>; 2]>,
+}
+
+/// A budget read off the device for a flowing level's claim
+/// ([`KvCacheStore::lease_flow_budget`]).
+#[derive(Clone, Copy, Debug)]
+struct FlowRoomLease {
+    at: std::time::Instant,
+    /// The flowing bytes the claim weighed then: a larger claim reads again.
+    flowing: u64,
+    budget: u64,
+}
+
+/// How long a flowing level's budget is reused before the device is read
+/// again — the processor reading's own window (`kv_budget::SYSTEM_MEMORY_TTL`).
+const FLOW_ROOM_LEASE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// `SWARMLLM_FLOW_ROOM=per-level` reads the device at every flowing level, as
+/// before the lease (an A/B inside one binary).
+pub(crate) fn flow_room_is_leased() -> bool {
+    static LEASED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *LEASED.get_or_init(|| std::env::var("SWARMLLM_FLOW_ROOM").as_deref() != Ok("per-level"))
+}
+
+/// Flowing levels weighed against a leased budget, this process — proof the
+/// lease ran (tests and the pace probe read it).
+static FLOW_ROOM_LEASED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// [`FLOW_ROOM_LEASED`]'s count.
+#[cfg(test)]
+pub(crate) fn flow_levels_leased() -> u64 {
+    FLOW_ROOM_LEASED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// How long a cache whose prompt pass ran here is kept for the request's first
@@ -1705,6 +1739,72 @@ impl KvCacheStore {
             ranges_admitted: dashmap::DashMap::new(),
             awaiting_first_step: dashmap::DashMap::new(),
             prompt_pass_hold: PROMPT_PASS_HOLD,
+            flow_room_lease: std::sync::Mutex::new([None, None]),
+        }
+    }
+
+    /// The budget a flowing level whose forward newly holds nothing but
+    /// `flowing` bytes may be weighed against without reading the device —
+    /// `None` where it must read: no lease, one older than
+    /// [`FLOW_ROOM_LEASE`], or one taken for a smaller claim (the flow's store
+    /// grew, a real allocation).
+    ///
+    /// Why a flowing level may skip the reading (2026-11-25). Every flowing
+    /// forward claims the walk's checkpoint pair (`bytes_a_flowing_forward_may_add`),
+    /// so every level of a tree read the device — a synchronize and
+    /// `cuMemGetInfo`, 85-105 µs of a ~5.7 ms 0.8B level (Fable pass 11-24,
+    /// `docs/plans/level_replay.md`) — though the pair is the same bytes
+    /// again, let go as the next is taken: no growth boundary, which is all
+    /// the reading was ever for (`docs/invariants/memory.md` § "A card's free
+    /// memory is read after a synchronize": "off the per-token path"). The
+    /// budget a reading gives — `min(load-time, ours + free − margin)` — does
+    /// not move as THIS store's caches grow or snapshots go (both move bytes
+    /// between `ours` and `free`), so for a quarter of a second it is the
+    /// budget a fresh reading would give, but for memory another program took
+    /// meanwhile — which an ordinary decode step between growth boundaries
+    /// never re-reads either. The claim itself is still weighed every level,
+    /// against this store's occupancy as it is. Prior art: PyTorch's CUDA
+    /// caching allocator never reads the device's free memory before an
+    /// allocation — its cache, then `cudaMalloc`, then a flush of its cached
+    /// blocks and one retry; `cudaMemGetInfo` only builds the out-of-memory
+    /// message after all of those failed (`c10/cuda/CUDACachingAllocator.cpp`).
+    /// This repo's processor reading is reused for 250 ms (`SYSTEM_MEMORY_TTL`).
+    pub(crate) fn leased_flow_budget(&self, home: KvHome, flowing: u64) -> Option<u64> {
+        let lease = self
+            .flow_room_lease
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())[home.index()]?;
+        (lease.at.elapsed() < FLOW_ROOM_LEASE && flowing <= lease.flowing).then(|| {
+            FLOW_ROOM_LEASED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            lease.budget
+        })
+    }
+
+    /// A flowing level's claim of `flowing` bytes was granted against
+    /// `budget`, read off the device just now: later levels of no larger a
+    /// claim reuse it ([`Self::leased_flow_budget`]).
+    pub(crate) fn lease_flow_budget(&self, home: KvHome, flowing: u64, budget: u64) {
+        self.flow_room_lease
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())[home.index()] = Some(FlowRoomLease {
+            at: std::time::Instant::now(),
+            flowing,
+            budget,
+        });
+    }
+
+    /// Ages `home`'s lease past [`FLOW_ROOM_LEASE`] — tests only.
+    #[cfg(test)]
+    pub(crate) fn age_flow_room_lease(&self, home: KvHome) {
+        if let Some(lease) = self
+            .flow_room_lease
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())[home.index()]
+        .as_mut()
+        {
+            lease.at = std::time::Instant::now()
+                .checked_sub(FLOW_ROOM_LEASE * 2)
+                .unwrap_or(lease.at);
         }
     }
 
@@ -2574,6 +2674,47 @@ fn conversation_has_ended(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A flowing level reuses the budget a level of no smaller a claim read
+    /// within the lease, per memory — and reads again for a larger claim (the
+    /// store grew) or once the lease is old.
+    #[test]
+    fn a_flowing_levels_budget_is_leased_only_for_no_larger_a_claim_and_a_quarter_second() {
+        let store = KvCacheStore::new(std::time::Duration::from_secs(60));
+        assert_eq!(
+            store.leased_flow_budget(KvHome::Card, 100),
+            None,
+            "nothing leased yet"
+        );
+        let before = flow_levels_leased();
+        store.lease_flow_budget(KvHome::Card, 100, 5_000);
+        assert_eq!(store.leased_flow_budget(KvHome::Card, 100), Some(5_000));
+        assert_eq!(
+            store.leased_flow_budget(KvHome::Card, 60),
+            Some(5_000),
+            "a smaller claim"
+        );
+        assert!(
+            flow_levels_leased() >= before + 2,
+            "each leased level is counted"
+        );
+        assert_eq!(
+            store.leased_flow_budget(KvHome::Card, 101),
+            None,
+            "a larger claim is a real allocation and reads the device"
+        );
+        assert_eq!(
+            store.leased_flow_budget(KvHome::Host, 100),
+            None,
+            "one lease a memory"
+        );
+        store.age_flow_room_lease(KvHome::Card);
+        assert_eq!(
+            store.leased_flow_budget(KvHome::Card, 100),
+            None,
+            "an old lease reads again"
+        );
+    }
 
     /// A refusal's total is store-wide, and it says so.
     ///

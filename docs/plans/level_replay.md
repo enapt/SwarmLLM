@@ -251,6 +251,13 @@ Fable pass (memory `archive/fable_batch_1124.md` § 3) found every third level i
 gathers, `store_capacity_for`'s 32-slot floor) — also the replay key's misses — and the room claim runs
 `cuMemGetInfo` every flowing level for the scratch pair's term.
 
+**The room claim's reading is leased** (2026-11-25, the pass's lever (2)): a flowing level that newly allocates nothing
+weighs its claim against a reading ≤ 250 ms old (`KvCacheStore::leased_flow_budget`; `docs/invariants/memory.md` § "A
+card's free memory is read after a synchronize"). A captured 8-row level, median of four runs an arm interleaved, the
+card ≤ 66 °C before each: 0.8B 5.62 → 5.44 ms, 2B 9.66 → 9.45 — ~0.2 ms, twice `cuMemGetInfo`'s own 85-105 µs (the
+synchronize that went with it is the likely rest; not traced). Left of the pass's list: (1) reusing freed store slots
+(~0.25 ms a level averaged), (3) a device-fed level (~0.6-0.8 ms).
+
 **The trunk's products at 8 rows run on one tensor-core kernel** (2026-11-24): 2-8 rows of a Q8_0 weight go to
 `mul_mat_q8_0_rows_tc` ahead of MMQ and the vector kernel — no stream-k fixup, the same bits every launch. Mean level
 (best / median of eight passes, `SWARMLLM_QMATMUL_ROWS_TC=0` interleaved): 0.8B 6.46 / 6.95 → 5.67 / 5.78 ms, 2B

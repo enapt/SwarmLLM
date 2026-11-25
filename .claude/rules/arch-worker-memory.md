@@ -178,7 +178,7 @@ In `handle_forward` the FIRST piece of a `prompt_span` clears, restores and is a
 
 ## A card's free memory is read after a synchronize (2026-09-26)
 
-**`kv_budget::device_free_and_total_bytes`** synchronizes the stream before `mem_get_info` and adds `cuda_pool::reusable_bytes`; every budget decision reaches the card through `SplitModel::kv_budget_now`. Guard: `the_cards_free_memory_is_read_after_a_synchronize`; A/B `SWARMLLM_KV_DEVICE_SYNC=0`. `reply_reserve_positions(max_tokens)` is a REQUIRED argument of `ensure_room_for_prompt`; a refusal caused by OTHER conversations says wait (`other_conversations_hold_the_room`).
+**`kv_budget::device_free_and_total_bytes`** synchronizes the stream before `mem_get_info` and adds `cuda_pool::reusable_bytes`; every budget decision reaches the card through `SplitModel::kv_budget_now`. Guard: `the_cards_free_memory_is_read_after_a_synchronize`; A/B `SWARMLLM_KV_DEVICE_SYNC=0`. `reply_reserve_positions(max_tokens)` is a REQUIRED argument of `ensure_room_for_prompt`; a refusal caused by OTHER conversations says wait (`other_conversations_hold_the_room`). **A flowing level that newly allocates nothing reuses a reading ≤ 250 ms old** (`KvCacheStore::leased_flow_budget`: no new position, no larger flowing claim; a claim it would refuse reads the device first). A/B `SWARMLLM_FLOW_ROOM=per-level`.
 
 → `docs/invariants/memory.md` § "A card's free memory is read after a synchronize"
 
