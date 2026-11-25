@@ -7032,7 +7032,9 @@ its second token, rank 2, gap 0.104). Not yet seen on the real link: it needs th
 it. **The pre-release review the same day** found the step-aside could REFUSE what the split had served — a fresh spawn
 that does not load in the worker's place, or a conversation taking the worker before the retirement decision (#461's
 containment step-aside, v0.3.292 on, the same); where the retirement cannot happen the split now serves after all
-(`split_after_all`; test `an_overlapping_range_the_worker_cannot_be_replaced_for_is_split_not_refused`). **Left**: a far computer that two shapes
+(`split_after_all`; test `an_overlapping_range_the_worker_cannot_be_replaced_for_is_split_not_refused`, the fits-in-place
+arm; the `Retirement::Keep` arm — a conversation registering between that check and the decision — is a race with no
+test, checked by reading in the second review the same night). **Left**: a far computer that two shapes
 use in turn now reloads at each switch past the conversation gap; their union (`[12..48)`, 36 layers, against the
 58 the two copies held) would serve both as views (#449) — a respawn as the HULL where it fits whole on the card
 (only where the union is contiguous, and Petals-like: every placement there is one span, `choose_best_blocks`). It
