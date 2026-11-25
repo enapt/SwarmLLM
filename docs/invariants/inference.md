@@ -6705,7 +6705,9 @@ width keeps +36% (the 11-18 processor measure). Now the layer reads the whole tr
   four runs an arm interleaved, `~/swarmllm-gate/deep/lease1125/run_slots.console`): stores grown 864 →
   0 a run; a captured level's MEAN (the median hides the third level) 0.8B 6.14 → 5.59 ms (best 5.85
   → 5.44), 2B 10.19 → 9.48 (9.97 → 9.44); the levels flat at 5.3-5.5 / 9.3-9.6 ms where every third
-  read 6.2-6.6 / 10.2-11.5. Captured = ordinary bit for bit on both files at 8 and 16 rows. Prior art:
+  read 6.2-6.6 / 10.2-11.5. Captured = ordinary bit for bit on both files at 8 and 16 rows. On the real
+  link (9B TH↔AU, 0.8B drafting, with the leased claim, `docs/plans/level_replay.md`) the drafter's ms a
+  forward 15.5-15.6 → 15.0-15.2 (prose), and no reply speed beyond the ±5% spread. Prior art:
   vLLM's KV-cache manager hands a finished sequence's blocks to the next allocation and never compacts;
   llama.cpp's `find_slot` reuses an empty cell before it appends; epoch-based reclamation frees only
   once no reader of the epoch remains — here the rollback copy.

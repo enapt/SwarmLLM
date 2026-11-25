@@ -259,8 +259,15 @@ synchronize that went with it is the likely rest; not traced).
 
 **The store's freed slots are written again** (2026-11-25, the pass's lever (1); `docs/invariants/inference.md` § "And a
 forward's rows go where the walk left others"): stores grown 864 → 0 a pace run, a captured level's MEAN 0.8B 6.14 →
-5.59 ms, 2B 10.19 → 9.48 — 0.55-0.71 ms, twice the pass's ~0.25 estimate; the third-level spike gone. Left of the
-pass's list: (3) a device-fed level (~0.6-0.8 ms), (4) prestage during the network wait.
+5.59 ms, 2B 10.19 → 9.48 — 0.55-0.71 ms, twice the pass's ~0.25 estimate; the third-level spike gone. **On the real
+link both savings together are a drafter's half-millisecond a forward and no reply speed**: 9B TH [0,5) ↔ AU aa3d1e66,
+0.8B Q8_0 drafting, main `b17aee201`'s release card build, both on vs both off (`SWARMLLM_FLOW_SLOTS=compacted,
+SWARMLLM_FLOW_ROOM=per-level`) interleaved ×3 (`~/swarmllm-gate/deep/fr/real_link_rf9bslots_1125/`): the drafter's ms a
+forward (`drafting_ms / forwards`) prose 15.5-15.6 → 15.0-15.2, code 17.4 → 16.7 mean; replies code 24.74 → 24.72,
+prose 15.59 → 15.15 tok/s — the forward is 30-36 ms here (`here_ms_a_forward`, drafting and the near part about half
+each) and the replies' spread ±5%, so 1.5% cannot show. A forward here emits 0.69 tokens (64 in 93): what moves this
+split's speed is tokens a forward and the near part's time, not the drafter's host time. Left of the pass's list: (3) a
+device-fed level (~0.6-0.8 ms), (4) prestage during the network wait — each worth the same ~1-2% of a forward here.
 
 **The trunk's products at 8 rows run on one tensor-core kernel** (2026-11-24): 2-8 rows of a Q8_0 weight go to
 `mul_mat_q8_0_rows_tc` ahead of MMQ and the vector kernel — no stream-k fixup, the same bits every launch. Mean level
