@@ -129,6 +129,37 @@ the peer logged that request's `CancelInference` ~10 ms later, its worker
 remains: seeing the peer's room before choosing it (#237); a reply whose peer
 refuses mid-stream still ends (#236).
 
+**And before the next message it handles (2026-11-25, #501).** "In its main
+loop, between messages" was the loop's BOTTOM: after the next message and the
+drain behind it. The reader task marks a cancel (`reader_cancelled`) and does
+not wake the loop, so an idle worker settled a cancel only when the next message
+came, and only after handling it. On a computer serving part of a split, that
+next message is usually the coordinator's next request asking up front whether
+it fits (#252 (b)). During the README re-timing on 2026-11-25, Australia's card
+held one conversation of the 14B's far half. It refused every prose request that
+followed another by 130-220 ms ("has room for this conversation in 15 of the 23
+layers"), and served the same request 12 s later. Now `model_worker::apply_cancels`
+runs before every message the loop handles (the drain's too), and at the bottom
+as before. The reader does NOT queue the cancel to wake the loop instead. The
+loop would mark the request again after a dropped decode slot had removed its
+mark, and a router retry keeps the id (#749), so the retry would be skipped.
+Prior art: vLLM's `EngineCore` processes its input queue, aborts included,
+before every engine step, and vLLM #29987 aborts cancelled requests before a
+step's output.
+
+Rig `split_rig.sh backtoback` (Llama 3.2 3B; B holds the last two parts on the
+processor at `RAM_B=1700`, a 719 MB cache budget; two different ~7,000-token
+prompts, the second asked the moment the first's reply is back). On v0.3.310, B
+weighed q3's question 312 ms after q2's cancel, still counting q2's 420 MB
+(`live_tokens=49021`), and refused it. A's re-plan found nothing, and the reply
+failed with a 503 ("turned it down"). With the fix, B logged "released a
+cancelled request's KV cache … freed_mb=420" and then answered go ahead. That arm
+was a debug build, which reads a 7,000-token prompt about 7x slower than a
+release, so its replies outlived the 105 s segment wait. The verdict at the
+question is what the fix changes; the next field run shows the replies.
+Guard `a_worker_settles_the_cancels_before_each_message_it_handles` (planted
+self-test `the_cancel_order_guard_catches_a_message_handled_before_the_cancels`).
+
 ### A cache whose prompt pass ran here waits for its first step (2026-11-12, #448)
 
 The TTL sweep above bounds what nobody released, and measures "nobody" as ten

@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #501**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #502**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -8550,7 +8550,21 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-11-25** (#499)
+**Closed 2026-11-25** (#499, #501)
+- #501 — `P1` — **A request sent right after another was turned down by the computer serving part of it, for memory
+  the first had just finished with.** During the 11-25 README re-timing, Australia (serving the 14B split's far half)
+  refused every prose request that followed another by 130-220 ms ("has room for this conversation in 15 of the 23
+  layers"). The same request 12 s later was served. The coordinator's cancel (#238) reaches the worker's reader task,
+  which marks it and does not wake the main loop. The loop released a cancelled request's cache only AFTER the next
+  message, and that message was the coordinator's next up-front question (#252 (b)), weighed against the dead cache.
+  Fixed: `model_worker::apply_cancels` runs before every message the loop handles. Rig `split_rig.sh backtoback`
+  (Llama 3.2 3B, B's last two parts on the processor at `RAM_B=1700`, two ~7,000-token prompts back to back). On
+  v0.3.310, B refused q3's question 312 ms after q2's cancel, counting q2's 420 MB, and the reply failed (503).
+  With the fix (a debug build, too slow to finish 7,000-token replies), B released those 420 MB first and said go
+  ahead. Guard
+  `a_worker_settles_the_cancels_before_each_message_it_handles`. Prior art: vLLM's `EngineCore` processes aborts before
+  each engine step (and #29987 before a step's output); the evidence is `docs/invariants/memory.md` § "A conversation
+  that is over gives its room to one that is not".
 - #499 — `P3` — **A split reply that samples runs 9-25% slower than the greedy figure, where the offline replay said
   2-4%.** Measured on the Thailand-Australia 14B split at T 0 / 0.7 / 1.0 (code 42.0 / 38.1 / 31.6, prose 17.3 / 14.2 /
   13.7 tok/s; `~/swarmllm-gate/deep/fr/run_temp_1125.sh`): every forward takes as long, there are more of them. The flow

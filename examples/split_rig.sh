@@ -347,6 +347,14 @@
 #          it refused, A's re-plans and the routes A planned. An older release is
 #          the control: B refuses a forward after A has read the prompt and is
 #          barred. Default model llama-3.2-3b.
+#   backtoback peerkv's topology: one prompt asked twice, the second the moment
+#          the first's reply is back (as an agent asks). B's coordinator cancels
+#          q2 on B as it ends and asks B about q3's room a moment later; B must
+#          weigh the ask with q2's cache gone. Size RAM_B and B2B_REPEAT (the
+#          prompt's sentences, default 165: ~7,000 tokens, sized for RAM_B=1700) so
+#          B holds ONE such conversation, not two: q1 prints B's budget. Prints q3's ask verdict, A's re-plans and
+#          B's release/ask order (B's log at debug: ENV_B=RUST_LOG=…). v0.3.310
+#          is the control: B refuses q3's ask, counting q2's 420 MB (2026-11-25).
 #   refusepiece FUTURE_WORK #303: peerkv's shape, the long prompt only. Run
 #          with SWARMLLM_FAULT_REFUSE_DECRYPT=3: B treats its 3rd forward — a
 #          PIECE of the prompt — as undecryptable. An older release is the
@@ -416,7 +424,7 @@
 #          A's two whole hand-offs instead of B's own request (the real link's
 #          order, where B read the split's run from disk).
 #
-# usage: split_rig.sh split|reasoning|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv|peerkv|peerload|refusepiece|owntiming|holdings|givesway|slices <binary> [<binary for B>]
+# usage: split_rig.sh split|reasoning|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv|peerkv|backtoback|peerload|refusepiece|owntiming|holdings|givesway|slices <binary> [<binary for B>]
 #   MODEL      model id (default: tinyllama for split, llama-3.2-3b for kill
 #              and failover)
 #   SHARDS_A   shard indices A holds, comma-separated (default 0; kill: 0,LAST;
@@ -434,7 +442,7 @@
 #              default 400%) and reads it as its machine, so the room it advertises
 #              follows its own use, not the machine's free RAM (#162 b)
 #   EXTRA_TOML appended to EVERY node's config.toml (default: nothing)
-#   RAM_B      peerkv, peerload, givesway: B's `resources.max_ram_mb`, the same way
+#   RAM_B      peerkv, backtoback, peerload, givesway: B's `resources.max_ram_mb`, the same way
 #   RAM_A      latekv: A's `resources.max_ram_mb` (EXTRA_TOML may not open
 #              [resources] beside it)
 #   MODELS_DIR where the shards come from (default: the live node's)
@@ -498,7 +506,7 @@ rig_addr() {
 MODE="${1:?usage: split_rig.sh split|kill|failover|context|repeat|fetch|cache|remote|mixed|softunload <binary> [<binary for B>]}"
 BIN_A="${2:?binary}"
 BIN_B="${3:-$BIN_A}"
-case "$MODE" in split|reasoning|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|handoffcache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv|peerkv|peerload|refusepiece|refusechain|killchain|owntiming|holdings|retract|givesway|slices) ;; *) echo "mode must be split, reasoning, kill, failover, failover_mid, context, whole, continue, repeat, fetch, cache, handoffcache, splitcache, remote, mixed, disputed, spliced, disconnect, softunload, layerprice, keep, route, latekv, peerkv, peerload, refusepiece, refusechain, killchain, owntiming, holdings, retract, givesway or slices"; exit 2 ;; esac
+case "$MODE" in split|reasoning|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|handoffcache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv|peerkv|backtoback|peerload|refusepiece|refusechain|killchain|owntiming|holdings|retract|givesway|slices) ;; *) echo "mode must be split, reasoning, kill, failover, failover_mid, context, whole, continue, repeat, fetch, cache, handoffcache, splitcache, remote, mixed, disputed, spliced, disconnect, softunload, layerprice, keep, route, latekv, peerkv, backtoback, peerload, refusepiece, refusechain, killchain, owntiming, holdings, retract, givesway or slices"; exit 2 ;; esac
 # refusechain is remote's topology with one fault on C (#305).
 REFUSECHAIN=""; KILLCHAIN=""
 if [ "$MODE" = killchain ]; then
@@ -560,7 +568,7 @@ if [ "$MODE" = split ] || [ "$MODE" = repeat ] || [ "$MODE" = disconnect ] || [ 
     for s in $SHARDS; do case ",$SHARDS_A," in *",$s,"*) ;; *) WHOLE_A=0 ;; esac; done
     GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"
   fi
-elif [ "$MODE" = peerkv ] || [ "$MODE" = peerload ] || [ "$MODE" = refusepiece ] || [ "$MODE" = givesway ]; then
+elif [ "$MODE" = peerkv ] || [ "$MODE" = backtoback ] || [ "$MODE" = peerload ] || [ "$MODE" = refusepiece ] || [ "$MODE" = givesway ]; then
   [ "$N" -ge 3 ] || { echo "$MODE needs a model with at least 3 shard files here; $MODEL has $N"; exit 2; }
   PREV=$(echo "$SHARDS" | tail -2 | head -1)
   SHARDS_B="${SHARDS_B:-$PREV,$LAST}"
@@ -1461,6 +1469,31 @@ if [ "$MODE" = peerkv ]; then
   grep -m3 -oE 'route=[a-z_]+ segments=[0-9]+ nodes=[0-9a-f,]+' "$OUT/A.q2.log" | sed 's/^/peerkv: /'
   grep -m2 -oE 'verdict=Refused.{0,200}' "$OUT/B.q2.log" | sed 's/^/peerkv: B asked: /'
   grep -m2 -oE 'refusing this prompt before prefill.{0,200}' "$OUT/B.q2.log" | sed 's/^/peerkv: B forward: /'
+  exit 0
+fi
+if [ "$MODE" = backtoback ]; then
+  ask "What is the capital of France? Answer in one sentence." 16 q1 | tee "$OUT/replies.jsonl" | cut -c1-200
+  echo "backtoback: B's worker — $(grep -m1 'CPU worker KV budget' "$BASE/B/node.log" | grep -oE '(kv_budget_mb|typical_kv_mb|headroom_mb)=[0-9]+' | paste -sd' ')"
+  # Two prompts of one length that differ from their first words, so q3 reuses
+  # nothing q2 saved (#10) and needs a conversation's room of its own.
+  NOTES="$(for i in $(seq 1 "${B2B_REPEAT:-165}"); do printf 'A refrigerator moves heat from its inside to the room using a refrigerant that evaporates in the cold coils and condenses in the warm ones; the compressor drives the cycle and the thermostat decides when it runs. '; done)"
+  MARK_A=$(wc -l < "$BASE/A/node.log"); MARK_B=$(wc -l < "$BASE/B/node.log")
+  ask "Here are some notes on household appliances. ${NOTES}Using only these notes, say in one sentence what the compressor does." 16 q2 \
+    | tee -a "$OUT/replies.jsonl" | cut -c1-200
+  ask "These are a technician's notes on kitchen machines. ${NOTES}Using only these notes, say in one sentence what the thermostat does." 16 q3 \
+    | tee -a "$OUT/replies.jsonl" | cut -c1-200
+  tail -n +"$((MARK_A + 1))" "$BASE/A/node.log" > "$OUT/A.q23.log"
+  tail -n +"$((MARK_B + 1))" "$BASE/B/node.log" > "$OUT/B.q23.log"
+  echo "backtoback: B answered $(grep -c "answered a peer's up-front prompt admission" "$OUT/B.q23.log") asks," \
+    "refused $(grep -c "answered a peer's up-front prompt admission.*Refused" "$OUT/B.q23.log");" \
+    "A re-planned $(grep -c 'retrying with fresh pipeline' "$OUT/A.q23.log")," \
+    "A failed $(grep -c 'DIAG: inference FAILED' "$OUT/A.q23.log")"
+  grep -m2 -oE 'verdict=Refused.{0,160}' "$OUT/B.q23.log" | sed 's/^/backtoback: B asked: /'
+  # The order on B (the release line is debug): each cancel, the release it
+  # led to, and each ask's answer, by time.
+  grep -aE "request cancelled by daemon|released a cancelled request's KV cache|answered a peer's up-front prompt admission" "$OUT/B.q23.log" \
+    | grep -oE '^[0-9T:.-]+Z|request cancelled by daemon|released a cancelled.{0,120}|verdict=[A-Za-z]+' | paste -d' ' - - \
+    | sed 's/^/backtoback: B: /' | head -12
   exit 0
 fi
 if [ "$MODE" = givesway ]; then

@@ -15129,6 +15129,54 @@ fn the_kv_sweep_guard_catches_a_store_nobody_sweeps() {
     assert!(builds_and_sweeps_a_kv_store(wrapped));
 }
 
+/// Is every message a worker loop hands to `handle_daemon_msg` preceded by an
+/// `apply_cancels` call made since the message before it? The text before each
+/// hand-off, back to the previous one, must call it.
+fn every_message_is_handled_after_the_cancels_before_it(body: &str) -> bool {
+    let pieces: Vec<&str> = body.split("handle_daemon_msg(").collect();
+    pieces.len() > 1
+        && pieces[..pieces.len() - 1]
+            .iter()
+            .all(|before| before.contains("apply_cancels("))
+}
+
+/// A cancel that reached a worker before a message is settled before that
+/// message is handled (2026-11-25). The reader task marks a cancel and does not
+/// wake the loop, and the loop released a cancelled request's cache only after
+/// the NEXT message. On a computer serving part of a split, that next message
+/// is usually the coordinator's next request asking whether it fits: a card
+/// with room for one conversation turned it down for the cache the cancel had
+/// already ended, and the reply failed.
+#[test]
+fn a_worker_settles_the_cancels_before_each_message_it_handles() {
+    let src = std::fs::read_to_string(repo_root().join("src/inference/model_worker.rs"))
+        .expect("read model_worker.rs");
+    let body = fn_body(&src, "pub async fn run_worker(")
+        .expect("run_worker moved — move this guard with it");
+    assert!(
+        every_message_is_handled_after_the_cancels_before_it(body),
+        "every `handle_daemon_msg` call in `run_worker` must follow an `apply_cancels` \
+         call made since the message before it — a message weighed before the cancels \
+         queued ahead of it sees caches already ended"
+    );
+}
+
+/// The guard above, against the defect it exists to catch — planted.
+#[test]
+fn the_cancel_order_guard_catches_a_message_handled_before_the_cancels() {
+    let settled_after = "{ let m = rx.recv(); handle_daemon_msg(m);\n  for _ in 0..16 { apply_cancels(&c); handle_daemon_msg(m2); }\n  apply_cancels(&c); }";
+    assert!(!every_message_is_handled_after_the_cancels_before_it(
+        settled_after
+    ));
+    let settled_before = "{ let m = rx.recv(); apply_cancels(&c); handle_daemon_msg(m);\n  for _ in 0..16 { apply_cancels(&c); handle_daemon_msg(m2); } }";
+    assert!(every_message_is_handled_after_the_cancels_before_it(
+        settled_before
+    ));
+    assert!(!every_message_is_handled_after_the_cancels_before_it(
+        "{ apply_cancels(&c); }"
+    ));
+}
+
 /// The first libp2p-upnp release that backs off a mapping the router refused
 /// (libp2p PR 6128). 0.5.0 re-asked the moment each refusal came back, for the
 /// node's whole life.

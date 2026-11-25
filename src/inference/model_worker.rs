@@ -576,6 +576,21 @@ pub async fn run_worker(
         let mut shutdown = false;
         if let Some((msg, payload)) = next_msg {
             pool_may_hold_freed = true;
+            // A cancel that arrived before this message ends its request
+            // before the message is weighed (`apply_cancels`).
+            apply_cancels(
+                &cancelled,
+                &mut kv_released_for_cancel,
+                &mut slot_table,
+                &mut writer,
+                &models,
+                &kv_store,
+                &prefix_cache,
+                &mut flow_sessions,
+                &mut far_runs,
+                &mut block_drafts,
+            )
+            .await;
             // A step's hold is timed from its END (`clock_hold::note_handled`).
             let step = crate::inference::clock_hold::starts_a_hold(&msg);
             shutdown |= handle_daemon_msg(
@@ -612,6 +627,19 @@ pub async fn run_worker(
             for _ in 0..16 {
                 match ipc_rx.try_recv() {
                     Ok((m2, p2)) => {
+                        apply_cancels(
+                            &cancelled,
+                            &mut kv_released_for_cancel,
+                            &mut slot_table,
+                            &mut writer,
+                            &models,
+                            &kv_store,
+                            &prefix_cache,
+                            &mut flow_sessions,
+                            &mut far_runs,
+                            &mut block_drafts,
+                        )
+                        .await;
                         let step = crate::inference::clock_hold::starts_a_hold(&m2);
                         shutdown |= handle_daemon_msg(
                             m2,
@@ -748,37 +776,20 @@ pub async fn run_worker(
         }
 
         // Drop any decoding slot the daemon has abandoned before spending
-        // another tick on it, and free its KV. No reply is sent: the daemon
-        // already unregistered the response channel, so anything we emit would
-        // be discarded by the reader actor.
-        if !cancelled.is_empty() {
-            if !slot_table.is_empty() {
-                let range = slot_table.current_layer_range();
-                for slot in slot_table.take_matching(|s| cancelled.contains_key(&s.request_id)) {
-                    tracing::info!(
-                        request_id = %slot.request_id,
-                        generated = slot.generated_count(),
-                        "model-worker: dropping cancelled decode slot"
-                    );
-                    cancelled.remove(&slot.request_id);
-                    // A retried request still finds its prompt.
-                    let model = range.and_then(|(ls, le)| models.get(&(ls, le, 0, 1)));
-                    save_slot_prompt_when_done(&mut writer, &kv_store, &prefix_cache, model, &slot)
-                        .await;
-                    kv_store.clear_request(&slot.model_key, &slot.req_id_str);
-                }
-            }
-            // Here, in the main loop and between messages, no forward of a
-            // cancelled request can be running in this worker.
-            release_caches_of_cancelled(&cancelled, &mut kv_released_for_cancel, &kv_store);
-            flow_sessions.forget_cancelled(&cancelled);
-            far_runs.forget_cancelled(&cancelled);
-            block_drafts.forget_cancelled(&cancelled);
-            // Sweep cancels that never matched a request (the request had
-            // already finished when the cancel arrived).
-            cancelled.retain(|_, at| at.elapsed().as_secs() < CANCEL_RETENTION_SECS);
-            kv_released_for_cancel.retain(|id| cancelled.contains_key(id));
-        }
+        // another tick on it, and free its KV.
+        apply_cancels(
+            &cancelled,
+            &mut kv_released_for_cancel,
+            &mut slot_table,
+            &mut writer,
+            &models,
+            &kv_store,
+            &prefix_cache,
+            &mut flow_sessions,
+            &mut far_runs,
+            &mut block_drafts,
+        )
+        .await;
 
         // What the KV cache is holding, in bytes.
         //
@@ -1191,6 +1202,75 @@ fn worker_force_cpu() -> bool {
     WORKER_FORCE_CPU.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Everything a cancel ends, done now: a decoding slot the daemon abandoned is
+/// dropped (its prompt saved first, so a retried request still finds it — no
+/// reply is sent, the daemon already unregistered the response channel), each
+/// cancelled request's caches go once ([`release_caches_of_cancelled`]), and
+/// the flow, far run and block drafter it held are forgotten.
+///
+/// Run BEFORE every message the main loop handles, as well as after. The
+/// reader task marks a cancel the moment it arrives (`reader_cancelled`) and
+/// does not wake the loop; acting on the mark only after the NEXT message
+/// meant that message was weighed against a cache already dead. (The reader
+/// does not queue the cancel to wake the loop instead: the loop would record
+/// the mark again AFTER a dropped slot removed it, and a retry under the same
+/// id — a router retry keeps it — would be skipped.) That message
+/// is often the next request's question about room: a node serving a split's
+/// segment learns a request ended from its coordinator's cancel (#238), and
+/// the coordinator's next request asks it up front a round trip later
+/// (`PromptAdmissionAsk`, weighed by `admit_prompt_in`). On a card with room
+/// for one conversation the question was refused for the cache the cancel
+/// had ended — "has room for this conversation in 15 of the 23 layers" — and
+/// the request failed; the same request asked 12 s later was served
+/// (the 14B, Thailand ↔ Australia, 2026-11-25, `readme310h`).
+///
+/// Prior art: vLLM's `EngineCore` busy loop processes its input queue — new
+/// requests AND aborts — before every engine step (`_process_input_queue`
+/// then `_process_engine_step`), and vLLM #29987 ("Eagerly abort cancelled
+/// final-step requests") processes pending aborts immediately before a step's
+/// output, so a cancel is never settled after the work it should precede.
+#[allow(clippy::too_many_arguments)]
+async fn apply_cancels(
+    cancelled: &CancelledSet,
+    released: &mut std::collections::HashSet<Uuid>,
+    slot_table: &mut SlotTable,
+    writer: &mut IpcWriter,
+    models: &HashMap<(usize, usize, usize, usize), SplitModel>,
+    kv_store: &KvCacheStore,
+    prefix_cache: &PrefixCache,
+    flow_sessions: &mut FlowSessions,
+    far_runs: &mut FarRuns,
+    block_drafts: &mut SplitBlockDrafts,
+) {
+    if cancelled.is_empty() {
+        return;
+    }
+    if !slot_table.is_empty() {
+        let range = slot_table.current_layer_range();
+        for slot in slot_table.take_matching(|s| cancelled.contains_key(&s.request_id)) {
+            tracing::info!(
+                request_id = %slot.request_id,
+                generated = slot.generated_count(),
+                "model-worker: dropping cancelled decode slot"
+            );
+            cancelled.remove(&slot.request_id);
+            let model = range.and_then(|(ls, le)| models.get(&(ls, le, 0, 1)));
+            save_slot_prompt_when_done(writer, kv_store, prefix_cache, model, &slot).await;
+            kv_store.clear_request(&slot.model_key, &slot.req_id_str);
+        }
+    }
+    // Here, in the main loop and between messages, no forward of a cancelled
+    // request can be running in this worker.
+    release_caches_of_cancelled(cancelled, released, kv_store);
+    flow_sessions.forget_cancelled(cancelled);
+    far_runs.forget_cancelled(cancelled);
+    block_drafts.forget_cancelled(cancelled);
+    // Sweep cancels that never matched a request (the request had already
+    // finished when the cancel arrived).
+    cancelled.retain(|_, at| at.elapsed().as_secs() < CANCEL_RETENTION_SECS);
+    released.retain(|id| cancelled.contains_key(id));
+}
+
 /// Drop the cache of every cancelled request this worker has not released yet.
 ///
 /// A cancelled request's conversation is never read again, so its cache goes
@@ -1207,7 +1287,16 @@ fn release_caches_of_cancelled(
 ) {
     for request_id in cancelled.iter().map(|e| *e.key()).collect::<Vec<_>>() {
         if released.insert(request_id) {
+            let before = kv_store.occupancy().allocated_bytes;
             kv_store.cleanup_request_id(&request_id.to_string());
+            let after = kv_store.occupancy().allocated_bytes;
+            if after < before {
+                tracing::debug!(
+                    %request_id,
+                    freed_mb = (before - after) / (1024 * 1024),
+                    "model-worker: released a cancelled request's KV cache"
+                );
+            }
         }
     }
 }
