@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #495**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #501**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -7775,6 +7775,29 @@ nothing, the worker reads weights on `DaemonMsg::LoadRange`.
    `load_ms` lines.
 
 ### Packaging, release and operations
+
+#### #500 — A CUDA build's unit tests read this machine's graphics card: six fail there that pass in the default build
+`P3` · tests · **PARTIAL** (nine fixed by `b37de5e36`) — 2026-11-25 · history: rigs `~/swarmllm-gate/deep/dec1125/pool_tests{,_before}.log`, `m256/suite_on.log`
+
+CI never runs a card build's lib tests, so nothing showed it. The card build's lib suite at `--test-threads=2`
+(2026-11-24 19:37Z) failed 15. `b37de5e36` starts a test's pool with no card detected (`gpu_detected` =
+`!cfg!(test)`; every reader also asks `cfg!(feature = "candle-cuda")`, so only a card build's tests had taken this
+machine's real card): process_pool 11 → 2 failing in one card test build of each, none newly failing; the default
+build's 251 pool tests unchanged.
+Left:
+- `process_pool::admission_tests::a_split_spawn_leaves_room_for_the_plans_other_ranges_here` ("600 MB left for a
+  516 MB layer, plan noted: false") and `process_pool::tests::a_fresh_segment_is_weighed_at_both_ends_of_the_model`
+  (`Some(8)` against `Some(3)`): both reach another `cfg(feature = "candle-cuda")` path. Hypothesis, unchecked: the
+  real card check (`gpu_support::local_gpu_is_supported`) or a live card reading. Next: find the read and make it a
+  test input, as `test_card_in_play` is.
+- Four pass ALONE in both binaries and fail together at `--test-threads=2`: `split::tests::draft_trees::`
+  `{a_first_segment_records_its_shapes_before_a_reply_needs_them,
+  a_recording_whose_last_graph_is_made_is_finished_though_a_message_came, a_reply_after_the_idle_recording_makes_no_graph}`
+  and `layers::copies_beside_tests::a_splits_prompt_copies_arrive_intact_and_hold_a_bounded_share_of_the_card` — two
+  card tests on one card at once (graph recording, the card's memory share). Next: one process-wide lock the card
+  tests take, or run the card suite at `--test-threads=1`.
+Prior art: hermetic tests never read the machine's hardware (Bazel's test sandbox); the `serial_test` crate
+serialises tests that share one resource.
 
 #### #474 — chrono is unmaintained (RUSTSEC-2026-0543), and every timestamp here is chrono's
 `P4` · build · **OPEN** — 2026-11-17 (the sweep's `cargo audit`: a warning, not a failure — informational, no patched version) · history: `SECURITY.md` row RUSTSEC-2026-0543
