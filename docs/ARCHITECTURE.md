@@ -228,7 +228,10 @@ swarmllm/
 │                 fused_decode.cu — fusions that remove a launch + an alloc + a free
 │                 per layer each, bit-identical to the ops they replace;
 │                 decode_attn.cu — one-position attention over the KV cache, f32 or
-│                 the card's half cache (flash-decoding), NOT bit-identical;
+│                 the card's half cache (flash-decoding), NOT bit-identical; over the
+│                 half cache at head width 64/128/256 on the tensor cores (the group's
+│                 query heads as the mma rows, `decode_attn::mma_takes`), its runs
+│                 merged by a staged merge bit-identical to the serial one;
 │                 kv_append.cu — a step's f32 K or V written into the half cache in ONE
 │                 launch (cast + copy); delta_rule.cu — Qwen 3.5's gated delta rule,
 │                 every token of a layer in one launch, NOT bit-identical — and on a card its
@@ -1382,7 +1385,7 @@ measured:
 | CPU | standard | standard (GQA takes the grouped no-copy path inside it) |
 | CUDA | flash | standard, for every head geometry |
 
-*(Since 2026-09-29 "standard" decode on either device first tries `inference::decode_attn` — a purpose-built one-position kernel over the KV cache, CPU and card (`kernels/decode_attn.cu`); `SWARMLLM_DECODE_ATTN=standard` forces the matmul path. The rules below describe the dispatch above it.)*
+*(Since 2026-09-29 "standard" decode on either device first tries `inference::decode_attn` — a purpose-built one-position kernel over the KV cache, CPU and card (`kernels/decode_attn.cu`); `SWARMLLM_DECODE_ATTN=standard` forces the matmul path. Since v0.3.310 a card's half cache at head width 64, 128 or 256 runs on the tensor cores (`SWARMLLM_DECODE_ATTN_MMA=0` keeps the scalar body; rules in `docs/invariants/inference.md` § "A decode step over the half cache runs on the tensor cores"). The rules below describe the dispatch above it.)*
 
 **CPU decode is standard for every shape** (since c4cc3b16, 2026-08-16).
 `standard_attention` used to materialize the `repeat_kv` expansion every token —
