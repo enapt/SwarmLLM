@@ -7031,7 +7031,12 @@ back's 11), the 96-token asks 6.7-9.0 s then 4.5-7.0; old — "Hybrid placement:
 its second token, rank 2, gap 0.104). Not yet seen on the real link: it needs the far computer on a release carrying
 it. **Left**: a far computer that two shapes
 use in turn now reloads at each switch past the conversation gap; their union (`[12..48)`, 36 layers, against the
-58 the two copies held) would serve both as views (#449) — a respawn as the HULL where it fits whole on the card.
+58 the two copies held) would serve both as views (#449) — a respawn as the HULL where it fits whole on the card
+(only where the union is contiguous, and Petals-like: every placement there is one span, `choose_best_blocks`). It
+needs first a daemon-side answer to "will this model's views work": `view_of` refuses layers reading another
+layer's cache or per-layer inputs (Gemma 4 E2B/E4B) in the WORKER, so a hull spawned for such a model would turn a
+run the daemon thinks served into a refused forward. On the card the reload this would save took 2.4 s (7B, 22
+layers).
 
 **Built 2026-11-17 (contributor 1; shipped in v0.3.297-alpha)**: `ModelProcessPool::replacement_keeps_the_card`,
 asked beside the fit by a peer's UP-FRONT weighing only (`forward_would_load` → `peer_load_refusal`; a refusal at the
