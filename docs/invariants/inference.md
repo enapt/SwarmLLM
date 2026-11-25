@@ -6689,6 +6689,26 @@ width keeps +36% (the 11-18 processor measure). Now the layer reads the whole tr
   buffers the staging replaced, a free of memory made outside the capture, refused and leaked
   (gotcha #1165). Since, the drafter's call 25.7-28.4 against 37.3-40.2 ms a forward on the link,
   prose 13.9-14.9 / code 24.2-31.7 tok/s against 12.6-14.1 / 22.7-22.9 (`real_link_rf9b10_1123/`).
+  **And a forward's rows go where the walk left others** (2026-11-25; A/B `SWARMLLM_FLOW_SLOTS=compacted`):
+  every third level of a 0.8B drafter's 8-row tree had filled its 32-row store (`store_capacity_for`'s
+  floor) and gathered the kept rows into a new one — 90 gathers and a table — although the walk had left
+  most of the rows it held. Now the slots no kept row holds when a forward BEGINS (`FlowRows::note_begun`,
+  from `SsmState::flow_from` as it takes the rollback copy) take its new rows first
+  (`FlowRows::new_slots`), and the store grows only past them. *Must keep*: a slot the walk leaves
+  DURING a forward is written only from the next one — the rollback copy (`flow_begun`) shares the
+  store's buffers and still reads it (planted, the bug fails
+  `a_flows_new_rows_go_where_the_walk_left_old_ones` at "put back and read again"); the claim, made
+  before the forward begins, counts the room that forward will find (`room_for_the_next_forward`), and
+  `make_room` the room it has (`room`); on a card every kind's rows go in ONE launch through the lines'
+  table's tail (`cuda::put_rows`, `flow_rows_put_f32`), so a captured level is one topology wherever its
+  rows land — a copy, the same bits. *Measured* (pace probe, 8 rows, the card ≤ 66 °C before each run,
+  four runs an arm interleaved, `~/swarmllm-gate/deep/lease1125/run_slots.console`): stores grown 864 →
+  0 a run; a captured level's MEAN (the median hides the third level) 0.8B 6.14 → 5.59 ms (best 5.85
+  → 5.44), 2B 10.19 → 9.48 (9.97 → 9.44); the levels flat at 5.3-5.5 / 9.3-9.6 ms where every third
+  read 6.2-6.6 / 10.2-11.5. Captured = ordinary bit for bit on both files at 8 and 16 rows. Prior art:
+  vLLM's KV-cache manager hands a finished sequence's blocks to the next allocation and never compacts;
+  llama.cpp's `find_slot` reuses an empty cell before it appends; epoch-based reclamation frees only
+  once no reader of the epoch remains — here the rollback copy.
   What a change must keep: nothing that synchronizes, asks the card, uploads from the host, or lets
   go of memory made before the capture inside the captured body (gotchas #1163, #1165), and the same
   kernels whatever the level reads. → `docs/plans/recurrent_flow.md` § Stage 5,

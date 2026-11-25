@@ -682,10 +682,16 @@ impl DeltaNetWeights {
         let in_place = read_rows
             .as_ref()
             .filter(|_| device.is_cuda() && flow_reads_in_place());
+        // Where the new rows go, as the card reads it: the table's tail, so
+        // each kind is put in one launch however its slots fall (`put_rows_at`).
+        let new_on_card = match &read_rows {
+            Some(at) if device.is_cuda() => Some(at.table.narrow(0, ahead, seq_len)?),
+            _ => None,
+        };
         // A kind's new rows put in the store, and what the lines read of it:
         // read in place, every row written; else the lines' rows gathered.
         let read = |flow: &mut FlowRows, kind: RowKind, new: &Tensor| -> CandleResult<Tensor> {
-            let all = flow.put(kind, new)?;
+            let all = flow.put(kind, new, new_on_card.as_ref())?;
             match (&earlier, &read_rows) {
                 (Some(earlier), _) => Tensor::cat(&[kind.of(earlier), new], 1),
                 (None, Some(_)) if in_place.is_some() => Ok(all),
@@ -1332,6 +1338,14 @@ pub(crate) struct FlowRows {
     /// inputs are in the store.
     kept: Vec<usize>,
     slots: Vec<u32>,
+    /// Slots below the store's rows written that held no kept row when this
+    /// forward BEGAN (`SsmState::flow_from` → [`Self::note_begun`]),
+    /// ascending: a forward's new rows go there first ([`Self::new_slots`]).
+    /// Only those: a slot the walk leaves DURING a forward is still a row of
+    /// its rollback copy (`SsmState::flow_begun`, which shares the store's
+    /// buffers), and is written again from the next forward on. Empty in
+    /// the A/B arms (`SWARMLLM_FLOW_SLOTS=compacted`, the rows joined anew).
+    free: Vec<u32>,
     store: RowStore,
     /// On a card, where a forward's convolution writes its window and its
     /// delta rule the state after its last row — neither read: a tree's end is
@@ -1366,9 +1380,65 @@ impl FlowRows {
             before_anchor: at_base,
             kept: Vec::new(),
             slots: Vec::new(),
+            free: Vec::new(),
             store: RowStore::default(),
             scratch: None,
         }
+    }
+
+    /// A forward begins (`SsmState::flow_from`, as it takes the rollback
+    /// copy): the slots no kept row holds now are the ones its rows may be
+    /// written into ([`Self::free`]).
+    pub(super) fn note_begun(&mut self) {
+        self.free.clear();
+        if !flow_slots_reused() {
+            return;
+        }
+        let mut held = vec![false; self.store.len];
+        for &slot in &self.slots {
+            if let Some(h) = held.get_mut(slot as usize) {
+                *h = true;
+            }
+        }
+        self.free
+            .extend((0..self.store.len as u32).filter(|&s| !held[s as usize]));
+    }
+
+    /// Rows a forward may put in the store without making room
+    /// ([`Self::make_room`]): its free slots and the rows past those written.
+    fn room(&self) -> usize {
+        self.free.len() + self.store.capacity.saturating_sub(self.store.len)
+    }
+
+    /// The room the NEXT forward will find once it begins ([`Self::note_begun`]):
+    /// every slot no kept row holds — what the claim, made before the forward
+    /// begins (`SplitModel::claim_room_for_forward`), is weighed by.
+    fn room_for_the_next_forward(&self) -> usize {
+        if flow_slots_reused() {
+            self.store.capacity.saturating_sub(self.slots.len())
+        } else {
+            self.store.capacity.saturating_sub(self.store.len)
+        }
+    }
+
+    /// Where a forward's `rows` new rows go in the store: the free slots
+    /// first, ascending, then past the rows written. The same answer for
+    /// every kind's [`Self::put`], the tables ([`Self::rows_the_lines_read`])
+    /// and [`Self::keep_appended`]: nothing between them changes the store.
+    fn new_slots(&self, rows: usize) -> Vec<u32> {
+        let taken = rows.min(self.free.len());
+        let past = self.store.len as u32;
+        self.free[..taken]
+            .iter()
+            .copied()
+            .chain((0..(rows - taken) as u32).map(|i| past + i))
+            .collect()
+    }
+
+    /// The store's rows written once a forward's `rows` are put: the free
+    /// slots they take hold no new place.
+    fn written_after(&self, rows: usize) -> usize {
+        self.store.len + rows - rows.min(self.free.len())
     }
 
     /// The cache position of the tree's first row.
@@ -1392,12 +1462,20 @@ impl FlowRows {
     /// was refused on the drafter at 268 + 65 MB of a 308 MB budget and on the
     /// 9B's head at 308 + 184 of 491, and the reply went on at a third of its
     /// speed (2026-11-23, TH↔AU). Joined anew (the A/B arms), the rows written
-    /// and the new ones. `None` for a flow not yet begun.
+    /// and the new ones. `None` for a flow not yet begun. Asked BEFORE the
+    /// forward begins (both claim sites), so the room is what that forward
+    /// will find (`room_for_the_next_forward`): its free slots counted.
     pub(crate) fn rows_a_forward_may_allocate(flow: Option<&Self>, rows: usize) -> usize {
-        let (len, capacity, kept) =
-            flow.map_or((0, 0, 0), |f| (f.store.len, f.store.capacity, f.kept.len()));
+        let (len, capacity, kept, room) = flow.map_or((0, 0, 0, 0), |f| {
+            (
+                f.store.len,
+                f.store.capacity,
+                f.kept.len(),
+                f.room_for_the_next_forward(),
+            )
+        });
         match flow_rows_mode() {
-            FlowRowsMode::Stored if len + rows <= capacity => 0,
+            FlowRowsMode::Stored if rows <= room => 0,
             FlowRowsMode::Stored => store_capacity_for(kept + rows).saturating_sub(capacity),
             FlowRowsMode::Joined | FlowRowsMode::PerLayer => len + rows,
         }
@@ -1663,8 +1741,8 @@ impl FlowRows {
     }
 
     /// Which rows of the store a forward's lines read once its `new` rows
-    /// are [`Self::put`] after the rows written: the `earlier` rows on them,
-    /// then every new row — `None` where no earlier row is read, the new rows
+    /// are [`Self::put`] where [`Self::new_slots`] says: the `earlier` rows on
+    /// them, then every new row — `None` where no earlier row is read, the new rows
     /// being the lines' own, unless `captured`. One gather a kind.
     ///
     /// `captured`: a level captured as a CUDA graph gathers even then, so
@@ -1682,10 +1760,9 @@ impl FlowRows {
         if earlier.is_empty() && !captured {
             return Ok(None);
         }
-        let len = self.store.len;
-        let bound = len + new;
+        let bound = self.written_after(new);
         let mut at = self.slots_of(earlier)?;
-        at.extend((len..bound).map(|i| i as u32));
+        at.extend(self.new_slots(new));
         // A kernel reads the store through these (`SlotTable`): none may name
         // a row past the ones the store holds once the new rows are put.
         if let Some(past) = at.iter().find(|&&slot| slot as usize >= bound) {
@@ -1698,13 +1775,13 @@ impl FlowRows {
     }
 
     /// Makes room in the store for a forward's `rows` new rows, BEFORE its
-    /// tables name slots ([`Self::rows_the_lines_read`]): a store that cannot
-    /// take them gathers the rows still kept to the front of a larger one
+    /// tables name slots ([`Self::rows_the_lines_read`]): a store whose free
+    /// slots and unwritten rows ([`Self::room`]) cannot take them gathers the
+    /// rows still kept to the front of a larger one
     /// ([`store_capacity_for`]), and their slots follow. Joined anew (the A/B
     /// arms) there is always room.
     pub(super) fn make_room(&mut self, rows: usize) -> CandleResult<()> {
-        if flow_rows_mode() != FlowRowsMode::Stored || self.store.len + rows <= self.store.capacity
-        {
+        if flow_rows_mode() != FlowRowsMode::Stored || rows <= self.room() {
             return Ok(());
         }
         let capacity = store_capacity_for(self.kept.len() + rows);
@@ -1719,6 +1796,8 @@ impl FlowRows {
             self.store.capacity = capacity;
             return Ok(());
         };
+        #[cfg(test)]
+        FLOW_STORE_GROWTHS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // ONE gather a kind makes the whole new store: the kept rows' slots,
         // then the first of them again up to the capacity — rows past the
         // kept ones are only ever read after `put` writes them (a table names
@@ -1759,31 +1838,44 @@ impl FlowRows {
         self.slots = (0..self.kept.len() as u32).collect();
         self.store.len = self.kept.len();
         self.store.capacity = capacity;
+        // The store is new: no slot past the kept rows has been written.
+        self.free.clear();
         Ok(())
     }
 
-    /// Writes a forward's new rows of `kind` after the rows written
-    /// ([`Self::make_room`] made room), and answers every row written with
-    /// them, `[b, len + new, …]` — copied once, in place, the rows held never
+    /// Writes a forward's new rows of `kind` where [`Self::new_slots`] says —
+    /// slots the walk left first, then after the rows written
+    /// ([`Self::make_room`] made room) — and answers every row written with
+    /// them, `[b, written, …]` — copied once, in place, the rows held never
     /// copied again ([`FlowRowsMode::Stored`]); joined anew in the A/B arms.
+    /// `on_card`: the slots as the forward's card reads them (the tail of
+    /// its lines' table, [`Self::rows_the_lines_read`]), so a level writes
+    /// its rows in ONE launch a kind wherever they land (`cuda::put_rows`).
     /// The rows count as written once every kind is put
     /// ([`Self::keep_appended`]): a forward that fails between leaves them to
     /// the next.
-    pub(super) fn put(&mut self, kind: RowKind, new: &Tensor) -> CandleResult<Tensor> {
+    pub(super) fn put(
+        &mut self,
+        kind: RowKind,
+        new: &Tensor,
+        on_card: Option<&Tensor>,
+    ) -> CandleResult<Tensor> {
         let new = new.contiguous()?;
         let rows = new.dim(1)?;
         let (len, capacity) = (self.store.len, self.store.capacity);
+        let slots = self.new_slots(rows);
+        let written = self.written_after(rows);
         let slot = &mut self.store.kinds[kind as usize];
         match flow_rows_mode() {
             FlowRowsMode::Stored => {
                 if slot.is_none() {
                     let mut dims = new.dims().to_vec();
-                    dims[1] = capacity.max(len + rows);
+                    dims[1] = capacity.max(written);
                     *slot = Some(Tensor::zeros(dims, new.dtype(), new.device())?);
                 }
                 let held = slot.as_ref().expect("made above");
-                held.slice_set(&new, 1, len)?;
-                held.narrow(1, 0, len + rows)
+                put_rows_at(held, &new, &slots, len, on_card)?;
+                held.narrow(1, 0, written)
             }
             FlowRowsMode::Joined | FlowRowsMode::PerLayer => {
                 let all = match slot.as_ref() {
@@ -1807,12 +1899,17 @@ impl FlowRows {
         debug_assert_eq!(before, self.read);
         self.parents.extend_from_slice(parents);
         self.read = before + parents.len();
-        let len = self.store.len;
+        let new = self.new_slots(parents.len());
+        let written = self.written_after(parents.len());
         for (i, _) in live.iter().enumerate().filter(|(_, live)| **live) {
             self.kept.push(before + i);
-            self.slots.push((len + i) as u32);
+            self.slots.push(new[i]);
         }
-        self.store.len = len + parents.len();
+        // The free slots the rows took; a row not kept (`live` false) leaves
+        // its slot free from the next forward on (`note_begun`).
+        let taken = parents.len().min(self.free.len());
+        self.free.drain(..taken);
+        self.store.len = written;
     }
 
     /// A forward's new rows (`parents` as tree rows, the first at tree row
@@ -2358,6 +2455,42 @@ fn flow_growth_copied() -> bool {
     *ON.get_or_init(|| std::env::var("SWARMLLM_FLOW_GROWTH").as_deref() == Ok("copied"))
 }
 
+/// Whether a flow's new rows go into the slots the walk left
+/// ([`FlowRows::new_slots`]) — the default — rather than only after the rows
+/// written, the kept rows gathered into a new store whenever it is full:
+/// `SWARMLLM_FLOW_SLOTS=compacted`, as before 2026-11-25. Stored rows only
+/// ([`FlowRowsMode::Stored`]). Read once.
+///
+/// Every third level of a 0.8B drafter's 8-row tree grew its 32-row store
+/// (`store_capacity_for`'s floor): 90 gathers and their table, ~0.75 ms of
+/// that level (memory `archive/fable_batch_1124.md` § 3), although the walk had
+/// left most of the rows it held.
+///
+/// Prior art: vLLM's KV-cache manager hands a finished sequence's blocks to
+/// the next allocation from a free queue and never compacts; llama.cpp's
+/// `llama_kv_cache::find_slot` reuses any empty cell before it appends; and
+/// epoch-based reclamation (Fraser 2004; crossbeam-epoch) frees memory only once
+/// no reader of the epoch that held it remains — here the forward's rollback
+/// copy, so a slot is reused only from the forward after the one that left it.
+fn flow_slots_reused() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        flow_rows_mode() == FlowRowsMode::Stored
+            && std::env::var("SWARMLLM_FLOW_SLOTS").as_deref() != Ok("compacted")
+    })
+}
+
+/// Stores grown this process, a layer each ([`FlowRows::make_room`]'s
+/// gathers): what the pace probe prints, so an A/B of
+/// `SWARMLLM_FLOW_SLOTS=compacted` shows the reuse fired.
+#[cfg(test)]
+static FLOW_STORE_GROWTHS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(all(test, feature = "candle-cuda"))]
+pub(super) fn flow_store_growths() -> u64 {
+    FLOW_STORE_GROWTHS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 fn flow_rows_mode() -> FlowRowsMode {
     static MODE: std::sync::OnceLock<FlowRowsMode> = std::sync::OnceLock::new();
     *MODE.get_or_init(|| match std::env::var("SWARMLLM_FLOW_STORE").as_deref() {
@@ -2437,6 +2570,53 @@ fn store_capacity_for(rows: usize) -> usize {
     (rows + rows / 2).max(32).next_multiple_of(32)
 }
 
+/// Writes `new`'s rows `[b, rows, …]` to rows `slots` of `store`
+/// ([`FlowRows::put`]): on a card in one launch through `on_card` (the slots
+/// there, `cuda::put_rows`) — every level the same kernel, a captured one
+/// included, wherever its rows land; else one copy a run of slots, the rows
+/// past those written (`at`) in one.
+fn put_rows_at(
+    store: &Tensor,
+    new: &Tensor,
+    slots: &[u32],
+    at: usize,
+    on_card: Option<&Tensor>,
+) -> CandleResult<()> {
+    #[cfg(feature = "candle-cuda")]
+    if let Some(on_card) = on_card {
+        if store.device().is_cuda() && cuda::put_rows(store, new, on_card)? {
+            return Ok(());
+        }
+    }
+    #[cfg(not(feature = "candle-cuda"))]
+    let _ = on_card;
+    if slots.iter().enumerate().all(|(i, &s)| s as usize == at + i) {
+        return store.slice_set(new, 1, at);
+    }
+    // Rows into slots the walk left, with no table on the card: an
+    // uncaptured level reading no earlier row (`rows_the_lines_read`).
+    #[cfg(feature = "candle-cuda")]
+    if store.device().is_cuda()
+        && cuda::put_rows(store, new, &rows_on(slots.to_vec(), store.device())?)?
+    {
+        return Ok(());
+    }
+    let mut i = 0;
+    while i < slots.len() {
+        let mut end = i + 1;
+        while end < slots.len() && slots[end] == slots[end - 1] + 1 {
+            end += 1;
+        }
+        store.slice_set(
+            &new.narrow(1, i, end - i)?.contiguous()?,
+            1,
+            slots[i] as usize,
+        )?;
+        i = end;
+    }
+    Ok(())
+}
+
 /// Which of a row's inputs ([`SsmRows`]) a tensor of the store holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum RowKind {
@@ -2459,12 +2639,13 @@ impl RowKind {
     }
 }
 
-/// A flow's rows' inputs, a tensor a kind (`[b, capacity, …]`), in the order
-/// forwards wrote them: a forward's rows go at `len..` ([`FlowRows::put`]). A
-/// kept row's place is its slot (`FlowRows::slots`); a row the walk left
-/// stays until the store is full, when the rows still kept are gathered to
-/// the front of a larger one ([`FlowRows::make_room`]). Joined anew (the A/B
-/// arms) each tensor holds exactly the rows written.
+/// A flow's rows' inputs, a tensor a kind (`[b, capacity, …]`): a forward's
+/// rows go into the slots the walk had left when it began, then at `len..`
+/// ([`FlowRows::new_slots`], [`FlowRows::put`]). A kept row's place is its
+/// slot (`FlowRows::slots`); a store with no room left for a forward's rows
+/// has the rows still kept gathered to the front of a larger one
+/// ([`FlowRows::make_room`]). Joined anew (the A/B arms) each tensor holds
+/// exactly the rows written.
 #[derive(Debug, Clone, Default)]
 struct RowStore {
     kinds: [Option<Tensor>; 5],
@@ -3618,6 +3799,88 @@ mod cuda {
         // sequence of `rows` ≤ cap rows: qk [cap, 2·nk, kd], v [cap, nv, vd]
         // and g / beta [cap, nv] contiguous, the states [nv, vd, kd] with
         // kd == vd ∈ {64, 128}; it writes `into`'s state only, never `read`'s.
+        unsafe { builder.launch(cfg) }.w()?;
+        Ok(true)
+    }
+
+    /// [`super::FlowRows::put`] on a card: row r of `new` `[1, rows, …]` to row
+    /// `slots[r]` of `store` `[1, capacity, …]` (`flow_rows_put_f32`), one
+    /// launch whatever the slots — so a captured level is one topology
+    /// wherever its rows land. `false`, nothing written, outside its scope:
+    /// one sequence, f32, contiguous, the same row shape, `slots` `[rows]` u32.
+    pub(super) fn put_rows(store: &Tensor, new: &Tensor, slots: &Tensor) -> Result<bool> {
+        use candle_core::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
+        use candle_core::cuda_backend::WrapErr;
+
+        let (store_dims, new_dims) = (store.dims(), new.dims());
+        if store.dtype() != DType::F32
+            || new.dtype() != DType::F32
+            || slots.dtype() != DType::U32
+            || !store.is_contiguous()
+            || !new.is_contiguous()
+            || !slots.is_contiguous()
+            || store_dims.len() < 2
+            || store_dims.len() != new_dims.len()
+            || store_dims[0] != 1
+            || new_dims[0] != 1
+            || store_dims[2..] != new_dims[2..]
+            || slots.dims() != [new_dims[1]]
+        {
+            return Ok(false);
+        }
+        let (capacity, rows) = (store_dims[1], new_dims[1]);
+        let width: usize = store_dims[2..].iter().product();
+        if rows == 0 || width == 0 {
+            return Ok(true);
+        }
+        let held: Vec<_> = [store, new, slots]
+            .iter()
+            .map(|t| t.storage_and_layout())
+            .collect();
+        let mut cuda = Vec::with_capacity(3);
+        for (storage, layout) in &held {
+            let candle_core::Storage::Cuda(cs) = &**storage else {
+                return Ok(false);
+            };
+            let Some(range) = layout.contiguous_offsets() else {
+                return Ok(false);
+            };
+            cuda.push((cs, range));
+        }
+        let [(store_cs, store_at), (new_cs, new_at), (slots_cs, slots_at)] = cuda.as_slice() else {
+            return Ok(false);
+        };
+        let dev = store_cs.device.clone();
+        let into = store_cs
+            .as_cuda_slice::<f32>()?
+            .slice(store_at.0..store_at.1);
+        let from = new_cs.as_cuda_slice::<f32>()?.slice(new_at.0..new_at.1);
+        let at = slots_cs
+            .as_cuda_slice::<u32>()?
+            .slice(slots_at.0..slots_at.1);
+        let func = dev.get_or_load_custom_func(
+            "flow_rows_put_f32",
+            "swarmllm_delta_rule",
+            super::DELTA_RULE_PTX,
+        )?;
+        let cfg = LaunchConfig {
+            grid_dim: (rows as u32, 1, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let (width_i, capacity_i) = (width as i32, capacity as i32);
+        let mut builder = func.builder();
+        builder.arg(&from);
+        builder.arg(&into);
+        builder.arg(&at);
+        builder.arg(&width_i);
+        builder.arg(&capacity_i);
+        // SAFETY: ffi. `new` is `rows` contiguous f32 rows of `width`, `store`
+        // `capacity` of them, `slots` `rows` u32; block r copies row r to row
+        // `slots[r]`, skipping one past `capacity`. The store is written
+        // through a read view, ordered by the ONE stream per device, as
+        // `DeltaRule` writes its `state_out`; `new` is another buffer (a
+        // forward's fresh rows, never the store).
         unsafe { builder.launch(cfg) }.w()?;
         Ok(true)
     }
@@ -5254,7 +5517,13 @@ mod tests {
             assert!(!flow.kept.is_empty());
             if flow_rows_mode() == FlowRowsMode::Stored {
                 let row = store / flow.store.capacity as u64;
-                let room = flow.store.capacity - flow.store.len;
+                // The room the next forward finds: every slot no kept row
+                // holds, the slots the walk left counted (`note_begun`).
+                let room = if flow_slots_reused() {
+                    flow.store.capacity - flow.kept.len()
+                } else {
+                    flow.store.capacity - flow.store.len
+                };
                 assert!(room > 0);
                 assert_eq!(h.bytes_a_flowing_forward_may_add(room), states);
                 assert_eq!(
@@ -5448,6 +5717,120 @@ mod tests {
             }
         });
         assert_eq!((rows, states), (64, 9), "every row and state shown");
+    }
+
+    /// A flow's new rows go into the slots the walk left
+    /// ([`FlowRows::new_slots`]): twenty forwards of four rows, the walk two
+    /// rows down each time, and the store never holds more than its first
+    /// eight rows — compacted, it filled its 32 every eighth forward — while
+    /// every row writes what its line read alone writes, 0.0 apart. And each
+    /// forward put back where it began (a later layer refused) and read again
+    /// writes what it wrote: the slots its own walk left are never written
+    /// in that forward, so the copy it is put back to still holds the rows
+    /// the walk replays.
+    #[test]
+    fn a_flows_new_rows_go_where_the_walk_left_old_ones() {
+        use crate::inference::draft_tree::DraftTree;
+        if !flow_slots_reused() {
+            eprintln!(
+                "SKIPPED: the store is compacted (SWARMLLM_FLOW_SLOTS / SWARMLLM_FLOW_STORE)"
+            );
+            return;
+        }
+        const FORWARDS: usize = 20;
+        let device = Device::Cpu;
+        let w = weights_of(&device, true);
+        let pool = exact(Tensor::randn(0f32, 1.0, (1, 64, 8), &device).unwrap(), 8.0);
+        // Forward k sends rows 4k..4k+4: 4k (under the last forward's 4k−3)
+        // and 4k+1 the walk's line, 4k+2 and 4k+3 a branch under 4k it leaves.
+        let mut parents: Vec<Option<usize>> = Vec::new();
+        for k in 0..FORWARDS {
+            let r = 4 * k;
+            parents.extend([r.checked_sub(3), Some(r), Some(r), Some(r + 2)]);
+        }
+        let input = |row: usize| 3 + row % 61;
+        let line = |row: usize| {
+            let mut rows = vec![row];
+            while let Some(p) = parents[*rows.last().unwrap()] {
+                rows.push(p);
+            }
+            rows.iter().rev().map(|&r| input(r)).collect::<Vec<_>>()
+        };
+        let alone = |line: &[usize]| {
+            let mut s = None;
+            w.forward_deltanet(&pool.narrow(1, 0, 3).unwrap(), &mut s, 0)
+                .unwrap();
+            let rows: Vec<Tensor> = line
+                .iter()
+                .map(|&i| pool.narrow(1, i, 1).unwrap())
+                .collect();
+            let out = w
+                .forward_deltanet(&Tensor::cat(&rows, 1).unwrap(), &mut s, 3)
+                .unwrap();
+            out.narrow(1, line.len() - 1, 1).unwrap()
+        };
+        let send = |held: &mut Option<SsmState>, k: usize| {
+            let rows = 4 * k..4 * k + 4;
+            let walk = if k == 0 { 0 } else { 4 * k - 3 };
+            let shape = DraftTree::new(
+                3,
+                parents[..rows.end]
+                    .iter()
+                    .map(|p| p.map(|p| p as u16))
+                    .collect(),
+            )
+            .unwrap();
+            let index_pos = 3 + rows.start;
+            let (positions, visible) = shape.rows_for(index_pos, rows.len()).unwrap();
+            let x: Vec<Tensor> = rows.map(|r| pool.narrow(1, input(r), 1).unwrap()).collect();
+            let _flow =
+                super::super::RowPositions::for_tree_walked(positions, visible, Some(walk as u32));
+            w.forward_deltanet(&Tensor::cat(&x, 1).unwrap(), held, index_pos)
+                .unwrap()
+        };
+        let mut held = None;
+        w.forward_deltanet(&pool.narrow(1, 0, 3).unwrap(), &mut held, 0)
+            .unwrap();
+        let mut reused = 0;
+        for k in 0..FORWARDS {
+            let flow = held.as_ref().unwrap().flow.as_ref();
+            let (len_before, kept_before) = flow.map_or((0, 0), |f| (f.store.len, f.kept.len()));
+            let out = send(&mut held, k);
+            for i in 0..4 {
+                let row = 4 * k + i;
+                assert_eq!(
+                    max_abs_diff(&out.narrow(1, i, 1).unwrap(), &alone(&line(row))),
+                    0.0,
+                    "forward {k}: row {row}, its line {:?}",
+                    line(row)
+                );
+            }
+            let flow = held.as_ref().unwrap().flow.as_ref().unwrap();
+            if flow.store.len < len_before + 4 {
+                reused += 1;
+            }
+            assert!(
+                flow.store.len <= 8 && flow.store.capacity == 32,
+                "forward {k}: the store holds {} of {} rows, {kept_before} kept as it began",
+                flow.store.len,
+                flow.store.capacity
+            );
+            if k == 0 {
+                continue;
+            }
+            // Put back where it began and read again: what it wrote.
+            let h = held.as_mut().unwrap();
+            assert!(h.can_rewind_to(3 + 4 * k) && h.rewind_to(3 + 4 * k).unwrap());
+            assert_eq!(
+                max_abs_diff(&send(&mut held, k), &out),
+                0.0,
+                "forward {k}, put back and read again"
+            );
+        }
+        assert!(
+            reused >= FORWARDS - 2,
+            "rows went where the walk left others: {reused}"
+        );
     }
 
     /// [`flowing_script`] on a card (`docs/plans/recurrent_flow.md` stage 2)

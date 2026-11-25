@@ -3422,6 +3422,13 @@ impl SsmState {
     pub(crate) fn flow_from(&mut self, base: usize, index_pos: usize) -> CandleResult<()> {
         let staged = self.flow_begun.as_ref().is_some_and(|b| b.at == index_pos)
             && qwen35::capturing(self.current.conv_state.device());
+        // The slots the forward may write its rows into are the ones its
+        // rollback copy, taken now, holds no row in (`FlowRows::note_begun`).
+        if !staged {
+            if let Some(flow) = self.flow.as_mut() {
+                flow.note_begun();
+            }
+        }
         let begun = (!staged).then(|| FlowBegun {
             at: index_pos,
             flow: self.flow.clone().map(Box::new),
@@ -6687,6 +6694,13 @@ impl LayerWeights {
 pub(crate) mod moe_card;
 mod qwen35;
 pub(crate) use qwen35::{GroupedValueHeads, InputProjections, KernelOrder, ValueHeadOrder};
+
+/// Flow stores grown this process, a layer each (`qwen35::FlowRows::make_room`):
+/// the pace probe's evidence that a store's freed slots were written again.
+#[cfg(all(test, feature = "candle-cuda"))]
+pub(crate) fn flow_store_growths() -> u64 {
+    qwen35::flow_store_growths()
+}
 
 #[cfg(test)]
 mod batched_attention_tests {

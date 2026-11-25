@@ -255,8 +255,12 @@ gathers, `store_capacity_for`'s 32-slot floor) — also the replay key's misses 
 weighs its claim against a reading ≤ 250 ms old (`KvCacheStore::leased_flow_budget`; `docs/invariants/memory.md` § "A
 card's free memory is read after a synchronize"). A captured 8-row level, median of four runs an arm interleaved, the
 card ≤ 66 °C before each: 0.8B 5.62 → 5.44 ms, 2B 9.66 → 9.45 — ~0.2 ms, twice `cuMemGetInfo`'s own 85-105 µs (the
-synchronize that went with it is the likely rest; not traced). Left of the pass's list: (1) reusing freed store slots
-(~0.25 ms a level averaged), (3) a device-fed level (~0.6-0.8 ms).
+synchronize that went with it is the likely rest; not traced).
+
+**The store's freed slots are written again** (2026-11-25, the pass's lever (1); `docs/invariants/inference.md` § "And a
+forward's rows go where the walk left others"): stores grown 864 → 0 a pace run, a captured level's MEAN 0.8B 6.14 →
+5.59 ms, 2B 10.19 → 9.48 — 0.55-0.71 ms, twice the pass's ~0.25 estimate; the third-level spike gone. Left of the
+pass's list: (3) a device-fed level (~0.6-0.8 ms), (4) prestage during the network wait.
 
 **The trunk's products at 8 rows run on one tensor-core kernel** (2026-11-24): 2-8 rows of a Q8_0 weight go to
 `mul_mat_q8_0_rows_tc` ahead of MMQ and the vector kernel — no stream-k fixup, the same bits every launch. Mean level

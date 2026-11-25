@@ -1502,6 +1502,13 @@ fn flowing_levels_pace_captured_and_op_by_op() {
             "flowing levels pace: {} levels weighed against a leased budget so far this process",
             super::super::kv_cache::flow_levels_leased()
         );
+        // Stores grown, a layer each (`FlowRows::make_room`): a store that
+        // writes its freed slots again grows only past them
+        // (`SWARMLLM_FLOW_SLOTS=compacted` grows it whenever it is full).
+        eprintln!(
+            "flowing levels pace: {} flow stores grown (a layer each) so far this process",
+            crate::inference::layers::flow_store_growths()
+        );
         if let DecodeGraphSlot::On(graph) = &model.decode_graph {
             let (launched, refused) = graph.launches();
             let (made, updated) = graph.made_and_updated();

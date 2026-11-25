@@ -709,3 +709,25 @@ extern "C" __global__ void __launch_bounds__(128) l2_norm_rows_f32_d128(
     const float eps) {
     l2_norm_rows_body<128>(x, out, rows, eps);
 }
+
+// A flowing forward's new rows written into its store (`qwen35::FlowRows::put`):
+// row r of `src` [rows, width] to row `slots[r]` of `store` [capacity, width] —
+// the slots the walk left are written again (`FlowRows::new_slots`), so the
+// slots are not one run, and ONE launch a kind covers every pattern of them:
+// a captured level is one topology however its rows land. A copy: the same
+// bits as `slice_set`. One sequence. Grid (rows), block 256; a slot past the
+// store's rows is checked on the host (`FlowRows::rows_the_lines_read`) and
+// skipped here.
+extern "C" __global__ void flow_rows_put_f32(
+    const float *__restrict__ src, float *__restrict__ store,
+    const unsigned int *__restrict__ slots, const int width, const int capacity) {
+    const unsigned int slot = slots[blockIdx.x];
+    if (slot >= (unsigned int)capacity) {
+        return;
+    }
+    const float *from = src + (size_t)blockIdx.x * width;
+    float *to = store + (size_t)slot * width;
+    for (int i = threadIdx.x; i < width; i += blockDim.x) {
+        to[i] = from[i];
+    }
+}
