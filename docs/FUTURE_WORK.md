@@ -4582,47 +4582,6 @@ the measurement that can kill it), `docs/plans/split_speculation.md` (guess-and-
 `docs/plans/standing_ring.md` (#492: one reply faster than local on a short ring of cards — a concept with its
 kill ladder).
 
-#### #499 — A split reply that samples runs 9-25% slower than the greedy figure, where the offline replay said 2-4%
-`P3` · speed · **OPEN — README note left** (narrowed 2026-11-25) · seen: the first real-link sitting at the temperatures clients send
-
-Every split speed we publish is a greedy reply (`real_link.sh`, the README's across-computer rows). Most chat clients
-send a temperature of 0.7-1.0. The flow is exact at any temperature (a row's draw is the target's sample under noise
-shared by position) and rates a sampled tree's alternatives by `logit + T·g` (`faster_than_local.md` § 5, built
-2026-10-23). The offline replay then put a sampled tree at 0.96-0.98 of greedy's tokens a round (7B target: 0.5B
-drafter 4.96 against 5.08, 1.5B 6.90 against 7.19).
-**Measured on the link, 2026-11-25 17:09-17:25Z** (`~/swarmllm-gate/deep/fr/run_temp_1125.sh`, Qwen2.5-14B half and
-half here ↔ AU aa3d1e66, 0.5B Q8_0 drafting, main's binary, reply store off, T 0 / 0.7 / 1.0 interleaved twice, 160
-tokens a reply):
-
-| reply | T=0 | T=0.7 | T=1.0 | forwards (0 / 0.7 / 1.0) | misses |
-|---|---|---|---|---|---|
-| code (4 an arm) | 42.0 | 38.1 (0.91) | 31.6 (0.75) | 102 / 110 / 134 | 1.5 / 2.5 / 4.8 |
-| prose (2) | 17.3 | 14.2 (0.82) | 13.7 (0.80) | 235 / 279 / 293 | 18.5 / 29.5 / 32.5 |
-| prose2 (2) | 19.6 | 17.2 (0.88) | 17.3 (0.88) | 209 / 234 / 230 | 15.5 / 20.0 / 19.5 |
-
-A forward's time does not change with temperature: this computer's 36.9-39.5 ms and the far end's 30-31.5 in every
-arm. All the loss is in more forwards for the same reply: more misses, and in code fewer levels standing ahead of
-the walk (median 11 → 8 at T=1.0). The first guess is still taken 83% of the time for code at T=1.0 (88% greedy),
-so the shared noise is working; what the replay did not see is the flow. A miss costs ~5 forwards (the round trip),
-and a sampled take of the second or third guess leaves a thinner tree behind it, since the levels were grown
-best-first along the first.
-**Replayed the same night (`~/swarmllm-gate/deep/temp1125/{hist_sim,shape_sim}.py`)**: the flow simulator of the
-standing ring's step 3 (`ring_sim3`'s FrontierTree, `grow_flow`'s one best-first queue; this pair's stage times),
-each position's taken rank drawn from the sitting's own per-verdict shares and the tree RATED by those same shares
-(an oracle-calibrated tree). It gives code 42.4 / 38.3 / 32.7 tok/s (0.90 / 0.77 of greedy; the link 0.91 / 0.75) at
-1.63 / 1.47 / 1.26 tokens a forward (the link 1.57 / 1.45 / 1.19), and prose 0.87 at T=1.0 (the link 0.80-0.88). So the
-shift in ranks explains the loss, and no re-rating of the tree recovers it. No shape does either: 12 or 16 rows a level,
-2 or 4 levels a call, a 192-row cap, all within ±2% of today's 8 × 3 / 128 at both temperatures. What is left is what
-greedy prose already has: the drafter's agreement with the target, and the loop (`standing_ring.md` § 11).
-Residual: the README's across-computer figures are greedy, and the reader should be told that a sampled reply runs
-slower. Nothing to build on the tree.
-Prior art: Gumbo (NeurIPS 2026, "Gumbel Optimized High-Temperature Speculative Sampling") ranks a dynamic draft tree
-by the target's Gumbel scores, up to +26.7% at T=1.0 over EAGLE's greedy trees — our 10-23 rating already does this.
-OPT-Tree (arXiv 2406.17276) and D-Loop (arXiv 2610.06011) both read a smaller acceptance length at T=1 than at T=0.
-D-Loop puts it down to the target's stochastic matching and diverging histories, not the drafter's randomness.
-SpecHub (arXiv 2411.05289) reads second-draft acceptance RISING with temperature, which favours wider levels when
-sampling.
-
 #### #497 — A flowing chain's middle hops tell the coordinator nothing about their own time
 `P3` · network · **OPEN** — 2026-11-23 · seen: reading the 27B all-card chain's plan (here + AU + BE + US) before its next run
 
@@ -8547,6 +8506,16 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-11-25** (#499)
+- #499 — `P3` — **A split reply that samples runs 9-25% slower than the greedy figure, where the offline replay said
+  2-4%.** Measured on the Thailand-Australia 14B split at T 0 / 0.7 / 1.0 (code 42.0 / 38.1 / 31.6, prose 17.3 / 14.2 /
+  13.7 tok/s; `~/swarmllm-gate/deep/fr/run_temp_1125.sh`): every forward takes as long, there are more of them. The flow
+  simulator replays it from the sitting's own rank shares alone (code 0.90 / 0.77 of greedy against the link's 0.91 /
+  0.75, `deep/temp1125/{hist_sim,shape_sim}.py`); no re-rating of the tree and no shape recovers it. Closed by telling
+  the reader: the README's across-computer figures are greedy, and a note now says a sampled reply runs a tenth to a
+  quarter slower. Prior art: Gumbo (NeurIPS 2026) rates a tree by the target's Gumbel scores, as the 10-23 rating does;
+  OPT-Tree and D-Loop read the same smaller acceptance at T=1.
 
 **Closed 2026-11-23** (#498)
 - #498 — `P1` — **A far computer's slice of a model ran on its processor beside a card with 10 GB free, and nothing

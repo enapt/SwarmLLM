@@ -1,5 +1,55 @@
 # Changelog
 
+## [0.3.310-alpha] — 2026-11-25
+
+**A graphics card writes faster as a conversation grows.** Each new word reads everything said before it, and on a
+card that reading now runs on the tensor cores, reading each earlier word once for all the heads that share it, the
+way llama.cpp's own kernel does. On this laptop's RTX 3070, Qwen2.5-Coder-7B after a 4,096-token prompt writes
+56.7-57.9 tokens a second instead of 48.5-49.2 (llama.cpp: 60.5), Llama 3.2 3B 84-94 instead of 68-72; short
+conversations are as fast as before. Heads 256 wide take it too — Gemma 2 and 3, Gemma 4's windowed layers, Qwen 3.5
+and 3.6's attention layers: Gemma 2 2B after a 4,096-token prompt writes 86.1-87.9 tokens a second instead of
+79.1-81.1, Qwen3.5-4B 69.9-71.4 instead of 66.5-68.0 (its other layers are recurrent). Heads of other widths
+(Phi-3.5's 96, Gemma 4's 512-wide global layers) keep the kernel they had. It rounds the query to half precision as
+llama.cpp does, so replies were scored against llama.cpp: Qwen2.5-Coder-7B's and Llama 3.2 3B's are llama.cpp's own,
+token for token, and TinyLlama, Mistral 7B, Qwen3 1.7B, GLM-4 9B, Gemma 2 2B and Qwen3.5-0.8B and 4B stay as close to
+llama.cpp as before. `SWARMLLM_DECODE_ATTN_MMA=0` keeps the old kernel. The step that merges a layer's pieces of
+attention takes less time too — about half on Gemma 2 2B after a long prompt (8.5 instead of 15.2 microseconds a
+layer) — and gives the same result to the last bit (`SWARMLLM_DECODE_ATTN_MERGE=serial` keeps the old merge).
+
+**A graphics card checks a few guessed words at once faster, on most model files.** When a card checks 4-24 guessed
+words in one step — the near computer of a split, or a model guessing ahead on its own card — each weight of 4,096 or
+more rows stored as Q4_K, Q5_K or Q6_K (every layer of a Q4_K_M or Q5_K_M file) now runs on a tensor-core kernel of its
+own instead of llama.cpp's general product. Measured on this laptop's RTX 3070 with the whole Qwen3.5-9B Q4_K_M over
+three changes, each against the one before with its switch interleaved in one binary: a 16-row step 31.0-31.5 → 26.3-26.6 ms, an 8-row step 25.8-26.3 → 21.3-21.5 ms.
+Every launch gives the same bits, and replies of Qwen2.5-Coder-7B, GLM-4-9B, Phi-3.5-mini, Phi-4-mini, Llama 3.2 3B and
+Gemma 2 2B score against llama.cpp as before. On the Thailand-Australia Qwen2.5 14B split the near computer's step
+took about 13-15% less time, and reply speeds stayed inside the runs' spread (code 41-42, prose 17-19 tok/s): what
+bounds that reply is elsewhere. `SWARMLLM_QMATMUL_ROWS_TC_K=0` keeps the old product (`=q4k` or `=q4k,q5k` keeps
+only some).
+
+**A guessing model's steps on the card take less time.** A drafter stored as Q8_0 multiplies each weight by 2-8 rows
+at a time; those products have a tensor-core kernel of their own too: a Qwen3.5-0.8B guessing level 6.46 → 5.67 ms,
+the 2B 11.08 → 9.58 ms (best of eight interleaved). `SWARMLLM_QMATMUL_ROWS_TC=0` turns it off. A Qwen 3.5 guessing step
+also lost work it did not need: its recurrent layers give each card warp four state rows (33.7 → 23.7 µs a layer,
+`SWARMLLM_DELTA_RULE_ROWS=1` for the old kernel), quantize their input once for two products, skip zero-filling
+buffers the next kernel writes whole (`SWARMLLM_SSM_REPLAY_TARGET=zeroed`), and grow their guessing store in one copy
+a layer instead of three steps (`SWARMLLM_FLOW_GROWTH=copied`). Every one of these keeps the outputs bit for bit.
+
+**A split no longer slows itself down after its own catch-up step.** Every few dozen steps a split that guesses ahead
+sends one large catch-up step to the far computer. The steps right behind it waited there, and that wait was read as
+the far computer falling behind, so the split sent it fewer guesses: on the Thailand-Australia 14B split, 10 of 11
+such cuts in two sittings came right after one, and a code reply that took one ran 3-4% slower. An answer that left
+while our catch-up step was out is no longer read as the far computer's queue (Karn's rule for round-trip times).
+Measured in one binary over six interleaved sittings: no cut after the first reply, against 9 of 21 replies cut
+before; code 41.7 against 40.9 tok/s, prose 18.5 against 18.9, both inside the spread.
+`SWARMLLM_FLOW_FAR_BEHIND_REBASE=read` keeps the old reading.
+
+**For diagnosing:** a split reply's log line counts which of the guessing model's guesses (first, second, third or
+later) the far computer took, against how many of each were on offer, and how many levels of guesses stood ahead
+(`taken_ranks`, `offered_ranks`, `levels_ahead_median`). On the 14B split, prose took the first guess 64% of the time
+and none of them 10%; code 88% and under 1%. The reply checker (`examples/score_against_reference.py`) now reads a
+thinking model's reasoning along with its reply, so a Qwen3 reply is judged as the model wrote it.
+
 ## [0.3.309-alpha] — 2026-11-24
 
 **A Qwen 3.5 split's own layers run a little faster.** The computer holding a split's first layers runs them on
