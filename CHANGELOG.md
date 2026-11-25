@@ -1,5 +1,51 @@
 # Changelog
 
+## [0.3.311-alpha] — 2026-11-25
+
+**A request sent right after another is no longer turned down by the computer serving part of it.** A computer
+running part of a split for another node let go of a finished request's memory only after the next message reached
+its model process. That next message was usually the other node's next request asking whether it fits, so a computer
+with room for one conversation weighed it against the one that had just ended, and turned it down. Where no other
+route existed the request failed (#501). Seen on a 14B split between Thailand and Australia: every prose request sent
+within about 0.2 s of the one before was refused; the same request 12 s later was served. The model process now
+settles every cancel that reached it before it handles the next message. Reproduced on two processor nodes with
+Llama 3.2 3B, where the peer has room for one 7,000-token conversation, not two: v0.3.310 refused the second request
+312 ms after the first ended, counting its 420 MB, and the reply failed with a 503; with the fix the peer released
+the 420 MB first and said go ahead.
+
+**Gemma and Qwen 3.5 reply faster on a graphics card after a long conversation.** At 256-wide heads (Gemma 2 and 3,
+Gemma 4's windowed layers, Qwen 3.5 and 3.6's attention layers) each new word now reads the conversation through
+shared memory. On this laptop's RTX 3070, Gemma 2 2B after a 4,096-token prompt writes 110.1-111.4 tokens a second
+with the new attention against 95.1-101.8 without it (llama.cpp the same day: 105.7-108.5), and its attention call
+takes 60.6 µs instead of 94.7 (llama.cpp's: 57.2 + 2.6). Qwen3.5-4B's attention call takes 57.6 µs instead of 90.5,
+but only one of its layers in four attends, so its writing speed stayed inside the runs' spread (70.1-73.3 against
+70.4-71.5 tok/s). Short conversations are as fast as before, and replies are unchanged to the last bit.
+`SWARMLLM_DECODE_ATTN_STAGE=0` keeps the old body.
+
+**A guessing model's steps on the card take less time.** A split that guesses ahead with a small Qwen 3.5 model on
+this computer's card grows a tree of guesses one level at a time. Two savings, each keeping the replies the same:
+- **Fewer copies:** every third level the tree's store was copied into a new one, 90 copies for the 0.8B model,
+  although the reply had already moved past most of it. A level's new rows now go into the places the reply moved
+  past, and the store grows only when those run out: the 0.8B guessing model 6.14 -> 5.59 ms a level, the 2B's
+  10.19 -> 9.48 (7-9% of every level). `SWARMLLM_FLOW_SLOTS=compacted` restores the old store.
+- **No memory question every level:** each level stopped the card to ask how much memory was free, although each
+  level holds the same bytes as the one before. A level that allocates nothing new now reuses an answer read in the
+  last quarter of a second: the 0.8B level 5.62 -> 5.44 ms, the 2B's 9.66 -> 9.45. A level that needs new room still
+  reads the card. `SWARMLLM_FLOW_ROOM=per-level` reads at every level as before.
+
+Measured together on the Qwen3.5-9B split between this laptop's RTX 3070 in Thailand and a peer's RTX 3060 in
+Australia, the guessing model's time a forward fell 15.5-15.6 -> 15.0-15.2 ms on prose (17.4 -> 16.7 on code), but
+reply speed did not move: code 24.74 -> 24.72 tok/s, prose 15.59 -> 15.15, inside the runs' ±5% spread. A forward
+takes 30-36 ms on this computer, so half a millisecond is 1.5% of it. What moves that split's speed is tokens a
+forward and the time of this computer's own share of the model, not the guesser's bookkeeping.
+
+**For diagnosing:** the card benches (`prefill_bench`, `swarmllm test-split`) now record their graphs first, as a
+node does. Before, they timed every step outside a graph, which no node does, so the speeds they printed were too low
+(Gemma 2 2B at 4,096 positions: 95.8-98.4 tok/s uncaptured against 109.3-110.5 recorded). Released versions were
+never affected; the release check and the README's speeds go through a running node. `SWARM_BENCH_RECORD_AHEAD=0`
+times uncaptured steps. The pace probe also prints how many levels it weighed against a leased memory budget (150-154
+of 160 with it, 0 with the switch).
+
 ## [0.3.310-alpha] — 2026-11-25
 
 **A graphics card writes faster as a conversation grows.** Each new word reads everything said before it, and on a

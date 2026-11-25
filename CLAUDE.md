@@ -86,8 +86,8 @@ cargo dev-test                        # lib + integration; counts below come fro
 cargo dev-run -- run -p 8800 -v       # start a daemon serving the frontend from disk
 ```
 
-**Counts, measured at v0.3.310 (dev,claude-subscription)**: **4862 lib** (+33 ignored),
-80 integration (32 + 34 + 14 `yamux_substream`), **280 repo-consistency**,
+**Counts, measured at v0.3.311 (dev,claude-subscription)**: **4864 lib** (+33 ignored),
+80 integration (32 + 34 + 14 `yamux_substream`), **282 repo-consistency**,
 1 `api_key_side_effects`, 90 `swarmllm-types`, 12 in the vendored
 request-response patch, 153 in the libp2p-gossipsub one, 329 in the quinn-proto one, 5 in the libp2p-quic one and 20 in the libp2p-upnp one — plus 26 in the `swarmllm` BIN target (`cli::*`, counted
 nowhere else). They are refreshed at release (`memory/release_gate.md`), not
