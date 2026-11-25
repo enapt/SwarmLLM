@@ -86,6 +86,14 @@ pub async fn test_split_inference(
     // Prefill: run all tokens through
     let kv_store =
         swarmllm::inference::split::KvCacheStore::new(std::time::Duration::from_secs(600));
+    // As an idle worker does before a reply: a card leaves each step shape's
+    // first graph to this recording (#357 (d)), so without it every step here
+    // ran uncaptured and the decode speed below read under the node's.
+    let recorded =
+        swarmllm::inference::model_worker::record_step_shapes_ahead(&mut model, &kv_store)?;
+    if recorded > 0 {
+        println!("Recorded {recorded} step shape(s) on the card ahead, as a node's worker does");
+    }
     let test_request_id = "test-generate";
 
     // In one forward, or through the node's own chunking

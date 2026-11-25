@@ -6752,6 +6752,33 @@ fn warm_check_widths(
     any
 }
 
+/// Record `model`'s step shapes as an idle worker does (`warm_check_widths`),
+/// for a program that runs a [`SplitModel`] OUTSIDE a worker (`prefill_bench`,
+/// `swarmllm test-split`). A card's whole model or first segment leaves each
+/// shape's first graph to this recording (`cuda_graph::DecodeGraph::may_make_graph`,
+/// #357 (d)), so a host that never records runs every step uncaptured: the
+/// bench read Gemma 2 2B from a 4,096-token prompt at 95.8-98.4 tok/s where
+/// the recorded steps write 109.3-110.5 (llama.cpp 105.7), at 200 positions
+/// 107.6-108.8 against 130.8-133.3 (2026-11-25, `dec1125/run_graphs.console`).
+/// Returns how many shapes have a graph; 0 where nothing is captured (off a
+/// card, a later segment, `SWARMLLM_CUDA_GRAPH_WARM=0`). Prior art:
+/// llama-bench runs a warm-up generation before it times one (`llama-bench.cpp`
+/// "warmup run", `--no-warmup` the opt-out), which is where ggml-cuda builds
+/// its graphs; vLLM's latency benchmark runs through the engine, which
+/// captures its graphs at start-up (`--enforce-eager` the opt-out).
+pub fn record_step_shapes_ahead(
+    model: &mut SplitModel,
+    kv_store: &KvCacheStore,
+) -> Result<usize, SwarmError> {
+    let widths = model.widths_to_record();
+    if widths.is_empty() {
+        return Ok(0);
+    }
+    record_check_widths(model, kv_store, &widths, &|| true)?;
+    model.note_widths_recorded();
+    Ok(widths.iter().filter(|&&w| model.has_step_graph(w)).count())
+}
+
 /// [`warm_check_widths`]'s forwards for one model: `Ok(true)` once every shape
 /// was tried, `Ok(false)` where a message came first. Its cache goes either way.
 ///

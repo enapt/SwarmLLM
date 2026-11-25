@@ -2782,6 +2782,17 @@ before any reply needs them" (a whole model's 16 graphs: 1.1-4.9 s after one war
 that never recorded: the worker's `-v` log says `a reply makes no graph: the idle recording will` and no
 `check widths recorded` line comes before the timed reps.
 
+**A program that hosts a model WITHOUT a worker never recorded at all** (2026-11-25): `prefill_bench` and
+`swarmllm test-split` load a `SplitModel` themselves, and from #357 (d) (v0.3.299) to 2026-11-25 every card
+decode step they timed ran uncaptured — while llama-bench, set beside them, times its graphs after a warm-up.
+Gemma 2 2B on the RTX 3070, one sitting in both orders (`~/swarmllm-gate/deep/dec1125/run_graphs.console`):
+from a 4,096-token prompt 95.8-98.4 tok/s uncaptured against 109.3-110.5 recorded (llama.cpp 105.7), at 200
+positions 107.6-108.8 against 130.8-133.3 (llama.cpp 118.2), Qwen3.5-4B at 4,096 72.4-74.3 against 81.9-82.4.
+A/B ratios inside the bench stood (both arms uncaptured); a comparison with llama.cpp or a node did not. Both now
+call **`model_worker::record_step_shapes_ahead`** after loading — the worker's own recording — and say `recorded N
+step shape(s) ahead`; `SWARM_BENCH_RECORD_AHEAD=0` times uncaptured steps (what a fusion saves without graphs). A
+new program that times a `SplitModel` on a card calls it too.
+
 ### One model's decode rate on this machine, against llama.cpp (2026-10-19)
 
 `swarmllm test-split --gpu-layers 99 --model <file.gguf> --max-tokens 160 --prompt "…"`
@@ -2888,7 +2899,7 @@ that ran at 0.961 of the host's clock under load that day, so a difference under
 
 | harness | what it measures | notes |
 |---|---|---|
-| `examples/prefill_bench.rs` | prompt processing + decode, driving `SplitModel::forward` directly | no daemon, no scheduler, no API in the way. `SWARM_BENCH_MODEL` (a model dir holding every shard), `SWARM_BENCH_PROMPT` (896), `SWARM_BENCH_DECODE` (32), `SWARM_BENCH_REPS` (3), `SWARM_BENCH_DEVICE=cuda`. Pair with `SWARMLLM_PROFILE=1` for the per-stage breakdown. A split's segment: `SWARM_BENCH_LAYERS=0-14`. A check of K rows: `SWARM_BENCH_SPEC_WIDTHS=2,4,…` (interleaved 1-vs-K, min of pairs), `SWARM_BENCH_SPEC_TREE=1` adds the same rows as a tree, `SWARM_BENCH_SPEC_ALL_ROWS=1` makes logits at every row (a drafter's step). A drafter's tree growth: `SWARM_BENCH_GROW=64,8` (rows, per step; from nothing and on a seed, ranked on the host vs where the logits are). Compare a width with llama.cpp's `llama-bench -p K -n 0 -d 300` on the same GGUF (`~/swarmllm-318/rowcost.sh`) |
+| `examples/prefill_bench.rs` | prompt processing + decode, driving `SplitModel::forward` directly | no daemon, no scheduler, no API in the way. `SWARM_BENCH_MODEL` (a model dir holding every shard), `SWARM_BENCH_PROMPT` (896), `SWARM_BENCH_DECODE` (32), `SWARM_BENCH_REPS` (3), `SWARM_BENCH_DEVICE=cuda` (card steps recorded ahead as a worker records them; `SWARM_BENCH_RECORD_AHEAD=0` times them uncaptured). Pair with `SWARMLLM_PROFILE=1` for the per-stage breakdown. A split's segment: `SWARM_BENCH_LAYERS=0-14`. A check of K rows: `SWARM_BENCH_SPEC_WIDTHS=2,4,…` (interleaved 1-vs-K, min of pairs), `SWARM_BENCH_SPEC_TREE=1` adds the same rows as a tree, `SWARM_BENCH_SPEC_ALL_ROWS=1` makes logits at every row (a drafter's step). A drafter's tree growth: `SWARM_BENCH_GROW=64,8` (rows, per step; from nothing and on a seed, ranked on the host vs where the logits are). Compare a width with llama.cpp's `llama-bench -p K -n 0 -d 300` on the same GGUF (`~/swarmllm-318/rowcost.sh`) |
 | `examples/qmatmul_bench.rs` | the quantized matmul against batch size | ALSO asserts the tiled path is bit-identical to the upstream ordering — run it after touching either kernel |
 | `examples/tokenizer_scaling.rs` | `SplitTokenizer::encode` against prompt length | tells an O(n) tokenizer from an O(n²) one — point `SWARM_TOK_HEADER` at a model's `gguf_header.bin`. It prints `tokenizer_model` / `merges` / `scores`, which is what decides WHICH encode path a GGUF takes (#420); a doubling that quadruples the time is the signature |
 | `examples/attn_bench.rs` | attention ops in isolation: the unfused candle ops, the processor's prompt kernel (`WHOLE: key-tiled kernel`, a 128-row chunk) and one decode step against the same cache | `SWARM_ATTN_KV=512,2048,5000` (cached positions), `RAYON_NUM_THREADS` for the width (8 for a prompt, 4 for decode here). How #179's row arithmetic was measured back to the old kernels' speed. ⚠ an isolated call is not a forward pass (#255/#266) — confirm with `prefill_bench` |

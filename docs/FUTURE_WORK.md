@@ -3978,8 +3978,10 @@ link). The drafter choice already avoids it where a quantized copy is held.
 **Residual (2026-11-25, after the tensor-core bodies at 64, 128 and 256 dims and the staged 256-wide
 step):** (1) at 256 dims (Gemma 2/3, Gemma 4's windowed layers, Qwen 3.5 / 3.6's attention layers) a
 call is now within 6 % of llama.cpp's (60.6 µs against 57.2 + 2.6 fixup, Gemma 2 2B at ~4,128) — see
-"Done" below; decode from a 4,096-token prompt 96.4-98.3 tok/s against its 104.4, and what is left of
-that gap is mostly (2). The transposed tile (positions as the 16 `mma` rows, the query as B, llama.cpp's
+"Done" below; decode from a 4,096-token prompt, steps captured as the node runs them, 110.1-111.4 tok/s
+against llama.cpp's 105.7-108.5 the same day (⚠ the bench's own figures before 2026-11-25 were
+UNCAPTURED steps — `docs/DIAGNOSTICS.md` § "Asked back to back, a card times UNCAPTURED steps"). The
+transposed tile (positions as the 16 `mma` rows, the query as B, llama.cpp's
 D = 256 config) is no longer needed for the attention call itself; re-measure before building it. (2)
 The merge, with its runs' weights staged (`decode_attn_combine_staged_f32`, bit for bit the serial
 one's; Gemma 2 2B at ~4,128 15.2 → 8.5 µs), still takes 8.4-9.1 µs a layer on the 7B at ~928 against
@@ -4007,7 +4009,9 @@ go through shared memory"): the unstaged body at 168 registers made ~48 trips to
 after another (`cuobjdump -sass`); each warp now copies a step's 16 K and 16 V rows by 16-byte `cp.async` and reads
 the same fragments back by `ldmatrix` — bit for bit the unstaged body (tested, with a control). Gemma 2 2B's
 attention 94.7 → 60.6 µs a call at ~4,128, Qwen3.5-4B's 90.5 → 57.6; decode from a 4,096-token prompt Gemma 2 2B
-88.0-89.1 → 96.4-98.3 tok/s, Qwen3.5-4B 70.4-71.5 → 70.1-73.3 (`dec1125/run_stage2.console`, ABBA). Its first card
+95.1-101.8 → 110.1-111.4 tok/s with the steps captured (`dec1125/run_cool.console`, a cooled card, three
+interleaved rounds; uncaptured, as the bench ran until 2026-11-25: 88.0-89.1 → 96.4-98.3, `run_stage2.console`),
+Qwen3.5-4B uncaptured 70.4-71.5 → 70.1-73.3. Its first card
 run faulted on every launch: an `ldmatrix` without `.shared` reads a 32-bit shared offset as a GENERIC address
 (gotcha #1172). The history of the attempts before it:
 

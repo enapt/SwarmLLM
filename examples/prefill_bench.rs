@@ -259,6 +259,23 @@ fn main() -> anyhow::Result<()> {
         t.elapsed().as_secs_f64(),
         rayon::current_num_threads()
     );
+    // A node's idle worker records every step shape on the card before a reply
+    // needs it, and a reply leaves a shape's first graph to that recording
+    // (#357 (d)) — so a bench that never records times every step UNCAPTURED,
+    // which no node runs (Gemma 2 2B at 4,096: 96-98 tok/s against the node's
+    // 109-110, 2026-11-25). `SWARM_BENCH_RECORD_AHEAD=0` times the uncaptured
+    // steps, e.g. to count what a fusion saves without graphs.
+    if std::env::var("SWARM_BENCH_RECORD_AHEAD").as_deref() != Ok("0") {
+        let t = Instant::now();
+        let store = KvCacheStore::new(std::time::Duration::from_secs(60));
+        let recorded =
+            swarmllm::inference::model_worker::record_step_shapes_ahead(&mut model, &store)
+                .map_err(|e| anyhow::anyhow!("recording the step shapes ahead: {e}"))?;
+        println!(
+            "recorded {recorded} step shape(s) ahead, as an idle worker does, in {:.1}s\n",
+            t.elapsed().as_secs_f64()
+        );
+    }
 
     // Token ids are arbitrary — the arithmetic per position does not depend on
     // which token it is, only on how many there are. Keep them well inside any

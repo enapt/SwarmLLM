@@ -5324,10 +5324,16 @@ sitting, live node stopped, ABBA in one binary (`dec1125/run_stage2.console`):
 | Gemma 2 2B, 200 | 100.3-103.9 | 95.9-103.1 |
 | Qwen3.5-0.8B, 4,096 | 154.2-160.7 | 151.7-154.2 |
 
-llama.cpp on the same card the same day (`dec1125/run_l256.out`): 57.2 µs + 2.6 fixup a call, 104.4 tok/s on Gemma 2
-2B from 4,096, 74.9 on Qwen3.5-4B. The merge after it read 9.6 µs a call against 8.4 in the unstaged arm (Qwen3.5-4B
-11.0 against 9.7; the same partials — cause not measured) and is now most of what separates a layer from llama.cpp's.
-Replies are the unstaged body's, bit for bit, so its reply checks above stand.
+⚠ **The tok/s rows above are UNCAPTURED steps**: `prefill_bench` never ran the idle recording a worker runs, so until
+2026-11-25 every card step it timed ran outside a graph (§ "A reply makes no graph before the recording"; the ratio
+holds, the absolute figures do not). **With the steps recorded, as the node runs them** — each run on a card cooled
+to ≤ 66 °C, three rounds, the arms interleaved (`dec1125/run_cool.console`; a sitting run hot throttled to 780 MHz at
+86 °C, `run_rec.console`): Gemma 2 2B from a 4,096-token prompt **110.1-111.4 tok/s staged against 95.1-101.8
+unstaged**, 97.3-99.3 staged but uncaptured; llama.cpp the same day 105.7-108.5 (`run_graphs.console`,
+`run_host.console`). llama.cpp's attention call is 57.2 µs + 2.6 fixup (`dec1125/run_l256.out`). The merge after it
+read 9.6 µs a call against 8.4 in the unstaged arm (Qwen3.5-4B 11.0 against 9.7; the same partials — cause not
+measured): the larger part of what still separates a layer's attention from llama.cpp's. Replies are the unstaged
+body's, bit for bit, so its reply checks above stand.
 
 **The merge stages its runs' weights** (`decode_attn_combine_staged_f32`, 2026-11-25; `decode_attn::staged_merge`,
 A/B `SWARMLLM_DECODE_ATTN_MERGE=serial`). The serial merge had every thread walk the runs itself — a run's max, then
@@ -9920,7 +9926,13 @@ interrupted recording sets nothing, so replies still make none until the next
 idle moment finishes it. *Must keep*: a shape that already has its graph is
 updated in a reply as before; a failed recording (`Err`) lets replies make
 graphs again. A/B `SWARMLLM_CUDA_GRAPH_MADE=in-replies`; test
-`a_reply_before_the_idle_recording_makes_no_graph`.
+`a_reply_before_the_idle_recording_makes_no_graph`. **A host with no worker
+records through `model_worker::record_step_shapes_ahead`** (2026-11-25): the
+"not coming" list above missed a program that loads a `SplitModel` itself —
+`prefill_bench` and `test-split` waited for a recording nothing would run and
+timed every card step uncaptured for a week of releases (Gemma 2 2B at 4,096:
+95.8-98.4 tok/s against 109.3-110.5 recorded; `docs/DIAGNOSTICS.md` §
+"Asked back to back, a card times UNCAPTURED steps").
 
 **What a round costs beyond a step**, and the two parts made smaller: § "Qwen 3.5's delta rule is ONE op per layer" › "Its convolution, and a taken-back check, on a card".
 
