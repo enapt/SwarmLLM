@@ -1951,6 +1951,15 @@ mod tests {
             eprintln!("skipped: under 2 GB free on this machine, the anti-swap guard binds");
             return;
         }
+        // The card's budget still takes off what OTHER programs hold, read off
+        // this machine's real card against the test card's total: with a node
+        // of the developer's own holding the card (7.5 of 8 GB, 2026-11-25) that
+        // term — not the 2,000 MB cap — binds, and the budget read 265. A
+        // machine with no card (CI) reads nothing and always runs the checks.
+        if query_gpu_vram_free_mb().is_some_and(|free| free < 4_000) {
+            eprintln!("skipped: this machine's card is busy, its other programs bind");
+            return;
+        }
         assert_eq!(
             node_model_budget_mb(&state),
             Some(2_000),
