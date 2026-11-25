@@ -501,10 +501,10 @@ pub async fn run_worker(
     // set by any message or tick, cleared by `cuda_pool::trim` once the worker
     // has had nothing to do for `cuda_pool::IDLE_TRIM` (#146).
     let mut pool_may_hold_freed = false;
-    // Cancelled requests whose caches this loop has already released, so the
-    // release runs once per cancel rather than on every tick it is retained.
-    let mut kv_released_for_cancel: std::collections::HashSet<uuid::Uuid> =
-        std::collections::HashSet::new();
+    // The cancel MARKS whose caches this loop has already released (each by
+    // the moment it was made), so the release runs once per cancel rather
+    // than on every tick the mark is retained ([`release_caches_of_cancelled`]).
+    let mut kv_released_for_cancel: ReleasedForCancel = HashMap::new();
     // The drafter's trees that flow, kept between a reply's calls (#134 (b)).
     let mut flow_sessions = FlowSessions::default();
     // Chains whose two ends this worker holds, learning their far run.
@@ -1232,7 +1232,7 @@ fn worker_force_cpu() -> bool {
 #[allow(clippy::too_many_arguments)]
 async fn apply_cancels(
     cancelled: &CancelledSet,
-    released: &mut std::collections::HashSet<Uuid>,
+    released: &mut ReleasedForCancel,
     slot_table: &mut SlotTable,
     writer: &mut IpcWriter,
     models: &HashMap<(usize, usize, usize, usize), SplitModel>,
@@ -1243,6 +1243,8 @@ async fn apply_cancels(
     block_drafts: &mut SplitBlockDrafts,
 ) {
     if cancelled.is_empty() {
+        // No mark is left to act on, so no release is owed one either.
+        released.clear();
         return;
     }
     if !slot_table.is_empty() {
@@ -1268,8 +1270,12 @@ async fn apply_cancels(
     // Sweep cancels that never matched a request (the request had already
     // finished when the cancel arrived).
     cancelled.retain(|_, at| at.elapsed().as_secs() < CANCEL_RETENTION_SECS);
-    released.retain(|id| cancelled.contains_key(id));
+    released.retain(|id, _| cancelled.contains_key(id));
 }
+
+/// The cancel marks a worker has released caches for: each request id with the
+/// moment of the mark acted on.
+type ReleasedForCancel = HashMap<Uuid, std::time::Instant>;
 
 /// Drop the cache of every cancelled request this worker has not released yet.
 ///
@@ -1279,14 +1285,23 @@ async fn apply_cancels(
 /// request once it is over (#238). Called from the main loop between messages,
 /// where no forward of the request can be running; a forward still queued is
 /// skipped by the cancel mark, which outlives this release. Once per cancel:
-/// `released` remembers which marks have been acted on.
+/// `released` remembers which marks have been acted on — each by the moment it
+/// was MADE, never by its request id alone. A retry under the same id (a
+/// router retry keeps it) consumes the mark, and a later cancel marks the id
+/// again: by id alone the second mark read as the first, already released,
+/// and that retry's cache waited out the TTL (the .311 review). Prior art: the
+/// ABA problem — a value removed and put back reads as unchanged — and its
+/// usual fix, a version tag beside the value (Wikipedia "ABA problem", tagged
+/// state reference); a mark's `Instant` is that tag, and never repeats.
 fn release_caches_of_cancelled(
     cancelled: &CancelledSet,
-    released: &mut std::collections::HashSet<Uuid>,
+    released: &mut ReleasedForCancel,
     kv_store: &KvCacheStore,
 ) {
-    for request_id in cancelled.iter().map(|e| *e.key()).collect::<Vec<_>>() {
-        if released.insert(request_id) {
+    let marks: Vec<(Uuid, std::time::Instant)> =
+        cancelled.iter().map(|e| (*e.key(), *e.value())).collect();
+    for (request_id, marked_at) in marks {
+        if released.insert(request_id, marked_at) != Some(marked_at) {
             let before = kv_store.occupancy().allocated_bytes;
             kv_store.cleanup_request_id(&request_id.to_string());
             let after = kv_store.occupancy().allocated_bytes;
@@ -16243,7 +16258,7 @@ mod cancel_release_tests {
         conversation(&store, &live);
         let cancelled: super::CancelledSet = Arc::new(dashmap::DashMap::new());
         cancelled.insert(ended, std::time::Instant::now());
-        let mut released = std::collections::HashSet::new();
+        let mut released = super::ReleasedForCancel::new();
 
         release_caches_of_cancelled(&cancelled, &mut released, &store);
         assert!(!store.request_holds_state("m", &ended.to_string()));
@@ -16258,6 +16273,34 @@ mod cancel_release_tests {
         conversation(&store, &ended);
         release_caches_of_cancelled(&cancelled, &mut released, &store);
         assert!(store.request_holds_state("m", &ended.to_string()));
+    }
+
+    /// A retry under the same id consumes the first mark; when that retry is
+    /// cancelled in turn, the NEW mark releases its cache at once — even with
+    /// the first mark's release still remembered (the re-mark landed before
+    /// the loop saw the set empty).
+    #[test]
+    fn a_second_cancel_of_a_retried_id_releases_its_cache() {
+        let store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        let request = uuid::Uuid::new_v4();
+        conversation(&store, &request);
+        let cancelled: super::CancelledSet = Arc::new(dashmap::DashMap::new());
+        cancelled.insert(request, std::time::Instant::now());
+        let mut released = super::ReleasedForCancel::new();
+        release_caches_of_cancelled(&cancelled, &mut released, &store);
+        assert!(!store.request_holds_state("m", &request.to_string()));
+
+        // The retry consumes the mark and builds its cache; its own cancel
+        // marks the id again.
+        cancelled.remove(&request);
+        conversation(&store, &request);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        cancelled.insert(request, std::time::Instant::now());
+        release_caches_of_cancelled(&cancelled, &mut released, &store);
+        assert!(
+            !store.request_holds_state("m", &request.to_string()),
+            "the second cancel is a new mark, and releases the retry's cache"
+        );
     }
 }
 
