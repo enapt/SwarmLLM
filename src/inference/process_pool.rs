@@ -23208,6 +23208,9 @@ mod tests {
     /// layer is charged its own weights (#343).
     #[test]
     fn a_fresh_segment_is_weighed_at_both_ends_of_the_model() {
+        // Sized on a build without the flash kernel: in one with it the card's
+        // half cache let the 1,500 MB card hold the whole model (#500).
+        let _layout = crate::inference::layers::cache_kept_as_without_flash();
         let model = ModelId("seventy-b-shaped-ends".into());
         let data_dir = header_only_seventy_b_even_layers("ends", &model);
         let p = ModelProcessPool::new(data_dir.clone());
@@ -24929,6 +24932,10 @@ mod admission_tests {
     /// card and the growth is refused.
     #[tokio::test]
     async fn a_split_spawn_leaves_room_for_the_plans_other_ranges_here() {
+        // Sized on a build without the flash kernel: in one with it the card's
+        // half cache left the control's refit 600 MB, room for the 516 MB layer
+        // it is sized to refuse (#500). `#[tokio::test]` runs on this thread.
+        let _layout = crate::inference::layers::cache_kept_as_without_flash();
         let p = pool();
         p.test_card_in_play.store(true, Ordering::Relaxed);
         p.set_gpu_layers(-1);

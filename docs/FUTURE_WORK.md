@@ -7789,19 +7789,27 @@ nothing, the worker reads weights on `DaemonMsg::LoadRange`.
 ### Packaging, release and operations
 
 #### #500 — A CUDA build's unit tests read this machine's graphics card: six fail there that pass in the default build
-`P3` · tests · **PARTIAL** (nine fixed by `b37de5e36`) — 2026-11-25 · history: rigs `~/swarmllm-gate/deep/dec1125/pool_tests{,_before}.log`, `m256/suite_on.log`
+`P3` · tests · **PARTIAL** (nine fixed by `b37de5e36`, two by the cache-layout test input) — 2026-11-25 · history: rigs `~/swarmllm-gate/deep/dec1125/pool_tests{,_before}.log`, `m256/suite_on.log`, `lease1125/p500*`
 
 CI never runs a card build's lib tests, so nothing showed it. The card build's lib suite at `--test-threads=2`
 (2026-11-24 19:37Z) failed 15. `b37de5e36` starts a test's pool with no card detected (`gpu_detected` =
 `!cfg!(test)`; every reader also asks `cfg!(feature = "candle-cuda")`, so only a card build's tests had taken this
 machine's real card): process_pool 11 → 2 failing in one card test build of each, none newly failing; the default
 build's 251 pool tests unchanged.
-Left:
-- `process_pool::admission_tests::a_split_spawn_leaves_room_for_the_plans_other_ranges_here` ("600 MB left for a
-  516 MB layer, plan noted: false") and `process_pool::tests::a_fresh_segment_is_weighed_at_both_ends_of_the_model`
-  (`Some(8)` against `Some(3)`): both reach another `cfg(feature = "candle-cuda")` path. Hypothesis, unchecked: the
-  real card check (`gpu_support::local_gpu_is_supported`) or a live card reading. Next: find the read and make it a
-  test input, as `test_card_in_play` is.
+**The last two pool tests read no card: they read the CACHE LAYOUT** (2026-11-25; the hypothesis above, a card
+check or reading, was wrong). A card build is `--features cuda`, which brings `flash-attn`, and with it
+`layers::kv_storage` prices a card's cache as the half cache — f16, a third of the f32 cache plus its mirror. The two
+fixtures were sized on the default build's f32 cache: `a_fresh_segment_is_weighed_at_both_ends_of_the_model`'s
+1,500 MB card then held the whole model (`Some(8)` against `Some(3)`), and the control of
+`a_split_spawn_leaves_room_for_the_plans_other_ranges_here` left 600 MB for the 516 MB layer it is sized to refuse.
+Shown in the card binary itself: with `SWARMLLM_KV_F16=0` (f32 plus the mirror) the first fails at its own fixture
+check instead. Now each takes `layers::cache_kept_as_without_flash` (this thread's `kv_storage` keeps a card's cache as
+a build without the flash kernel, until the guard drops; prior art: tokio's `time::pause`, scoped to the test's own
+runtime). Card build (`lease1125/swarmllm-test-p500`): both pass, every pool test 251/251, the half cache's own test
+and `kv_budget::` 32/32 unchanged; the binary before it failed both; the default build's 251 unchanged. **The whole
+card-build lib suite at `--test-threads=1` now passes**: 4,898, 0 failed, 40 ignored (`lease1125/suite_p500.log`, live
+node stopped, the safety kit on, 0 driver events).
+Left (the only failures a card build's suite still shows):
 - Four pass ALONE in both binaries and fail together at `--test-threads=2`: `split::tests::draft_trees::`
   `{a_first_segment_records_its_shapes_before_a_reply_needs_them,
   a_recording_whose_last_graph_is_made_is_finished_though_a_message_came, a_reply_after_the_idle_recording_makes_no_graph}`

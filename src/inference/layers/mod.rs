@@ -4779,7 +4779,7 @@ pub(crate) fn kv_storage(
     n_kv_head: usize,
     head_dim: usize,
 ) -> KvStorage {
-    if !on_card || !cfg!(feature = "flash-attn") || attention == KvAttention::Mla {
+    if !on_card || !flash_layout_built() || attention == KvAttention::Mla {
         return KvStorage::F32;
     }
     if kv_half_on_card_enabled()
@@ -4791,6 +4791,48 @@ pub(crate) fn kv_storage(
         KvStorage::F32Mirrored
     } else {
         KvStorage::F32
+    }
+}
+
+/// Whether a card's cache is kept for the flash kernel here ([`kv_storage`]):
+/// the build's `flash-attn` feature — but on a test's thread holding
+/// `cache_kept_as_without_flash`, never.
+fn flash_layout_built() -> bool {
+    #[cfg(test)]
+    if PRICED_WITHOUT_FLASH.with(std::cell::Cell::get) {
+        return false;
+    }
+    cfg!(feature = "flash-attn")
+}
+
+#[cfg(test)]
+thread_local! {
+    static PRICED_WITHOUT_FLASH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Until it drops, this thread's [`kv_storage`] keeps a card's cache as a
+/// build WITHOUT the flash kernel does — f32, no mirror — for a test whose
+/// figures were sized on the default build (FUTURE_WORK #500): a card build's
+/// `cuda` feature brings `flash-attn`, which prices the card's cache as the
+/// half cache, and a fixture's card then held what it was sized not to. Only
+/// its own thread: the half cache's own tests and every card load run beside
+/// it unchanged. Prior art: tokio's `time::pause` (tokio 1.54
+/// `src/time/clock.rs`), a test input scoped to the test's own
+/// `current_thread` runtime, never the process.
+#[cfg(test)]
+pub(crate) fn cache_kept_as_without_flash() -> WithoutFlashLayout {
+    WithoutFlashLayout(PRICED_WITHOUT_FLASH.with(|p| p.replace(true)))
+}
+
+/// Puts this thread's layout back as it was ([`cache_kept_as_without_flash`]).
+#[cfg(test)]
+pub(crate) struct WithoutFlashLayout(bool);
+
+#[cfg(test)]
+impl Drop for WithoutFlashLayout {
+    fn drop(&mut self) {
+        let was = self.0;
+        PRICED_WITHOUT_FLASH.with(|p| p.set(was));
     }
 }
 
