@@ -3978,9 +3978,19 @@ link). The drafter choice already avoids it where a quantized copy is held.
 **Residual (2026-11-25, after the tensor-core bodies at 64, 128 and 256 dims):** (1) at 256 dims
 (Gemma 2/3, Gemma 4's windowed layers, Qwen 3.5 / 3.6's attention layers) the body runs, the group's
 query staged in shared memory, but a call still takes 3x the 7B's for the same heads and twice the
-dims (Gemma 2 2B at ~4,128: 94.2 µs against 132.7 before, the 7B's 31): a K step's 64 registers beside
-256 outputs leave one step's loads in flight. llama.cpp's transposed tile (positions as the 16 rows,
-query heads as 8 columns: 64 output registers; P^T into a B fragment by `movmatrix`) frees them. (2)
+dims (Gemma 2 2B at ~4,128: 94.2 µs against 132.7 before, the 7B's 31). **Measured against llama.cpp
+the same day** (`~/swarmllm-gate/deep/dec1125/run_l256.out`, one sitting, live node stopped): its
+`flash_attn_ext_f16<256,256,4,2>` takes 57.2 µs a call at ~4,128 on Gemma 2 2B (40 stream-K blocks)
++ 2.6 µs fixup against our 95-100 + 8.6; decode from a 4,096-token prompt 104.4 tok/s against our
+87.7, Qwen3.5-4B 74.9 against 69.4. **The cause is in the machine code, not the register count as such**
+(`cuobjdump -sass`, sm_86): at 168 registers ptxas issues each of the 32 output tiles' four V loads
+only after the previous tile's `mma` has its operands, and K four loads a k-step the same way —
+~48 trips to memory a 16-position step, one after another; the 128-wide body issues its 64 K loads
+in one batch and V in three, which is why it matches llama.cpp. Next: stage a step's K and V through
+shared memory by 16-byte `cp.async` and read the same fragments back by `ldmatrix` — the same bits,
+one trip a step (llama.cpp's `cp_async_cg_16` + `load_ldmatrix_trans`). Built on local branch
+`decode-attn-staged`, not yet verified on the card: its first run faulted on every launch (an
+`ldmatrix` without `.shared` reads its operand as a GENERIC address — fixed, gotcha #1172). (2)
 The merge, with its runs' weights staged (`decode_attn_combine_staged_f32`, bit for bit the serial
 one's; Gemma 2 2B at ~4,128 15.2 → 8.5 µs), still takes 8.4-9.1 µs a layer on the 7B at ~928 against
 llama.cpp's 3.0 µs fixup: folding it
