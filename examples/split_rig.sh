@@ -353,7 +353,7 @@
 #          weigh the ask with q2's cache gone. Size RAM_B and B2B_REPEAT (the
 #          prompt's sentences, default 165: ~7,000 tokens, sized for RAM_B=1700) so
 #          B holds ONE such conversation, not two: q1 prints B's budget. Prints q3's ask verdict, A's re-plans and
-#          B's release/ask order (B's log at debug: ENV_B=RUST_LOG=…). v0.3.310
+#          B's release/ask order (B's log at debug: ENV_B=SWARMLLM_LOGGING_LEVEL=debug — a node ignores RUST_LOG). v0.3.310
 #          is the control: B refuses q3's ask, counting q2's 420 MB (2026-11-25).
 #   refusepiece FUTURE_WORK #303: peerkv's shape, the long prompt only. Run
 #          with SWARMLLM_FAULT_REFUSE_DECRYPT=3: B treats its 3rd forward — a

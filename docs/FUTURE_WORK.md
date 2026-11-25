@@ -8618,7 +8618,9 @@ grep `^| N |`).
   (Llama 3.2 3B, B's last two parts on the processor at `RAM_B=1700`, two ~7,000-token prompts back to back). On
   v0.3.310, B refused q3's question 312 ms after q2's cancel, counting q2's 420 MB, and the reply failed (503).
   With the fix (a debug build, too slow to finish 7,000-token replies), B released those 420 MB first and said go
-  ahead. Guard
+  ahead. **On the published optimised v0.3.311** (2026-11-25 20:23Z, same rig, `~/swarmllm-gate/deep/b2b311/`): all
+  three replies served on the split (200, sensible); B logged q2's cancel at 20:25:12.235, released its 420 MB at
+  .466 and answered q3's question 0.4 ms later — Proceed. Guard
   `a_worker_settles_the_cancels_before_each_message_it_handles`. Prior art: vLLM's `EngineCore` processes aborts before
   each engine step (and #29987 before a step's output); the evidence is `docs/invariants/memory.md` § "A conversation
   that is over gives its room to one that is not".
