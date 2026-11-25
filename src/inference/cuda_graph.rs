@@ -1511,11 +1511,24 @@ mod cuda {
     /// (`memcpy_dtod`); read as kernels only, one that read a buffer that moved
     /// was never seen (`docs/plans/level_replay.md` Stage 0).
     fn copy_of(node: sys::CUgraphNode) -> Launch {
-        // NOT zeroed: its memory-type fields are enums with no zero value.
-        let mut p = std::mem::MaybeUninit::<sys::CUDA_MEMCPY3D>::uninit();
-        // SAFETY: a copy node of the live graph; the driver writes every field
-        // on success.
-        if unsafe { sys::cuGraphMemcpyNodeGetParams(node, p.as_mut_ptr()) }
+        // Every field valid BEFORE the driver writes: zeroed integers and
+        // pointers, and the two memory-type fields — enums with no zero value
+        // (`CUmemorytype` is 1-4) — given a value they have. The driver need not
+        // write a field the copy does not use (a host side's device address),
+        // and an `assume_init` over one it left was a read of memory never
+        // initialised (the .308 review). Prior art: the standard library's
+        // `MaybeUninit` "initializing a struct field-by-field" (`&raw mut`),
+        // and cudarc 0.17's bindgen layout of `CUDA_MEMCPY3D_st`.
+        let mut p = std::mem::MaybeUninit::<sys::CUDA_MEMCPY3D>::zeroed();
+        let at = p.as_mut_ptr();
+        // SAFETY: `at` points at `p`'s storage; each write is to one of its
+        // fields, in place.
+        unsafe {
+            (&raw mut (*at).srcMemoryType).write(sys::CUmemorytype::CU_MEMORYTYPE_DEVICE);
+            (&raw mut (*at).dstMemoryType).write(sys::CUmemorytype::CU_MEMORYTYPE_DEVICE);
+        }
+        // SAFETY: a copy node of the live graph, written into a valid struct.
+        if unsafe { sys::cuGraphMemcpyNodeGetParams(node, at) }
             .result()
             .is_err()
         {
@@ -1525,7 +1538,8 @@ mod cuda {
                 params: None,
             };
         }
-        // SAFETY: the driver filled it, above.
+        // SAFETY: every field was valid before the call, and the driver writes
+        // only valid values.
         let p = unsafe { p.assume_init() };
         let words = [
             p.srcDevice,
@@ -2051,9 +2065,15 @@ mod cuda {
         }
         .unwrap();
         let copied = src.copy();
+        // Made inside the capture, so freed inside it too: a free node beside
+        // its allocation, as a captured step frees what it made (gotcha #1165's
+        // other half). Dropped after the capture, it freed an address that
+        // only this graph — never launched — had planned (the .308 review).
+        let captured = copied.is_ok();
+        drop(copied);
         // SAFETY: the stream this thread began capturing.
         let graph = Graph(unsafe { result::stream::end_capture(stream.cu_stream()) }.unwrap());
-        let copied = copied.unwrap();
+        assert!(captured, "the copy was made inside the capture");
         assert!(!graph.0.is_null(), "the capture held");
         let launches = launches_of(graph.0).expect("the graph's nodes");
         let copy = launches
@@ -2078,7 +2098,6 @@ mod cuda {
             launches.inside(from).is_none(),
             "the source was made before the capture"
         );
-        drop(copied);
     }
 }
 
