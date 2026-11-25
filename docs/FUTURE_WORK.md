@@ -4669,9 +4669,13 @@ slower — it held the whole 14B with 36 of 48 layers on its card, left by sitti
 beside the 3B, 20 beside the 1.5B, 24 beside the 0.5B) — so users already get most of the gain. Prior art on WHICH
 drafter: Yan et al., "Decoding Speculative Decoding" (arXiv 2402.01528) — a draft's latency, driven by its DEPTH,
 matters more than its language-modelling accuracy (the 3B has 36 layers against the 1.5B's 28, at about the same bytes
-read a guess). **Next**: a cross-family A/B before `largest_that_can_draft` weighs depth (a rule from one family would
-also move Qwen 3.5's 9B from its 2B to the 0.8B, unmeasured) — the 9B pair with the 0.8B against the 2B, and a
-one-card 7B with the 0.5B against the 1.5B. Logs: `~/swarmllm-gate/deep/fr/real_link_n311{d,e,c}/`.
+read a guess). **The cross-family check says no rule change**: sitting `n311n` (the Qwen 3.5 9B, parts 0-4 here and
+5-9 with the head on Australia, the recurrent flow, ABBA, a FRESH far — it advertised no range before and [17,32), all
+15 on its card, after): the 2B Q8_0 read prose 17.48 / 17.51 / 16.53 and code 27.48 / 28.98 / 28.31 against the 0.8B's
+15.39 / 15.67 / 15.43 and 23.97 / 23.69 / 23.83 — the larger drafter +10% prose, +18% code, every pairing. A rule that
+weighed depth would have moved this pair to the 0.8B and lost that; `largest_that_can_draft` stays. The 14B's
+1.5B-over-3B edge (+7.5%) is the smaller effect of the two, measured on a far computer that had been loaded with the
+whole 14B by an earlier sitting. Open: none on the choice itself. Logs: `~/swarmllm-gate/deep/fr/real_link_n311{d,e,c,n}/`.
 
 Prior art: none taken as the design, by the owner's direction; the debate checked each idea against our own
 measured kills instead (lanes, twins, a drafter guild, verdict taps, scout-and-stitch: the plan's appendix), and
