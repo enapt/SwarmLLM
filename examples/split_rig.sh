@@ -424,7 +424,19 @@
 #          A's two whole hand-offs instead of B's own request (the real link's
 #          order, where B read the split's run from disk).
 #
-# usage: split_rig.sh split|reasoning|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv|peerkv|backtoback|peerload|refusepiece|owntiming|holdings|givesway|slices <binary> [<binary for B>]
+#   overlap FUTURE_WORK #461 (a partial overlap, 2026-11-25): A holds every part
+#          on the processor, B every part on its card (cap it with EXTRA_TOML
+#          `[resources] max_gpu_vram_mb`). The first ask plans B as holding
+#          parts OVERLAP_BACK_FROM..LAST (default 2), so B's worker loads the
+#          model's back; the next two plan B as holding 0..OVERLAP_FRONT_TO
+#          (default 5) and A the rest, so B is asked a range sharing layers with
+#          the one it holds, neither holding the other. PASS = B logs "shares
+#          layers with one this model's worker holds" and no hybrid placement
+#          for the front, and A's DIAG lines read B's forwards as fast as the
+#          back's. Control arm: ENV_B="SWARMLLM_GROWTH_ACROSS_HELD_RANGE=split"
+#          (B splits the front beside the back it keeps).
+#
+# usage: split_rig.sh split|reasoning|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv|peerkv|backtoback|peerload|refusepiece|owntiming|holdings|givesway|slices|overlap <binary> [<binary for B>]
 #   MODEL      model id (default: tinyllama for split, llama-3.2-3b for kill
 #              and failover)
 #   SHARDS_A   shard indices A holds, comma-separated (default 0; kill: 0,LAST;
@@ -506,7 +518,7 @@ rig_addr() {
 MODE="${1:?usage: split_rig.sh split|kill|failover|context|repeat|fetch|cache|remote|mixed|softunload <binary> [<binary for B>]}"
 BIN_A="${2:?binary}"
 BIN_B="${3:-$BIN_A}"
-case "$MODE" in split|reasoning|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|handoffcache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv|peerkv|backtoback|peerload|refusepiece|refusechain|killchain|owntiming|holdings|retract|givesway|slices) ;; *) echo "mode must be split, reasoning, kill, failover, failover_mid, context, whole, continue, repeat, fetch, cache, handoffcache, splitcache, remote, mixed, disputed, spliced, disconnect, softunload, layerprice, keep, route, latekv, peerkv, backtoback, peerload, refusepiece, refusechain, killchain, owntiming, holdings, retract, givesway or slices"; exit 2 ;; esac
+case "$MODE" in split|reasoning|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|handoffcache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv|peerkv|backtoback|peerload|refusepiece|refusechain|killchain|owntiming|holdings|retract|givesway|slices|overlap) ;; *) echo "mode must be split, reasoning, kill, failover, failover_mid, context, whole, continue, repeat, fetch, cache, handoffcache, splitcache, remote, mixed, disputed, spliced, disconnect, softunload, layerprice, keep, route, latekv, peerkv, backtoback, peerload, refusepiece, refusechain, killchain, owntiming, holdings, retract, givesway, slices or overlap"; exit 2 ;; esac
 # refusechain is remote's topology with one fault on C (#305).
 REFUSECHAIN=""; KILLCHAIN=""
 if [ "$MODE" = killchain ]; then
@@ -531,6 +543,8 @@ elif [ "$MODE" = split ] || [ "$MODE" = mixed ] || [ "$MODE" = disputed ] || [ "
   MODEL="${MODEL:-tinyllama-1.1b-chat-v1.0.q4-k-m}"
 elif [ "$MODE" = cache ] || [ "$MODE" = handoffcache ]; then
   MODEL="${MODEL:-qwen2.5-0.5b-instruct-fp16}"
+elif [ "$MODE" = overlap ]; then
+  MODEL="${MODEL:-qwen2.5-coder-7b-instruct-q4-k-m}"
 elif [ "$MODE" = softunload ]; then
   MODEL="${MODEL:-qwen2.5-14b-instruct-q4-k-m}"
 elif [ "$MODE" = layerprice ]; then
@@ -545,6 +559,11 @@ SHARDS=$(ls "$SRC" | sed -n 's/^shard_\([0-9]*\)\.bin$/\1/p' | sed 's/^0*\([0-9]
 LAST=$(echo "$SHARDS" | tail -1)
 N=$(echo "$SHARDS" | wc -l)
 [ "$N" -ge 2 ] || { echo "$MODEL has $N shard file(s) here; a split needs at least 2"; exit 2; }
+if [ "$MODE" = overlap ]; then
+  SHARDS_A="${SHARDS_A:-$(echo "$SHARDS" | paste -sd,)}"
+  SHARDS_B="${SHARDS_B:-$(echo "$SHARDS" | paste -sd,)}"
+  GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:--1}"
+fi
 if [ "$MODE" = slices ]; then
   SHARDS_A="${SHARDS_A:-0}"
   SHARDS_B="${SHARDS_B:-$(echo "$SHARDS" | paste -sd,)}"
@@ -1628,6 +1647,41 @@ PY
   exit $?
 fi
 
+if [ "$MODE" = overlap ]; then
+  KB=$(cat "$BASE/B/api_key")
+  IDB=$(curl -s -m 5 -H "Authorization: Bearer $KB" localhost:8920/api/admin/network-code \
+    | python3 -c 'import sys,json; print(json.load(sys.stdin)["node_id"][:16])')
+  Q="Write a short paragraph about the history of the bicycle."
+  BACK=${OVERLAP_BACK_FROM:-2}; FRONT=${OVERLAP_FRONT_TO:-5}
+  : > "$OUT/replies.jsonl"; : > "$OUT/marks.txt"
+  overlap_ask() { # label route
+    local ma mb t0
+    ma=$(wc -l < "$BASE/A/node.log"); mb=$(wc -l < "$BASE/B/node.log"); t0=$(date +%s.%N)
+    RIG_ROUTE="$2" ask "$Q" 96 "$1" | tee -a "$OUT/replies.jsonl" | cut -c1-200
+    echo "$1 $ma $(wc -l < "$BASE/A/node.log") $mb $(wc -l < "$BASE/B/node.log") $t0 $(date +%s.%N)" >> "$OUT/marks.txt"
+  }
+  overlap_ask back1 "{\"pretend_local_holds\":\"0-$((BACK - 1))\",\"pretend_peer_holds\":{\"$IDB\":\"$BACK-$LAST\"}}"
+  overlap_ask front2 "{\"pretend_local_holds\":\"$((FRONT + 1))-$LAST\",\"pretend_peer_holds\":{\"$IDB\":\"0-$FRONT\"}}"
+  overlap_ask front3 "{\"pretend_local_holds\":\"$((FRONT + 1))-$LAST\",\"pretend_peer_holds\":{\"$IDB\":\"0-$FRONT\"}}"
+  echo "overlap: B is $IDB; B's environment: ${ENV_B:-default}"
+  python3 - "$OUT/marks.txt" "$BASE/A/node.log" "$BASE/B/node.log" "$IDB" <<'PY2'
+import re, statistics as st, sys
+marks, alog, blog, idb = sys.argv[1:5]
+A = open(alog, errors="replace").read().splitlines()
+B = open(blog, errors="replace").read().splitlines()
+for line in open(marks):
+    label, a0, a1, b0, b1, t0, t1 = line.split()
+    a = A[int(a0):int(a1)]; b = B[int(b0):int(b1)]
+    w = [int(m.group(1)) for l in a if idb[:16] in l and "is_prefill=false" in l
+         for m in [re.search(r"worker_ms=(\d+)", l)] if m]
+    hyb = [re.sub(r".*Hybrid placement", "Hybrid placement", l)[:90] for l in b if "Hybrid placement" in l]
+    print(f"overlap: {label}: {float(t1) - float(t0):.1f} s, B's forwards n={len(w)} median "
+          f"{st.median(w) if w else None} ms, B placed afresh across a held range: "
+          f"{sum('shares layers with one this model' in l for l in b)}, B loads: "
+          f"{sum('model-worker: Model loaded' in l for l in b)}, B hybrid: {hyb[:2]}")
+PY2
+  exit 0
+fi
 if [ "$MODE" = slices ]; then
   KB=$(cat "$BASE/B/api_key")
   IDB=$(curl -s -m 5 -H "Authorization: Bearer $KB" localhost:8920/api/admin/network-code \

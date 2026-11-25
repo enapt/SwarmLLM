@@ -2944,6 +2944,24 @@ impl WorkerHandle {
             .unwrap_or(false)
     }
 
+    /// Does `incoming` share layers with a charged range while neither holds
+    /// the other? The worker drops only ranges a load strictly contains
+    /// (`model_worker::subsumed_segment_keys`), so it keeps both, and a split
+    /// of `incoming` is sized on the room beside a copy of the very layers they
+    /// share (#461, 2026-11-25).
+    fn partly_overlaps_a_charged_range(&self, incoming: (u32, u32)) -> bool {
+        self.charged_segments
+            .lock()
+            .map(|v| {
+                v.iter().any(|c| {
+                    layers_shared(incoming, c.range) > 0
+                        && !strictly_subsumes(incoming, c.range)
+                        && !(c.range.0 <= incoming.0 && incoming.1 <= c.range.1)
+                })
+            })
+            .unwrap_or(false)
+    }
+
     /// Record that this worker has been charged for `segment`, wholly on the
     /// device it is charged to, and add `mb` to what it owes. Idempotent on the
     /// range.
@@ -9515,6 +9533,33 @@ impl ModelProcessPool {
                 layers = format!("[{}..{})", segment.0, segment.1),
                 "This range takes in the one this model's worker was started with — placing it \
                  afresh rather than beside it, so the memory that range frees counts"
+            );
+            return Ok(false);
+        }
+        // Likewise a range that shares layers with one the worker holds, where
+        // neither holds the other: the worker keeps both, so the split rung
+        // put the new range's layers on the processor beside a card copy of
+        // the layers they share. A far computer holding a 14B's `[12..38)`
+        // whole on its card was asked `[16..48)` by a second split: 17 of 32
+        // layers on its card, every forward 135 ms against 33 for the same
+        // range held alone (n311d), prose 2.92 tok/s; whichever of two shapes came
+        // second ran slow (real link n311r, 2026-11-25). The planner priced
+        // this as the idle worker's retirement too (`forward_would_load`,
+        // `forward_replaces_the_worker`). Prior art: a Petals server holds
+        // one contiguous span of blocks and, moved, loads the new span in
+        // place of the old (`block_selection.py`, `should_choose_other_blocks`),
+        // never a second span beside it. A/B
+        // `SWARMLLM_GROWTH_ACROSS_HELD_RANGE=split` keeps the old split.
+        if shape == RunShape::Plain
+            && handle.partly_overlaps_a_charged_range(segment)
+            && !handle.in_use(self.conversation_window())
+            && std::env::var("SWARMLLM_GROWTH_ACROSS_HELD_RANGE").as_deref() != Ok("split")
+        {
+            tracing::info!(
+                model = %model_id,
+                layers = format!("[{}..{})", segment.0, segment.1),
+                "This range shares layers with one this model's worker holds — placing it \
+                 afresh rather than beside a copy of the layers they share"
             );
             return Ok(false);
         }
@@ -25243,6 +25288,69 @@ mod admission_tests {
             .expect("a worker in use still takes the range");
         assert!(matches!(grown, Growth::Grown(_)));
         assert!(h.serves_segment((0, 26), RunShape::Plain));
+    }
+
+    /// **A range sharing layers with one the worker holds is placed afresh,
+    /// not split beside it** (#461, 2026-11-25). The worker keeps both ranges
+    /// (it drops only one a load strictly contains), so the split rung sized
+    /// the new one on the room beside a card copy of the layers they share: a
+    /// far computer holding a 14B's `[12..38)` whole, asked `[16..48)` by a
+    /// second split, ran 15 of its 32 layers on the processor, 135 ms a
+    /// forward against 33.
+    #[tokio::test]
+    async fn a_range_overlapping_a_held_one_is_placed_afresh_not_beside_it() {
+        let (p, m, h, _worker_end) = fourteen_b_spawned_as_0_24("fourteen-b-461-overlap").await;
+        let Some((CardSplit::Layers { on_card, total: 24 }, _)) =
+            p.growth_split(&m, (12, 36), &h, 0)
+        else {
+            panic!("fixture: beside [0..24) the card takes part of [12..36) by whole layers");
+        };
+        assert!(
+            on_card > 0 && on_card < 24,
+            "fixture: the split rung would take it, short of the card ({on_card} of 24)"
+        );
+
+        let grown = p
+            .grow_worker(&m, (12, 36), h, Requester::Owner, RunShape::Plain)
+            .await
+            .expect("an idle worker is placed afresh, never refused");
+        assert!(matches!(grown, Growth::Respawn));
+        assert!(
+            p.workers.get(&m).is_none(),
+            "retired, so `get_or_spawn` places [12..36) on a card read afresh"
+        );
+    }
+
+    /// ...and a worker in use keeps the split: refused, the conversation it
+    /// holds would be planned again (#461).
+    #[tokio::test]
+    async fn a_worker_in_use_still_takes_an_overlapping_range_as_a_split() {
+        let (p, m, h, _worker_end) =
+            fourteen_b_spawned_as_0_24("fourteen-b-461-overlap-in-use").await;
+        h.note_conversation(Uuid::new_v4());
+        let grown = p
+            .grow_worker(&m, (12, 36), h.clone(), Requester::Owner, RunShape::Plain)
+            .await
+            .expect("a worker in use still takes the range");
+        assert!(matches!(grown, Growth::Grown(_)));
+        assert!(h.serves_segment((12, 36), RunShape::Plain));
+    }
+
+    /// Only a PARTIAL overlap: a run inside a held range is served from it
+    /// (#449), one taking it in is #461's base case, one beside it shares no
+    /// layer.
+    #[tokio::test]
+    async fn only_a_partial_overlap_shares_layers_with_a_held_range() {
+        let (_p, _m, h, _worker_end) =
+            fourteen_b_spawned_as_0_24("fourteen-b-461-overlap-kinds").await;
+        assert!(h.partly_overlaps_a_charged_range((12, 36)));
+        assert!(!h.partly_overlaps_a_charged_range((4, 20)), "inside it");
+        assert!(
+            !h.partly_overlaps_a_charged_range((0, 24)),
+            "the range itself"
+        );
+        assert!(!h.partly_overlaps_a_charged_range((0, 30)), "taking it in");
+        assert!(!h.partly_overlaps_a_charged_range((24, 48)), "beside it");
     }
 
     fn whole_refit(read_mb: u64) -> WholeRefit {

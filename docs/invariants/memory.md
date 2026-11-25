@@ -3444,7 +3444,39 @@ Tests: `a_range_taking_in_the_spawn_range_is_placed_afresh_not_beside_it` (red
 with the rung on), `a_worker_in_use_still_takes_a_wider_range_as_a_split`. A/B
 `SWARMLLM_GROWTH_OVER_BASE_RANGE=split`. Left open: the accounting itself (the
 daemon still charges a dropped spawn range's base while a split stands beside a
-worker in use). The retirement's worse-placement guard follows.
+worker in use).
+
+**And a range that PARTLY overlaps a held one** (2026-11-25). Containment was
+the only shape the step-aside knew. A range sharing layers with a held one,
+neither holding the other, met the split rung, and the worker keeps BOTH — it
+drops only what a load strictly contains — so the new range's own copy was sized
+on the room beside a card copy of the very layers they share. Real link n311r
+(v0.3.311 both ends, the 14B, Australia's advertised placement polled between
+arms): `[12..38)` loaded whole for start-and-finish (26 on its card), then
+flowq's `[16..48)` beside it — `[[12,38],[16,48]]`, 43 on its card — every
+flowq forward 135-136 ms of Australia's own time against 33 when it held that
+range alone (n311d), 2.92 / 2.76 prose tok/s, while start-and-finish's stayed
+17-19 ms. Whichever shape came second ran slow. Now `charge_segment_as_split`
+also answers `Ok(false)` for a plain range PARTLY overlapping any charged range
+(`WorkerHandle::partly_overlaps_a_charged_range`) while the worker is idle: the
+ladder retires it and the range is placed afresh, the retirement
+`forward_would_load` and `forward_replaces_the_worker` had already priced. For
+the asked run this never places fewer layers on the card than the split did
+(the split's room is the fresh spawn's less the held copy); what it gives up is
+the held range's copy, reloaded if asked for again. Prior art: a Petals server
+holds one contiguous span of blocks and, moved, loads the new span in place of
+the old (`block_selection.py`'s `should_choose_other_blocks`), never a second
+beside it. Tests `a_range_overlapping_a_held_one_is_placed_afresh_not_beside_it`
+(red with the step-aside off), `a_worker_in_use_still_takes_an_overlapping_range_as_a_split`,
+`only_a_partial_overlap_shares_layers_with_a_held_range`. A/B
+`SWARMLLM_GROWTH_ACROSS_HELD_RANGE=split`. On the card (`split_rig.sh overlap`,
+A/B/B/A, Qwen2.5-Coder-7B, B capped at 5,000 MB): B holding `[6..28)` asked
+`[0..22)` — fixed, retired and loaded whole 2.4 s later, its forwards 10 ms;
+old, 5 of 22 layers on the card, 77-79 ms; both replies the model's by
+llama.cpp (95 of 96 tokens at rank 1). Left: two shapes used in turn reload
+at each switch past the conversation gap, where their union would serve both as
+views (#449) in less memory than the two copies (FUTURE_WORK #461). The
+retirement's worse-placement guard follows.
 
 **A replacement keeps on the card the held layers it goes on serving**
 (2026-11-17, FUTURE_WORK #461 contributor 1). The retirement asked only whether

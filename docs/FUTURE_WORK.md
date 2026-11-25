@@ -6969,7 +6969,7 @@ reverse — and its post-verify keeps drafting while the target verifies (up to 
 between the two; here they would.
 
 #### #461 — A peer's split that asks a computer for a WIDER range replaces its all-card copy with a mostly-processor one, which then serves every narrower request too
-`P3` · memory / admission · **NARROWED** — 2026-11-15 (the growth half shipped in v0.3.292); contributor 1's guard built 2026-11-17 (shipped in v0.3.297-alpha); residual (4)'s placement built 2026-11-18 (shipped in v0.3.299) · found on the real link (`real_link.sh` TAG=bal292, a forced split point) · related: #3 (j12), #3 (j13), #449, #458
+`P3` · memory / admission · **NARROWED** — 2026-11-15 (the growth half shipped in v0.3.292); contributor 1's guard built 2026-11-17 (shipped in v0.3.297-alpha); residual (4)'s placement built 2026-11-18 (shipped in v0.3.299); a partial overlap built 2026-11-25 · found on the real link (`real_link.sh` TAG=bal292, a forced split point) · related: #3 (j12), #3 (j13), #449, #458
 
 **Narrowed 2026-11-15 (v0.3.292)**: contributor 2 was the GROWTH ladder (below, "Contributor 2 found"), and
 `charge_segment_as_split` now steps aside for an idle worker whose spawn range the new range takes in, so the
@@ -7004,6 +7004,34 @@ arms) — 11 layers on B's card. B's loader put the processor on `6..17` (new) a
 120-token replies after the first 11.9-12.4 s new, 11.7-13.0 s old, the first (n-gram path) 18.2-19.0 vs 18.3-18.7 s
 (the card shared with another program at ~940 MiB, 9 %: indicative). Not yet seen on the real link: it needs the far
 computer on a release carrying it.
+
+**Built 2026-11-25 (a PARTIAL overlap)**: the step-aside above covered a range taking in the worker's base one; a
+range sharing layers with a held one where neither holds the other still met the split rung, and the worker keeps
+both (it drops only a range a load strictly contains), so the new range's own copy went largely to the processor.
+Found on the real link (n311r, v0.3.311 both ends, the 14B, arms start-and-finish / flowq / start-and-finish / flowq
+/ start-and-finish, Australia's advertised placement polled between them): Australia loaded `[12..38)` whole (26 on
+its card), then the flowq shape's `[16..48)` beside it — `[[12,38],[16,48]]`, 43 on its card — and every flowq
+forward took 135-136 ms of its own time against 33 when that range was the only one held (n311d), prose 2.92 / 2.76
+and code 7.83 / 8.10 tok/s; the start-and-finish forwards stayed at 17-19 ms. Earlier sittings that night ran
+start-and-finish after other shapes and read 45-46 and 81-84 ms (Australia's placement not polled then; 19 on 11-21). `charge_segment_as_split` now answers `Ok(false)` for a
+plain range that PARTLY overlaps any charged range (`WorkerHandle::partly_overlaps_a_charged_range`) while the
+worker is not in use, so the ladder retires it and the range is placed afresh — the retirement the planner already
+priced (`forward_would_load`, `forward_replaces_the_worker`). A worker in use keeps the split. Prior art: a Petals
+server holds ONE contiguous span of blocks and, moved, loads the new span in place of the old
+(`block_selection.py`, `should_choose_other_blocks`; PR #493 rechecks before moving), never a second span beside
+it. Tests `a_range_overlapping_a_held_one_is_placed_afresh_not_beside_it` (red with the step-aside off),
+`a_worker_in_use_still_takes_an_overlapping_range_as_a_split`, `only_a_partial_overlap_shares_layers_with_a_held_range`.
+A/B `SWARMLLM_GROWTH_ACROSS_HELD_RANGE=split`; rig `split_rig.sh overlap`. **Checked on the card** (2026-11-25, one
+CUDA build, arms A/B/B/A, `~/swarmllm-gate/deep/p461o_ab.sh`: Qwen2.5-Coder-7B, B capped at 5,000 MB,
+`SWARMLLM_SPLIT_READS_CARD=0` both arms): B held `[6..28)` whole and was asked `[0..22)` twice. Fixed — "shares layers
+with one this model's worker holds", retired, `[0..22)` loaded whole 2.4 s later, B's forwards a median 10 ms (the
+back's 11), the 96-token asks 6.7-9.0 s then 4.5-7.0; old — "Hybrid placement: 5 layers on the graphics card, layers
+5..22 on the processor", 77-79 ms, 13.3-15.0 s. Both arms' replies are the model's by llama.cpp
+(`score_against_reference.py`: 95 of 96 tokens at rank 1 each; the old reply leaves the reference's first choice at
+its second token, rank 2, gap 0.104). Not yet seen on the real link: it needs the far computer on a release carrying
+it. **Left**: a far computer that two shapes
+use in turn now reloads at each switch past the conversation gap; their union (`[12..48)`, 36 layers, against the
+58 the two copies held) would serve both as views (#449) — a respawn as the HULL where it fits whole on the card.
 
 **Built 2026-11-17 (contributor 1; shipped in v0.3.297-alpha)**: `ModelProcessPool::replacement_keeps_the_card`,
 asked beside the fit by a peer's UP-FRONT weighing only (`forward_would_load` → `peer_load_refusal`; a refusal at the
