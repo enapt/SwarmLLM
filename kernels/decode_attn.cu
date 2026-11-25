@@ -346,6 +346,48 @@ static __device__ __forceinline__ unsigned da_half2_bits(const float lo, const f
 static __device__ __forceinline__ unsigned da_halves_bits(const __half lo, const __half hi) {
     return (unsigned)__half_as_ushort(lo) | ((unsigned)__half_as_ushort(hi) << 16);
 }
+
+// 16 bytes from the cache into shared memory without a register; a dead row
+// (`live` false) copies nothing and fills the 16 bytes with zeros.
+static __device__ __forceinline__ void da_cp_async16(__half *smem, const __half *gmem, const bool live) {
+    const unsigned s = (unsigned)__cvta_generic_to_shared(smem);
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n"
+                 ::"r"(s), "l"(gmem), "r"(live ? 16 : 0) : "memory");
+}
+
+static __device__ __forceinline__ void da_cp_async_commit() {
+    asm volatile("cp.async.commit_group;\n" ::: "memory");
+}
+
+// Wait until at most `PENDING` of this thread's committed groups are in flight.
+template <int PENDING>
+static __device__ __forceinline__ void da_cp_async_wait() {
+    asm volatile("cp.async.wait_group %0;\n" ::"n"(PENDING) : "memory");
+}
+
+// Four 8 × 8 half matrices; lane i gives the address of row i % 8 of matrix
+// i / 8. Without `.trans` lane (gid, tig) receives row gid's elements 2 tig and
+// 2 tig + 1 of each; with it, rows 2 tig and 2 tig + 1 of column gid — the
+// lower-indexed element in the low half either way.
+// ⚠ `.shared` is load-bearing: without a state space `ldmatrix` reads its
+// operand as a GENERIC address, and a 32-bit shared offset read that way
+// points near zero — every launch faulted ("SM Warp Exception: Out Of Range
+// Address", 2026-11-25; llama.cpp passes the generic pointer instead).
+static __device__ __forceinline__ void da_ldmatrix_x4(unsigned (&r)[4], const __half *p) {
+    const unsigned s = (unsigned)__cvta_generic_to_shared(p);
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\n"
+                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
+                 : "r"(s)
+                 : "memory");
+}
+
+static __device__ __forceinline__ void da_ldmatrix_x4_trans(unsigned (&r)[4], const __half *p) {
+    const unsigned s = (unsigned)__cvta_generic_to_shared(p);
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0, %1, %2, %3}, [%4];\n"
+                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
+                 : "r"(s)
+                 : "memory");
+}
 #endif
 
 // Up to 128 dims a warp keeps the group's query in registers (KS × 4). At
@@ -362,7 +404,32 @@ struct DaMmaQuery {
     static constexpr int ROW_WORDS = D / 2 + 4;
 };
 
+// STAGED (256 dims): a step's 16 K and 16 V rows go through the warp's own
+// shared memory. Unstaged, the body holds 168 registers at 256 and ptxas
+// issues each output tile's four V loads only once the previous tile's mma
+// has its operands, the K loads four a k-step the same way — ~48 trips to
+// memory a step one after another (`cuobjdump -sass`, 2026-11-25): 95-100 µs
+// a call on Gemma 2 2B at ~4,128 positions where llama.cpp's MMA kernel takes
+// 57. Staged, a warp issues a step's rows as 16-byte `cp.async` copies — no
+// register holds them in flight, so a step is one trip, K and V in two groups
+// (the scores wait for K only) — and reads the SAME fragments back with
+// `ldmatrix` (V `.trans`): the same half bits in the same mma order, so the
+// answer is the unstaged body's bit for bit. Rows sit D + 8 halves apart (528
+// bytes at 256): an ldmatrix phase's eight rows fall in 32 different banks.
+// Two warps a block: 2 × 16.5 KB of rows + the query's 8.25 KB stays under
+// the 48 KB a launch takes without raising a limit. A position past the run
+// is copied as zeros (`cp.async`'s source size 0), the zeros the unstaged
+// body puts in registers. Requires every K/V row on 16 bytes
+// (`decode_attn::mma_stages`).
+// Prior art: llama.cpp `fattn-mma-f16.cuh` (K/V tiles by `cp_async_cg_16`,
+// fragments by `load_ldmatrix` / `load_ldmatrix_trans`), FlashAttention-2.
 template <int D>
+struct DaMmaStage {
+    static constexpr int ROW = D + 8;
+    static constexpr int WARPS = 2;
+};
+
+template <int D, bool STAGED>
 static __device__ __forceinline__ void decode_attn_mma_body(
     const float *__restrict__ q,
     const __half *__restrict__ k,
@@ -383,11 +450,15 @@ static __device__ __forceinline__ void decode_attn_mma_body(
 #ifdef DA_MMA_AVAILABLE
     constexpr int KS = D / 16;  // k-steps of the score product
     constexpr int NT = D / 8;   // output tiles of Σ P·V
+    constexpr int WARPS = STAGED ? DaMmaStage<D>::WARPS : DA_MMA_WARPS;
+    constexpr int SR = DaMmaStage<D>::ROW;
+    static_assert(!STAGED || NT % 2 == 0, "V fragments are read two tiles a load");
     const int g = blockIdx.x;   // (batch, KV head)
     const int bi = g / n_kv_head;
     const int h = g % n_kv_head;
     const int lane = threadIdx.x & 31;
-    const int c = blockIdx.y * DA_MMA_WARPS + (threadIdx.x >> 5);
+    const int warp = threadIdx.x >> 5;
+    const int c = blockIdx.y * WARPS + warp;
     const float *qg = q + (long long)g * n_rep * D;
     constexpr bool Q_SHARED = DaMmaQuery<D>::IN_SHARED;
     constexpr int QW = DaMmaQuery<D>::ROW_WORDS;
@@ -396,7 +467,7 @@ static __device__ __forceinline__ void decode_attn_mma_body(
     // needs every thread of the block.
     __shared__ unsigned q_shared[Q_SHARED ? 16 * QW : 1];
     if constexpr (Q_SHARED) {
-        for (int i = threadIdx.x; i < 16 * (D / 2); i += DA_MMA_WARPS * 32) {
+        for (int i = threadIdx.x; i < 16 * (D / 2); i += WARPS * 32) {
             const int r = i / (D / 2);
             const int w = i % (D / 2);
             q_shared[r * QW + w] = r < n_rep
@@ -436,6 +507,19 @@ static __device__ __forceinline__ void decode_attn_mma_body(
     const __half *kb = k + bi * k_sb + h * k_sh + (long long)s0 * D;
     const __half *vb = v + bi * v_sb + h * v_sh + (long long)s0 * D;
 
+    // STAGED: this warp's step of K rows, then of V rows (`DaMmaStage`).
+    __shared__ __align__(16) __half kv_stage[STAGED ? WARPS * 2 * 16 * SR : 8];
+    __half *k_stage = kv_stage + (STAGED ? warp * 2 * 16 * SR : 0);
+    __half *v_stage = k_stage + (STAGED ? 16 * SR : 0);
+    // An ldmatrix row: lane i gives row i % 8 of matrix i / 8. K: matrix m is
+    // score tile m / 2, dims + 8 (m % 2) — kf[t][ks][0..1] of both tiles. V:
+    // matrix m is positions + 8 (m % 2) of output tile t + m / 2 — b0, b1 of
+    // tiles t and t + 1.
+    const int lm = lane >> 3;
+    const int lr = lane & 7;
+    const __half *k_frag = k_stage + (8 * (lm >> 1) + lr) * SR + 8 * (lm & 1);
+    const __half *v_frag = v_stage + (8 * (lm & 1) + lr) * SR + 8 * (lm >> 1);
+
     float o[NT][4];
 #pragma unroll
     for (int t = 0; t < NT; t++) {
@@ -453,15 +537,43 @@ static __device__ __forceinline__ void decode_attn_mma_body(
         // Scores of positions p0..p0+15: two 8-position tiles, column gid of
         // tile t is position p0 + 8t + gid — its K row read as half pairs.
         float s[2][4];
-        unsigned kf[2][KS][2];
+        unsigned kf[STAGED ? 1 : 2][STAGED ? 1 : KS][2];
+        if constexpr (STAGED) {
+            // Every lane's ldmatrix of the last step has read its rows.
+            __syncwarp();
+            // Row r is position p0 + r; a copy is 16 bytes of one row, so the
+            // warp moves whole rows. A dead row's source stays inside the run.
 #pragma unroll
-        for (int t = 0; t < 2; t++) {
-            const int p = p0 + 8 * t + gid;
-            const unsigned *krow = reinterpret_cast<const unsigned *>(kb + (long long)p * D);
+            for (int i = lane; i < 16 * (D / 8); i += 32) {
+                const int r = i / (D / 8);
+                const int piece = 8 * (i % (D / 8));
+                const int p = p0 + r;
+                const long long at = (long long)(p < n ? p : 0) * D + piece;
+                da_cp_async16(k_stage + r * SR + piece, kb + at, p < n);
+            }
+            da_cp_async_commit();
 #pragma unroll
-            for (int ks = 0; ks < KS; ks++) {
-                kf[t][ks][0] = p < n ? krow[ks * 8 + tig] : 0u;
-                kf[t][ks][1] = p < n ? krow[ks * 8 + tig + 4] : 0u;
+            for (int i = lane; i < 16 * (D / 8); i += 32) {
+                const int r = i / (D / 8);
+                const int piece = 8 * (i % (D / 8));
+                const int p = p0 + r;
+                const long long at = (long long)(p < n ? p : 0) * D + piece;
+                da_cp_async16(v_stage + r * SR + piece, vb + at, p < n);
+            }
+            da_cp_async_commit();
+            // K landed (V may still be in flight), and every lane sees it.
+            da_cp_async_wait<1>();
+            __syncwarp();
+        } else {
+#pragma unroll
+            for (int t = 0; t < 2; t++) {
+                const int p = p0 + 8 * t + gid;
+                const unsigned *krow = reinterpret_cast<const unsigned *>(kb + (long long)p * D);
+#pragma unroll
+                for (int ks = 0; ks < KS; ks++) {
+                    kf[t][ks][0] = p < n ? krow[ks * 8 + tig] : 0u;
+                    kf[t][ks][1] = p < n ? krow[ks * 8 + tig + 4] : 0u;
+                }
             }
         }
 #pragma unroll
@@ -472,7 +584,21 @@ static __device__ __forceinline__ void decode_attn_mma_body(
             }
         }
         // Each tile adds its k-steps in order, whichever way the query is held.
-        if constexpr (Q_SHARED) {
+        if constexpr (STAGED) {
+            static_assert(!STAGED || Q_SHARED, "only the 256-wide body is staged");
+#pragma unroll
+            for (int ks = 0; ks < KS; ks++) {
+                unsigned a_shared[4];
+#pragma unroll
+                for (int f = 0; f < 4; f++) {
+                    a_shared[f] = q_shared[(gid + 8 * (f & 1)) * QW + ks * 8 + tig + 4 * (f >> 1)];
+                }
+                unsigned kr[4];
+                da_ldmatrix_x4(kr, k_frag + 16 * ks);
+                da_mma_16816(s[0], a_shared, kr[0], kr[1]);
+                da_mma_16816(s[1], a_shared, kr[2], kr[3]);
+            }
+        } else if constexpr (Q_SHARED) {
 #pragma unroll
             for (int ks = 0; ks < KS; ks++) {
                 unsigned a_shared[4];
@@ -550,6 +676,25 @@ static __device__ __forceinline__ void decode_attn_mma_body(
         // V as B: column gid of tile t is dim 8t + gid; rows (positions)
         // 2 tig, 2 tig + 1 and 2 tig + 8, 2 tig + 9. A position past the run
         // reads as zero: its P is zero, and 0 × a NaN left in the buffer is not.
+        if constexpr (STAGED) {
+            // V landed, and every lane sees it.
+            da_cp_async_wait<0>();
+            __syncwarp();
+#pragma unroll
+            for (int t = 0; t < NT; t += 2) {
+                unsigned vr[4];
+                da_ldmatrix_x4_trans(vr, v_frag + 8 * t);
+#pragma unroll
+                for (int u = 0; u < 2; u++) {
+                    o[t + u][0] *= scale_old[0];
+                    o[t + u][1] *= scale_old[0];
+                    o[t + u][2] *= scale_old[1];
+                    o[t + u][3] *= scale_old[1];
+                    da_mma_16816(o[t + u], pa, vr[2 * u], vr[2 * u + 1]);
+                }
+            }
+            continue;
+        }
         const int pv = p0 + 2 * tig;
         const __half zero = __float2half(0.0f);
 #pragma unroll
@@ -601,14 +746,28 @@ static __device__ __forceinline__ void decode_attn_mma_body(
         const long long k_sb, const long long k_sh, const long long v_sb,          \
         const long long v_sh, const float scale, const float softcap,              \
         const int chunk, const int n_chunks) {                                     \
-        decode_attn_mma_body<D>(q, k, v, partial, n_kv_head, n_rep, s_len, k_sb,   \
-                                k_sh, v_sb, v_sh, scale, softcap, chunk, n_chunks); \
+        decode_attn_mma_body<D, false>(q, k, v, partial, n_kv_head, n_rep, s_len,  \
+                                       k_sb, k_sh, v_sb, v_sh, scale, softcap,     \
+                                       chunk, n_chunks);                           \
     }
 
 DA_MMA_ENTRY(decode_attn_mma_f16kv_d64, 64)
 DA_MMA_ENTRY(decode_attn_mma_f16kv_d128, 128)
-// Gemma 2/3, Gemma 4's windowed layers, Qwen 3.5/3.6's attention layers.
+// Gemma 2/3, Gemma 4's windowed layers, Qwen 3.5/3.6's attention layers — a
+// view whose rows do not all start on 16 bytes, or `SWARMLLM_DECODE_ATTN_STAGE=0`.
 DA_MMA_ENTRY(decode_attn_mma_f16kv_d256, 256)
+
+// The same arguments; two warps a block (`DaMmaStage`).
+extern "C" __global__ void __launch_bounds__(DaMmaStage<256>::WARPS * 32)
+decode_attn_mma_staged_f16kv_d256(
+    const float *__restrict__ q, const __half *__restrict__ k, const __half *__restrict__ v,
+    float *__restrict__ partial, const int n_kv_head, const int n_rep, const int s_len,
+    const long long k_sb, const long long k_sh, const long long v_sb, const long long v_sh,
+    const float scale, const float softcap, const int chunk, const int n_chunks
+) {
+    decode_attn_mma_body<256, true>(q, k, v, partial, n_kv_head, n_rep, s_len, k_sb, k_sh,
+                                    v_sb, v_sh, scale, softcap, chunk, n_chunks);
+}
 
 // A TREE's rows TILED over the half cache (#134 (b)): one block stages ONE KV
 // head's chunk of K and V in shared memory and serves a tile of the tree's

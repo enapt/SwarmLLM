@@ -3975,22 +3975,12 @@ link). The drafter choice already avoids it where a quantized copy is held.
 #### #309 — Small dense models decoded at 0.80-0.83 of llama.cpp on a card; 0.94-1.00 since the attention chunk follows the cache, Gemma 4 E2B 0.87
 `P3` · perf-local · **PARTIAL** — 2026-10-19, the tensor-core body 2026-11-25 · history: #307's sweep
 
-**Residual (2026-11-25, after the tensor-core bodies at 64, 128 and 256 dims):** (1) at 256 dims
-(Gemma 2/3, Gemma 4's windowed layers, Qwen 3.5 / 3.6's attention layers) the body runs, the group's
-query staged in shared memory, but a call still takes 3x the 7B's for the same heads and twice the
-dims (Gemma 2 2B at ~4,128: 94.2 µs against 132.7 before, the 7B's 31). **Measured against llama.cpp
-the same day** (`~/swarmllm-gate/deep/dec1125/run_l256.out`, one sitting, live node stopped): its
-`flash_attn_ext_f16<256,256,4,2>` takes 57.2 µs a call at ~4,128 on Gemma 2 2B (40 stream-K blocks)
-+ 2.6 µs fixup against our 95-100 + 8.6; decode from a 4,096-token prompt 104.4 tok/s against our
-87.7, Qwen3.5-4B 74.9 against 69.4. **The cause is in the machine code, not the register count as such**
-(`cuobjdump -sass`, sm_86): at 168 registers ptxas issues each of the 32 output tiles' four V loads
-only after the previous tile's `mma` has its operands, and K four loads a k-step the same way —
-~48 trips to memory a 16-position step, one after another; the 128-wide body issues its 64 K loads
-in one batch and V in three, which is why it matches llama.cpp. Next: stage a step's K and V through
-shared memory by 16-byte `cp.async` and read the same fragments back by `ldmatrix` — the same bits,
-one trip a step (llama.cpp's `cp_async_cg_16` + `load_ldmatrix_trans`). Built on local branch
-`decode-attn-staged`, not yet verified on the card: its first run faulted on every launch (an
-`ldmatrix` without `.shared` reads its operand as a GENERIC address — fixed, gotcha #1172). (2)
+**Residual (2026-11-25, after the tensor-core bodies at 64, 128 and 256 dims and the staged 256-wide
+step):** (1) at 256 dims (Gemma 2/3, Gemma 4's windowed layers, Qwen 3.5 / 3.6's attention layers) a
+call is now within 6 % of llama.cpp's (60.6 µs against 57.2 + 2.6 fixup, Gemma 2 2B at ~4,128) — see
+"Done" below; decode from a 4,096-token prompt 96.4-98.3 tok/s against its 104.4, and what is left of
+that gap is mostly (2). The transposed tile (positions as the 16 `mma` rows, the query as B, llama.cpp's
+D = 256 config) is no longer needed for the attention call itself; re-measure before building it. (2)
 The merge, with its runs' weights staged (`decode_attn_combine_staged_f32`, bit for bit the serial
 one's; Gemma 2 2B at ~4,128 15.2 → 8.5 µs), still takes 8.4-9.1 µs a layer on the 7B at ~928 against
 llama.cpp's 3.0 µs fixup: folding it
@@ -4011,7 +4001,15 @@ and gained 1-3 %, not landed): Gemma 2 2B's attention 132.7 → 94.2 µs a call 
 4,096-token prompt 79.1-81.1 → 86.1-87.9 tok/s, Qwen3.5-4B 66.5-68.0 → 69.9-71.4. **And the merge**: its runs'
 weights staged once a block, bit for bit the serial merge's (`decode_attn_combine_staged_f32`, A/B
 `SWARMLLM_DECODE_ATTN_MERGE=serial`): Gemma 2 2B's 15.2 → 8.5 µs a call at ~4,128, the 7B's 9.6-10.2 → 8.4-9.1 at ~928;
-decode inside the noise of a warming card. The history of the attempts before it:
+decode inside the noise of a warming card. **And the 256-wide step staged** (`decode_attn_mma_staged_f16kv_d256`,
+`decode_attn::mma_stages`, A/B `SWARMLLM_DECODE_ATTN_STAGE=0`; `docs/invariants/inference.md` § "A step's K and V
+go through shared memory"): the unstaged body at 168 registers made ~48 trips to memory a 16-position step one
+after another (`cuobjdump -sass`); each warp now copies a step's 16 K and 16 V rows by 16-byte `cp.async` and reads
+the same fragments back by `ldmatrix` — bit for bit the unstaged body (tested, with a control). Gemma 2 2B's
+attention 94.7 → 60.6 µs a call at ~4,128, Qwen3.5-4B's 90.5 → 57.6; decode from a 4,096-token prompt Gemma 2 2B
+88.0-89.1 → 96.4-98.3 tok/s, Qwen3.5-4B 70.4-71.5 → 70.1-73.3 (`dec1125/run_stage2.console`, ABBA). Its first card
+run faulted on every launch: an `ldmatrix` without `.shared` reads a 32-bit shared offset as a GENERIC address
+(gotcha #1172). The history of the attempts before it:
 
 **Re-measured 2026-11-25: decode attention was still the gap, on the 7B too, and it grew with the
 cache.** nsys, Qwen2.5-Coder-7B Q4_K_M at ~960 positions, RTX 3070 Laptop, live node stopped

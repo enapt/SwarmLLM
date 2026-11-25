@@ -395,6 +395,35 @@ fn mma_takes(d: usize, n_rep: usize, merged: bool, offsets: [usize; 6]) -> bool 
         && kernel_ptx_cap() >= 80
 }
 
+/// Does a call [`mma_takes`] at 256 dims stage each step's K and V through
+/// shared memory (`decode_attn_mma_staged_f16kv_d256`, `kernels/decode_attn.cu`
+/// § `DaMmaStage`)? Its 16-byte copies need every K/V row on 16 bytes —
+/// `offsets` as for [`mma_takes`], in halves. The same bits as the unstaged
+/// body; never the length or the card, so a captured step keeps its kernel.
+#[cfg(feature = "candle-cuda")]
+fn mma_stages(d: usize, offsets: [usize; 6]) -> bool {
+    d == 256 && offsets.iter().all(|o| o.is_multiple_of(8))
+}
+
+/// Launches of the staged 256-wide body in this process — what a test reads
+/// to know it ran (`the_tensor_core_decode_kernel_matches_f32_attention`).
+#[cfg(feature = "candle-cuda")]
+static STAGED_STEP_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// `STAGED_STEP_CALLS`.
+#[cfg(all(test, feature = "candle-cuda"))]
+fn staged_step_calls() -> u64 {
+    STAGED_STEP_CALLS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// `SWARMLLM_DECODE_ATTN_STAGE=0` keeps the 256-wide tensor-core body
+/// unstaged ([`mma_stages`]) for an A/B inside one binary.
+#[cfg(feature = "candle-cuda")]
+fn staged_steps() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SWARMLLM_DECODE_ATTN_STAGE").as_deref() != Ok("0"))
+}
+
 /// Query heads per KV head one block holds (`DA_MAX_REP`); head dims it
 /// handles (`DA_MAX_D`, and a multiple of 32).
 const CUDA_MAX_REP: usize = 16;
@@ -515,6 +544,7 @@ pub fn gqa_decode_attention_cuda(
             staged_merge: staged_merge(),
             chunk: fixed_chunk(),
             tensor_cores: tensor_cores_decode(),
+            stage_steps: staged_steps(),
             tree: None,
             sinks: sinks.map(Tensor::contiguous).transpose()?,
         };
@@ -892,6 +922,7 @@ pub(crate) fn gqa_tree_attention_cuda(
             staged_merge: staged_merge(),
             chunk: fixed_chunk(),
             tensor_cores: false,
+            stage_steps: false,
             tree: Some(cuda::TreeOperands {
                 visibility: visibility.clone(),
                 rows,
@@ -987,6 +1018,10 @@ mod cuda {
         /// [`super::mma_takes`] it ([`super::tensor_cores_decode`]); a tree
         /// never does.
         pub(super) tensor_cores: bool,
+        /// At 256 dims the tensor-core body stages each step's K and V where
+        /// [`super::mma_stages`] the call ([`super::staged_steps`]); the same
+        /// bits either way.
+        pub(super) stage_steps: bool,
         /// `None`: one query row a batch, every position read (a decode step).
         pub(super) tree: Option<TreeOperands>,
         /// gpt-oss's attention sinks, `[n_head]` f32 on the card — folded in
@@ -1296,20 +1331,28 @@ mod cuda {
                         "decode-attention: the tensor-core kernel reads a half cache"
                     );
                 };
+                let staged = self.stage_steps
+                    && super::mma_stages(d, [k_at, v_at, ks[0], ks[1], vs[0], vs[1]]);
+                if staged {
+                    super::STAGED_STEP_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
                 let func = dev.get_or_load_custom_func(
                     match d {
                         64 => "decode_attn_mma_f16kv_d64",
                         128 => "decode_attn_mma_f16kv_d128",
+                        _ if staged => "decode_attn_mma_staged_f16kv_d256",
                         _ => "decode_attn_mma_f16kv_d256",
                     },
                     "swarmllm_decode_attn",
                     super::DECODE_ATTN_PTX,
                 )?;
+                // One warp a run of `chunk` positions, four runs a block (one
+                // KV head: at 256 dims they share the staged query) — two
+                // where a step's K and V are staged (`DaMmaStage::WARPS`).
+                let warps = if staged { 2 } else { 4 };
                 let cfg = LaunchConfig {
-                    // One warp a run of `chunk` positions, four runs a block
-                    // (one KV head: at 256 dims they share the staged query).
-                    grid_dim: ((b * n_kv_head) as u32, n_chunks.div_ceil(4) as u32, 1),
-                    block_dim: (128, 1, 1),
+                    grid_dim: ((b * n_kv_head) as u32, n_chunks.div_ceil(warps) as u32, 1),
+                    block_dim: (32 * warps as u32, 1, 1),
                     shared_mem_bytes: 0,
                 };
                 let (chunk_i, n_chunks_i) = (chunk as i32, n_chunks as i32);
@@ -1331,7 +1374,8 @@ mod cuda {
                 builder.arg(&n_chunks_i);
                 // SAFETY: ffi. `mma_takes` checked the head width (64/128/256), the
                 // group (<= 16 query heads, one tile's rows) and that every K/V
-                // row starts on 4 bytes; the caller checked the shapes and
+                // row starts on 4 bytes (on 16 for the staged body, `mma_stages`);
+                // the block size is the entry's (`warps`); the caller checked the shapes and
                 // strides. The kernel reads `b` batches × `n_kv_head` heads ×
                 // `s_len` rows of `d` halves from the views by the strides
                 // passed (no row at or past `s_len`) and `b * n_head * d` query
@@ -1742,6 +1786,7 @@ mod tests {
                     staged_merge: true,
                     chunk: Some(chunk),
                     tensor_cores: false,
+                    stage_steps: false,
                     tree: None,
                     sinks: None,
                 };
@@ -1900,7 +1945,7 @@ mod tests {
                     .unwrap()
             };
             let (qc, kc, vc) = (q.to_device(&card).unwrap(), on_card(&kbuf), on_card(&vbuf));
-            let run = |chunk: Option<usize>, tensor_cores: bool| {
+            let run = |chunk: Option<usize>, tensor_cores: bool, stage_steps: bool| {
                 let op = cuda::DecodeAttn {
                     scale,
                     softcap: softcap.unwrap_or(0.0),
@@ -1908,6 +1953,7 @@ mod tests {
                     staged_merge: true,
                     chunk,
                     tensor_cores,
+                    stage_steps,
                     tree: None,
                     sinks: None,
                 };
@@ -1915,7 +1961,23 @@ mod tests {
             };
             let bits = |x: &[f32]| x.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
             for chunk in CARD_CHUNKS.into_iter().map(Some).chain([None]) {
-                let (got, per_position) = (run(chunk, true), run(chunk, false));
+                let staged_before = staged_step_calls();
+                let (got, per_position) = (run(chunk, true, true), run(chunk, false, true));
+                // At 256 dims a step's K and V go through shared memory
+                // (`mma_stages`): the same fragments in the same order, so the
+                // unstaged body's answer bit for bit — and it RAN.
+                if taken && d == 256 {
+                    assert!(
+                        staged_step_calls() > staged_before,
+                        "heads {n_head}/{n_kv_head} S={s_len} chunk {chunk:?}: the staged body did not run"
+                    );
+                    assert_eq!(
+                        bits(&got),
+                        bits(&run(chunk, true, false)),
+                        "heads {n_head}/{n_kv_head} S={s_len} softcap={softcap:?} chunk {chunk:?}: \
+                         the staged body is not the unstaged one bit for bit"
+                    );
+                }
                 assert_eq!(got.len(), want.len());
                 let what = format!(
                     "b={b} heads {n_head}/{n_kv_head} S={s_len} d={d} softcap={softcap:?} \
@@ -1959,7 +2021,7 @@ mod tests {
                 let fixed = fixed_chunk();
                 assert_eq!(
                     bits(&entry),
-                    bits(&run(fixed, true)),
+                    bits(&run(fixed, true, staged_steps())),
                     "the entry point did not take the tensor-core kernel (heads {n_head}/{n_kv_head} d {d})"
                 );
             }
@@ -2332,6 +2394,7 @@ mod tests {
                         staged_merge,
                         chunk,
                         tensor_cores: false,
+                        stage_steps: false,
                         tree: Some(cuda::TreeOperands {
                             visibility: vis.clone(),
                             rows: seq,
@@ -2578,6 +2641,7 @@ mod tests {
                                 staged_merge: true,
                                 chunk: None,
                                 tensor_cores: false,
+                                stage_steps: false,
                                 tree: Some(cuda::TreeOperands {
                                     visibility: vis.clone(),
                                     rows,
@@ -2677,6 +2741,7 @@ mod tests {
                                 staged_merge: true,
                                 chunk: None,
                                 tensor_cores: false,
+                                stage_steps: false,
                                 tree: Some(cuda::TreeOperands {
                                     visibility: vis.clone(),
                                     rows,
@@ -2781,6 +2846,7 @@ mod tests {
                         staged_merge,
                         chunk,
                         tensor_cores,
+                        stage_steps: true,
                         tree: None,
                         sinks: sink_values.clone(),
                     };
@@ -2857,6 +2923,7 @@ mod tests {
                             staged_merge: true,
                             chunk: Some(CUDA_CHUNK),
                             tensor_cores: false,
+                            stage_steps: false,
                             tree: None,
                             sinks: None,
                         };

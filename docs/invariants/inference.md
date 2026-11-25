@@ -5297,6 +5297,38 @@ and a 1,548-token prompt's replies move and pass (worst gap 0.037 / 0.046 agains
 new) — a near-tie the old kernel missed too. The daemon's 0.8B code reply moves between arms as well: the switch
 acts there.
 
+**A step's K and V go through shared memory** (`decode_attn_mma_staged_f16kv_d256`, `decode_attn::mma_stages`, A/B
+`SWARMLLM_DECODE_ATTN_STAGE=0`; 2026-11-25). The 3x was in the machine code, not the register count as such
+(`cuobjdump -sass`, sm_86): at 168 registers ptxas issued each output tile's four V loads only once the previous
+tile's `mma` had its operands, and K four loads a k-step the same way — ~48 trips to memory a 16-position step, one
+after another (the 128-wide body issues its 64 K loads in one batch). Staged, each warp copies a step's 16 K and 16 V
+rows by 16-byte `cp.async` into its own shared memory (two groups: the scores wait for K only) and reads the SAME
+fragments back by `ldmatrix` (V `.trans`) — the same half bits in the same `mma` order, so the unstaged body's answer
+BIT FOR BIT. Rows `D + 8` halves apart (an `ldmatrix` phase's eight rows fall in 32 banks); two warps a block, 42,240 B
+of static shared memory (under the 48 KB a launch takes without raising a limit, so a capture may hold it); 219
+registers. A position past the run is copied as zeros (`cp.async`'s source size 0), the zeros the unstaged body puts
+in registers. It needs every K/V row on 16 bytes (`mma_stages`; else the unstaged body). ⚠ **An `ldmatrix` handed a
+32-bit shared offset must name `.shared`**: without a state space it reads the operand as a GENERIC address, and the
+first card run faulted on every launch (gotcha #1172; llama.cpp hands it the generic pointer instead). Tested by
+`the_tensor_core_decode_kernel_matches_f32_attention`: at 256 the staged body RAN (`STAGED_STEP_CALLS`) and is the
+unstaged one bit for bit, five shapes × four chunks; a control flipping one bit of a K fragment after its `ldmatrix`
+FAILS it (`dec1125/run_one_stage2_mma.out`, `run_one_stage2ctl_mma.out`, run alone, 0 driver events). Measured in one
+sitting, live node stopped, ABBA in one binary (`dec1125/run_stage2.console`):
+
+| | staged | unstaged |
+|---|---|---|
+| Gemma 2 2B attention, nsys at ~4,128 (µs a call) | 60.6 | 94.7 |
+| Qwen3.5-4B attention, nsys at ~4,128 (µs a call) | 57.6 | 90.5 |
+| Gemma 2 2B, 4,096-token prompt (tok/s) | 96.4-98.3 | 88.0-89.1 |
+| Qwen3.5-4B, 4,096 (an attention layer in four) | 70.1-73.3 | 70.4-71.5 |
+| Gemma 2 2B, 200 | 100.3-103.9 | 95.9-103.1 |
+| Qwen3.5-0.8B, 4,096 | 154.2-160.7 | 151.7-154.2 |
+
+llama.cpp on the same card the same day (`dec1125/run_l256.out`): 57.2 µs + 2.6 fixup a call, 104.4 tok/s on Gemma 2
+2B from 4,096, 74.9 on Qwen3.5-4B. The merge after it read 9.6 µs a call against 8.4 in the unstaged arm (Qwen3.5-4B
+11.0 against 9.7; the same partials — cause not measured) and is now most of what separates a layer from llama.cpp's.
+Replies are the unstaged body's, bit for bit, so its reply checks above stand.
+
 **The merge stages its runs' weights** (`decode_attn_combine_staged_f32`, 2026-11-25; `decode_attn::staged_merge`,
 A/B `SWARMLLM_DECODE_ATTN_MERGE=serial`). The serial merge had every thread walk the runs itself — a run's max, then
 its sum and output, an `expf` between: two dependent loads a run, ~58 runs at ~928 positions in 16s — in a grid of one

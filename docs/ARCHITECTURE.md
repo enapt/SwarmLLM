@@ -230,8 +230,9 @@ swarmllm/
 │                 decode_attn.cu — one-position attention over the KV cache, f32 or
 │                 the card's half cache (flash-decoding), NOT bit-identical; over the
 │                 half cache at head width 64/128/256 on the tensor cores (the group's
-│                 query heads as the mma rows, `decode_attn::mma_takes`), its runs
-│                 merged by a staged merge bit-identical to the serial one;
+│                 query heads as the mma rows, `decode_attn::mma_takes`; at 256 a
+│                 step's K and V staged by cp.async, `decode_attn::mma_stages`), its
+│                 runs merged by a staged merge bit-identical to the serial one;
 │                 kv_append.cu — a step's f32 K or V written into the half cache in ONE
 │                 launch (cast + copy); delta_rule.cu — Qwen 3.5's gated delta rule,
 │                 every token of a layer in one launch, NOT bit-identical — and on a card its
