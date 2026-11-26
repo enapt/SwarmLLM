@@ -549,6 +549,12 @@ mod tests {
 
     /// The piece on a real thread: two 40 ms steps owe 80 ms, under a 100 ms
     /// piece, and run on unpaused; the third brings it to 120 ms, slept at once.
+    ///
+    /// A step owes its WALL time, so the test times its own steps and judges
+    /// the premise first: on a loaded machine "40 ms" stretched to ~90 ms (CI's
+    /// macOS runner, 2026-11-26: 180.5 ms paused after two — exactly what two
+    /// such steps owe, the pacer right and the premise wrong). There the steps
+    /// crossed the piece early, and what they owed must have been slept then.
     #[test]
     fn steps_run_on_until_a_piece_is_owed() {
         let _lock = pace_lock();
@@ -557,9 +563,12 @@ mod tests {
         DEBT_NANOS.with(|d| d.set(0));
         LAST_END.with(|e| e.set(None));
         let paused_before = paused_total();
+        let mut two_took = Duration::ZERO;
         for _ in 0..2 {
+            let began = Instant::now();
             let step = Step::begin(CardStep::NotJudged);
             busy_for(Duration::from_millis(40));
+            two_took += began.elapsed();
             step.end(|| {}, || false);
         }
         let after_two = paused_total().saturating_sub(paused_before);
@@ -568,11 +577,29 @@ mod tests {
         step.end(|| {}, || false);
         let after_three = paused_total().saturating_sub(paused_before);
         set_pause_permille(0);
-        assert_eq!(after_two, Duration::ZERO);
-        assert!(
-            after_three >= Duration::from_millis(115) && after_three < Duration::from_millis(400),
-            "{after_three:?}"
-        );
+        if two_took < Duration::from_millis(100) {
+            assert_eq!(
+                after_two,
+                Duration::ZERO,
+                "two steps of {two_took:?} owe under the piece"
+            );
+            assert!(
+                after_three >= Duration::from_millis(115)
+                    && after_three < Duration::from_millis(400),
+                "{after_three:?}"
+            );
+        } else {
+            // What is still carried after two steps is under one piece (more
+            // would have been slept); the steps' own times (inside
+            // `begin`..`end`) are a hair under `two_took`, less any rest
+            // between them: 10 ms covers both.
+            let piece = Duration::from_millis(100);
+            assert!(
+                after_two + piece + Duration::from_millis(10) >= two_took
+                    && after_two < two_took + Duration::from_millis(300),
+                "two steps of {two_took:?} crossed the piece and slept {after_two:?}"
+            );
+        }
     }
 
     /// The default piece is what was measured on the card, unless the A/B
