@@ -7063,6 +7063,28 @@ names alignment of the drafter with the target the main lever and gains 10-45% o
 speculation by distilling the drafter toward it; a sibling fine-tuned as the target was is part of
 that alignment at no cost.
 
+**…but on a CODER target the general line drafts better too: a general line before a coder one at a size tie**
+(2026-11-26, `engine_drafter::line_rank`). The rule above was measured on a GENERAL target only, and read as "trained AS
+the target was" — which predicts the coder sibling wins on a coder target. It does not. Qwen2.5-Coder-7B-Instruct Q4_K_M,
+its own greedy replies to the 11 rig prompts (2,200 positions: 9 prose, 2 code), `~/swarmllm-ref/spec/greedydump.py`, the
+two 0.5B Q8_0 drafters (general: rebuilt from the test-models `qwen2.5-0.5b-instruct-q8-0`, reproducing the 11-22 dump
+prompt for prompt; coder: `~/swarmllm-ref/spec/qwen2.5-coder-0.5b-instruct-q8_0.gguf`), scored by
+`~/swarmllm-distill/score_m1.py` (standing_ring_sim's `replay`; it reproduces that plan's 14B table exactly):
+
+| drafter | prose first choice | prose m(8, deep) | code first choice | code m(8, deep) |
+|---|---|---|---|---|
+| general 0.5B | 0.644 | 0.201 | 0.882 | 0.058 |
+| coder 0.5B | 0.571 | 0.256 | 0.880 | 0.055 |
+
+The general one leads on every one of the nine prose prompts (by 0.025-0.130); code is level. Together with the
+10-29 table (general target, three sizes) nothing measured favours the coder line, so `line_rank` ranks a coder
+line after a general one WHATEVER the target's line, then the target's own line as before — a general target's
+order is unchanged. Before it, a coder target drew the coder 0.5B and a node holding the general one FETCHED the
+coder one beside it (`HeldDrafter::beaten_by`). Not measured: the 1.5B and 3B pairs on a coder target (the 1.5B run
+heat-stopped this laptop's processor in its first arm, gotcha #1184), and tok/s on a real link. Prior art:
+llama.cpp's `--fim-qwen-7b-spec` / `--fim-qwen-14b-spec` presets draft a coder target with
+`ggml-org/Qwen2.5-Coder-0.5B-Q8_0-GGUF` — for fill-in-the-middle code completion, where the two tie here.
+
 **The flow has its own distance line: 150 ms, not the tree rounds' 300** (2026-10-23,
 `FLOW_LEAST_ROUND_TRIP_MS`). The 300 ms line (`TREES_LEAST_ROUND_TRIP_MS`) was set for tree ROUNDS
 before the flow existed, and the flow inherited it, so every link under 300 ms — most links between

@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #502**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #503**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -8608,6 +8608,19 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-11-26** (#502)
+- #502 — `P2` — **A coder model drew the coder drafter at a size tie, though the general one agrees with it more.**
+  `engine_drafter::largest_that_can_draft` broke a size tie toward the TARGET's release line (#370, measured on a
+  general 14B target only), so Qwen2.5-Coder-7B was drafted by the coder 0.5B, and a node holding the general 0.5B
+  fetched the coder one beside it (`HeldDrafter::beaten_by`). On the coder 7B's own greedy replies (11 rig prompts,
+  2,200 positions) the general 0.5B Q8_0 takes the first choice 0.644 of the time on prose against 0.571, ahead on
+  all nine prose prompts, and 0.882 against 0.880 on code; an 8-row beam loses the word at a level 0.201 against
+  0.256 (prose). Fixed: `engine_drafter::line_rank` — a general line before a coder one whatever the target's, then
+  the target's own — read by the choice, the held drafter and the fetch alike; a general target's order is
+  unchanged. Prior art: llama.cpp's `--fim-qwen-7b-spec` drafts a coder target with the coder 0.5B, for code
+  completion, where the two tie. Not measured: the 1.5B / 3B pairs on a coder target, tok/s on a real link.
+  Evidence: `docs/invariants/scheduling.md` § "…but on a CODER target the general line drafts better too".
 
 **Closed 2026-11-25** (#499, #501)
 - #501 — `P1` — **A request sent right after another was turned down by the computer serving part of it, for memory

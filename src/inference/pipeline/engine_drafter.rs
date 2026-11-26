@@ -584,7 +584,7 @@ fn next_drafter_step(
         Some(held) => match size_proxy(state, held) {
             Some(size) => Some(HeldDrafter {
                 size: size.size,
-                of_the_targets_line: release_line(held) == target_line,
+                line: line_rank(held, &target_line),
             }),
             // Chosen, so sized a moment ago: a header gone since cannot be
             // compared with — keep it, fetch nothing.
@@ -630,17 +630,17 @@ fn next_drafter_step(
 struct HeldDrafter {
     /// Its [`size_proxy`].
     size: u64,
-    /// Whether it is of the target's own [`release_line`].
-    of_the_targets_line: bool,
+    /// How its release line ranks for this target ([`line_rank`]).
+    line: LineRank,
 }
 
 impl HeldDrafter {
-    /// Is a drafter of `size`, of the target's line or not, worth fetching
-    /// beside this one: LARGER, or the same size where this one is of another
-    /// line and that one of the target's — a different model, guessing as the
-    /// target does more often ([`release_line`]), never another copy of this one.
-    fn beaten_by(&self, size: u64, of_the_targets_line: bool) -> bool {
-        size > self.size || (size == self.size && of_the_targets_line && !self.of_the_targets_line)
+    /// Is a drafter of `size` whose line ranks `line` worth fetching beside
+    /// this one: LARGER, or the same size with a line that ranks first
+    /// ([`line_rank`]) — a different model, agreeing with the target more often,
+    /// never another copy of this one (a copy's line ranks the same).
+    fn beaten_by(&self, size: u64, line: LineRank) -> bool {
+        size > self.size || (size == self.size && line < self.line)
     }
 }
 
@@ -677,7 +677,7 @@ fn acquisition_among(
         .into_iter()
         .filter_map(|m| size(&m).map(|s| (s, m)))
         .filter(|(s, m)| {
-            to_beat.is_none_or(|held| held.beaten_by(s.size, release_line(m) == target_line))
+            to_beat.is_none_or(|held| held.beaten_by(s.size, line_rank(m, target_line)))
         })
         .collect();
     // A drafter not yet held has no place to be weighed: where it would land
@@ -879,10 +879,11 @@ fn beside_the_plan() -> bool {
 
 /// Of `candidates`, the largest [`within_reach`] of `target_size` — a small
 /// one up to `1 / small_fraction` of it ([`small_drafter_fraction`]) — that
-/// `can_draft` accepts. Of two the same size, the one of the target's own
-/// release line (`target_line`, [`release_line`]); then — copies of one model
-/// at different precisions — the one reading fewer bytes a guess; then the
-/// model id, so the choice does not depend on map order.
+/// `can_draft` accepts. Of two the same size, the one whose release line ranks
+/// first for the target (`target_line`, [`line_rank`]: a general line before a
+/// coder one, then the target's own); then — copies of one model at different
+/// precisions — the one reading fewer bytes a guess; then the model id, so the
+/// choice does not depend on map order.
 ///
 /// **A drafter that would guess on a card is chosen before a larger one in
 /// system memory**: only a drafter whole on a card lets a split's tree flow,
@@ -907,7 +908,7 @@ fn largest_that_can_draft(
     candidates.sort_by_cached_key(|(d, m)| {
         (
             std::cmp::Reverse(d.size),
-            release_line(m) != target_line,
+            line_rank(m, target_line),
             d.reads,
             m.0.clone(),
         )
@@ -926,19 +927,59 @@ fn largest_that_can_draft(
     in_system_memory
 }
 
+/// How a drafter's [`release_line`] ranks beside another drafter the SAME size,
+/// best first: a general line before a coder one ([`is_a_coder_line`]),
+/// whatever the target's line; then the target's own line before another.
+/// Never more than a tie-break: size decides first ([`largest_that_can_draft`]).
+///
+/// The general small model agreed with the target more in both pairs measured,
+/// the target's own greedy replies as the truth. A GENERAL target (#370,
+/// 2026-10-29, Qwen2.5-14B-Instruct): the general 0.5B / 1.5B / 3B took its
+/// first choice in chat 0.691 / 0.745 / 0.784 of the time against the coder
+/// ones' 0.592 / 0.698 / 0.745, code ~1 point ahead. A CODER target (2026-11-26,
+/// Qwen2.5-Coder-7B-Instruct Q4_K_M, the 11 rig prompts, 2,200 positions): the
+/// general 0.5B Q8_0 0.644 on prose against the coder 0.5B's 0.571 — ahead on
+/// all nine prose prompts — and 0.882 against 0.880 on code; an 8-row beam lost
+/// the target's word at a level 0.201 of the time against 0.256 on prose, 0.058
+/// against 0.055 on code. So "the target's own line" was right for a general
+/// target and wrong for a coder one, which drew the coder 0.5B and even fetched
+/// it beside a general one already held ([`HeldDrafter::beaten_by`]). Prior
+/// art: llama.cpp's `--fim-qwen-7b-spec` / `--fim-qwen-14b-spec` presets draft
+/// a coder target with the coder 0.5B — for code completion, where the two tie.
+fn line_rank(drafter: &ModelId, target_line: &str) -> LineRank {
+    let line = release_line(drafter);
+    LineRank {
+        coder: is_a_coder_line(&line),
+        another_line: line != target_line,
+    }
+}
+
+/// [`line_rank`]'s answer; ordered best first (`false` before `true`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct LineRank {
+    /// A coder line, ranked after a general one.
+    coder: bool,
+    /// Another line than the target's, ranked after the target's own.
+    another_line: bool,
+}
+
+/// Is `line` ([`release_line`]) a coder model's — `qwen2.5-coder-instruct`.
+/// Measured on Qwen2.5's lines only ([`line_rank`]); another family's
+/// specialised line (math, vision) is ranked as a general one, the order
+/// before.
+fn is_a_coder_line(line: &str) -> bool {
+    line.split('-').any(|token| token == "coder")
+}
+
 /// The release line a model id names: its base name with the quantisation
 /// gone ([`crate::model::auto_manage::quant::inferred_base_name`], the one
 /// reading of a quant tag) and its size label too — `qwen2.5-14b-instruct-q4-k-m`
 /// and `qwen2.5-3b-instruct-q4-k-m` are both `qwen2.5-instruct`,
 /// `qwen2.5-coder-3b-instruct-q4-k-m` is `qwen2.5-coder-instruct`.
 ///
-/// A drafter trained as its target was agrees with it more often at the same
-/// size (2026-10-29, `~/swarmllm-318/ranks14/`, the 14B's own greedy replies as
-/// the truth, 3,844 positions): Qwen2.5-3B-Instruct took the 14B Instruct's
-/// first choice 0.784 of the time in chat and 0.879 in code against
-/// Qwen2.5-Coder-3B's 0.745 and 0.868 — the general 1.5B equalled the coder
-/// 3B. So the line breaks a tie in size, never more: the coder 3B still beat
-/// the general 1.5B replayed on the long link. The headers cannot say it: the
+/// [`line_rank`] weighs it, and only to break a tie in size: the coder 3B still
+/// beat the general 1.5B replayed on the long link (2026-10-29, though the
+/// general 1.5B equalled it in first choice). The headers cannot say it: the
 /// general uploads carry no `general.basename` and name themselves
 /// `qwen2.5-3b-instruct` where the coder's say `Qwen2.5 Coder 3B Instruct AWQ`.
 /// Read from the id, a line it misreads only loses the tie — the order before.
@@ -2157,14 +2198,16 @@ mod tests {
         }
     }
 
-    /// Of two drafters the same size, the one of the target's own line drafts
-    /// — Qwen2.5-3B-Instruct for Qwen2.5-14B-Instruct took the target's first
-    /// choice 0.784 of the time in chat against Qwen2.5-Coder-3B's 0.745
-    /// (2026-10-29) — and the coder's for a coder target. The line breaks a
-    /// tie in size, never more: a LARGER drafter of another line still drafts.
-    /// It comes before the bytes read: those choose between copies of ONE model.
+    /// Of two drafters the same size, the GENERAL one drafts, for a general
+    /// target and a coder one alike ([`line_rank`]) — Qwen2.5-3B-Instruct for
+    /// Qwen2.5-14B-Instruct took the target's first choice 0.784 of the time in
+    /// chat against Qwen2.5-Coder-3B's 0.745 (2026-10-29); for
+    /// Qwen2.5-Coder-7B-Instruct the general 0.5B 0.644 on prose against the
+    /// coder 0.5B's 0.571, code level (2026-11-26). The line breaks a tie in
+    /// size, never more: a LARGER drafter of another line still drafts. It comes
+    /// before the bytes read: those choose between copies of ONE model.
     #[test]
-    fn of_two_drafters_the_same_size_the_one_of_the_targets_line_drafts() {
+    fn of_two_drafters_the_same_size_the_general_one_drafts() {
         let sized = |size, reads| DrafterSize { size, reads };
         let general_3b = "qwen2.5-3b-instruct-q4-k-m";
         let coder_3b = "qwen2.5-coder-3b-instruct-q4-k-m";
@@ -2196,7 +2239,8 @@ mod tests {
         );
         assert_eq!(
             for_target("qwen2.5-coder-14b-instruct-q4-k-m", held()),
-            coder_3b
+            general_3b,
+            "a coder target too: the general line agrees with it more on prose"
         );
         let without_the_general_3b = held()
             .into_iter()
@@ -2209,24 +2253,65 @@ mod tests {
         );
         // The 0.5B pair, both Q8_0 — ids that end in a two-token tag, `q8-0`.
         let general_0_5b = "qwen2.5-0.5b-instruct-q8-0";
-        let small = vec![
-            (
-                sized(30, 500),
-                ModelId("qwen2.5-coder-0.5b-instruct-q8-0".into()),
-            ),
-            (sized(30, 520), ModelId(general_0_5b.into())),
-        ];
+        let small = || {
+            vec![
+                (
+                    sized(30, 500),
+                    ModelId("qwen2.5-coder-0.5b-instruct-q8-0".into()),
+                ),
+                (sized(30, 520), ModelId(general_0_5b.into())),
+            ]
+        };
         assert_eq!(
-            for_target("qwen2.5-14b-instruct-q4-k-m", small),
+            for_target("qwen2.5-14b-instruct-q4-k-m", small()),
             general_0_5b
+        );
+        assert_eq!(
+            for_target("qwen2.5-coder-7b-instruct-q4-k-m", small()),
+            general_0_5b,
+            "the pair measured on the coder 7B, though the coder copy reads less a guess"
         );
     }
 
-    /// A node holding a drafter of another line fetches one the same size of
-    /// the target's own; one holding the target's line fetches nothing the
-    /// same size — and neither fetches another copy of what it holds.
+    /// The rank itself: general before coder whatever the target, then the
+    /// target's own line — so a general target keeps its order of before.
     #[test]
-    fn a_drafter_of_the_targets_line_is_fetched_beside_one_the_same_size_of_another() {
+    fn a_line_ranks_general_before_coder_then_the_targets_own() {
+        let id = |s: &str| ModelId(s.into());
+        let general = release_line(&id("qwen2.5-14b-instruct-q4-k-m"));
+        let coder = release_line(&id("qwen2.5-coder-7b-instruct-q4-k-m"));
+        let g05 = id("qwen2.5-0.5b-instruct-q8-0");
+        let c05 = id("qwen2.5-coder-0.5b-instruct-q8-0");
+        assert!(line_rank(&g05, &general) < line_rank(&c05, &general));
+        assert!(line_rank(&g05, &coder) < line_rank(&c05, &coder));
+        let math = id("qwen2.5-math-1.5b-instruct-q8-0");
+        assert!(
+            line_rank(&g05, &general) < line_rank(&math, &general),
+            "another general-ranked line still loses to the target's own"
+        );
+        // Every small Qwen2.5 id the live node held on 2026-11-26, each quant spelling (gotcha #991).
+        for (held, coder) in [
+            ("qwen2.5-0.5b-instruct-f16", false),
+            ("qwen2.5-0.5b-instruct-fp16", false),
+            ("qwen2.5-0.5b-instruct-iq4-xs", false),
+            ("qwen2.5-0.5b-instruct-q4-k-m", false),
+            ("qwen2.5-0.5b-instruct-q8-0", false),
+            ("qwen2.5-1.5b-instruct-q8-0", false),
+            ("qwen2.5-3b-instruct-q4-k-m", false),
+            ("qwen2.5-coder-0.5b-instruct-q8-0", true),
+            ("qwen2.5-coder-1.5b-instruct-q8-0", true),
+            ("qwen2.5-coder-3b-instruct-q4-k-m", true),
+        ] {
+            assert_eq!(is_a_coder_line(&release_line(&id(held))), coder, "{held}");
+        }
+    }
+
+    /// A node holding a coder drafter fetches the general one the same size,
+    /// for a general target and a coder one alike; one holding the general
+    /// drafter fetches nothing the same size — and none fetches another copy of
+    /// what it holds ([`line_rank`]).
+    #[test]
+    fn a_general_drafter_is_fetched_beside_a_coder_one_the_same_size() {
         let id = |s: &str| ModelId(s.into());
         let general_3b = "qwen2.5-3b-instruct-q4-k-m";
         let coder_3b_q8 = "qwen2.5-coder-3b-instruct-q8-0";
@@ -2239,56 +2324,61 @@ mod tests {
         };
         let can_draft = |m: ModelId| Some(spec(&m.0));
         let every = |_: &ModelId| true;
-        let line = release_line(&id("qwen2.5-14b-instruct-q4-k-m"));
-        let held = |of_the_targets_line| {
+        let held = |drafter: &str, target_line: &str| {
             Some(HeldDrafter {
                 size: 151,
-                of_the_targets_line,
+                line: line_rank(&id(drafter), target_line),
             })
         };
-        assert_eq!(
-            acquisition_among(
-                likely(),
-                every,
-                || Some(1258),
-                &line,
-                2,
-                held(false),
-                size,
-                can_draft
-            ),
-            DrafterStep::Fetch(id(general_3b)),
-            "the coder 3B held: the general one, the target's line"
-        );
-        assert_eq!(
-            acquisition_among(
-                likely(),
-                every,
-                || Some(1258),
-                &line,
-                2,
-                held(true),
-                size,
-                can_draft
-            ),
-            DrafterStep::Nothing,
-            "the general 3B held: nothing the same size, the coder's copy least of all"
-        );
-        let coder_line = release_line(&id("qwen2.5-coder-14b-instruct-q4-k-m"));
-        assert_eq!(
-            acquisition_among(
-                vec![id(coder_3b_q8)],
-                every,
-                || Some(1258),
-                &coder_line,
-                2,
-                held(true),
-                size,
-                can_draft
-            ),
-            DrafterStep::Nothing,
-            "a coder target holding the coder 3B: its Q8_0 copy is never worth a fetch"
-        );
+        let coder_3b = "qwen2.5-coder-3b-instruct-q4-k-m";
+        for target in [
+            "qwen2.5-14b-instruct-q4-k-m",
+            "qwen2.5-coder-14b-instruct-q4-k-m",
+        ] {
+            let line = release_line(&id(target));
+            assert_eq!(
+                acquisition_among(
+                    likely(),
+                    every,
+                    || Some(1258),
+                    &line,
+                    2,
+                    held(coder_3b, &line),
+                    size,
+                    can_draft
+                ),
+                DrafterStep::Fetch(id(general_3b)),
+                "{target}, the coder 3B held: the general one"
+            );
+            assert_eq!(
+                acquisition_among(
+                    likely(),
+                    every,
+                    || Some(1258),
+                    &line,
+                    2,
+                    held(general_3b, &line),
+                    size,
+                    can_draft
+                ),
+                DrafterStep::Nothing,
+                "{target}, the general 3B held: nothing the same size, the coder one least of all"
+            );
+            assert_eq!(
+                acquisition_among(
+                    vec![id(coder_3b_q8)],
+                    every,
+                    || Some(1258),
+                    &line,
+                    2,
+                    held(coder_3b, &line),
+                    size,
+                    can_draft
+                ),
+                DrafterStep::Nothing,
+                "{target}, the coder 3B held: its Q8_0 copy is never worth a fetch"
+            );
+        }
     }
 
     /// Layers × width² sized Qwen3-30B-A3B at 201 M — under a quarter's reach of
@@ -2637,9 +2727,11 @@ mod tests {
         let headers =
             |have: &'static [&'static str]| move |m: &ModelId| have.contains(&m.0.as_str());
         let every = headers(&["3b", "1.5b-q8", "1.5b-q4"]);
+        // A copy's line ranks as the model it copies ([`line_rank`]).
+        let the_same_line = line_rank(&id("1.5b-q8"), "");
         let held_0_5b = Some(HeldDrafter {
             size: 19,
-            of_the_targets_line: true,
+            line: the_same_line,
         });
         assert_eq!(
             acquisition_among(
@@ -2678,7 +2770,7 @@ mod tests {
                 4,
                 Some(HeldDrafter {
                     size: 66,
-                    of_the_targets_line: true
+                    line: the_same_line
                 }),
                 size,
                 can_draft
