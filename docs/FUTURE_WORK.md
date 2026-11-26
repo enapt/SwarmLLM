@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #504**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #505**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -6993,6 +6993,35 @@ Prior art: PEARL (arXiv 2408.11850, ICLR 2025) names it "mutual waiting" — the
 reverse — and its post-verify keeps drafting while the target verifies (up to 1.5× over plain speculation); PipeInfer
 (2407.11798) and AMUSD (2410.17375) run draft and verify concurrently on separate devices. None of them shares one card
 between the two; here they would.
+
+#### #504 — A split whose guesses flow is priced as the sum of its stages, but runs at its slowest stage's pace
+`P2` · perf-split · **OPEN — measure first** — 2026-11-26 · evidence: `docs/plans/faster_than_local.md` § 15, `docs/plans/small_slices.md` § 2 and step 6, `docs/invariants/scheduling.md` § "A tree that flows"
+
+**Seen** (arithmetic on measured stage times, nothing run): the planner prices a chain as the SUM of its segments'
+costs (`scheduler::parallax::chain_cost_terms`, every `VertexCost` field added up). That is a reply's time when one
+check is in flight at a time (rounds). A flowing split keeps several forwards in flight, so its pace is its SLOWEST
+stage's forward (`time a token = τ/e0 + m·P`, small_slices § 2), and the sum is the wrong objective for it: on the
+14B half and half to Australia this node is the slower side, ~40 ms a forward (its drafting ~14 + its 26 layers ~26)
+against the far end's ~30, yet moving layers off this node only RAISES the sum (the far card's layers cost more each),
+so the planner keeps all 26 here. The planner leaves the drafter's MEMORY room here (`candidates_leaving_room_for_the_drafter`,
+scheduler/mod.rs) but its TIME enters no segment's price. Ceiling by those stage times: 3 layers moved → τ 37 ms,
++8%; 6 → τ ~36.6, +9%. In a ring of three or more card slices the stages differ more and the sum misplaces more.
+
+**Measure first** (`~/swarmllm-gate/deep/fr/run_bal313.sh`, ready: flowhalf 26 here / flow23 / flow20 ABCCBA on the
+real link, `ARM_GAP_S=130` past #503's hold, Australia's range checked all on its card each arm). The 2026-11-16 sitting
+(`real_link_bal292`) read 0.94x and 0.85x for 3 and 6 layers moved, but every arm after the first measured the far
+computer's slow processor copy (#461, fixed in v0.3.312), so it decides nothing. Build only if a moved split point
+wins ≥ 5% on prose AND code; otherwise close this and the balance half of #411 "Also".
+
+**Design if it wins**: price a flow-capable plan by its bottleneck — the slowest stage's forward, this node's drafting
+counted on the stage that drafts — and break ties by the sum, so rounds and a single segment price as today. The
+layer search is a shortest path over a layer graph today; a bottleneck objective is the classic min-max partition
+(the DP below), run beside it for plans that will flow, the cheaper by the flow model kept, logged both ways as
+`chain_cost_ms` is now. Prior art: PipeDream's partitioner minimises the slowest stage with a DP over layers and
+machines, A(j, m) = min over i of max(A(i, m−1), T(i+1..j)) (Narayanan et al., SOSP 2019, arXiv 1806.03377); Hyperion's
+HypSplit-DP solves the same min-max over a multi-tier network; HexGen (2311.11514) and Parallax
+(2509.26182, which our search follows) size stages by DP too, Parallax for LATENCY — the sum, right for rounds and the
+reason our search sums; PipeLive (2604.12171) re-partitions as the bottleneck drifts.
 
 #### #461 — A peer's split that asks a computer for a WIDER range replaces its all-card copy with a mostly-processor one, which then serves every narrower request too
 `P3` · memory / admission · **NARROWED** — 2026-11-15 (the growth half shipped in v0.3.292); contributor 1's guard built 2026-11-17 (shipped in v0.3.297-alpha); residual (4)'s placement built 2026-11-18 (shipped in v0.3.299); a partial overlap built 2026-11-25 · found on the real link (`real_link.sh` TAG=bal292, a forced split point) · related: #3 (j12), #3 (j13), #449, #458
