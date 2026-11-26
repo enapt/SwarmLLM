@@ -465,6 +465,22 @@ compile fails in every arm. Still open before building the mode: the second kill
 scored against llama.cpp with `score_against_reference.py`), and a drafter the size users get (the
 1.5B-3B, `engine_drafter::largest_that_can_draft`), whose first choice is kept more often already.
 
+Prior art (read 2026-11-26): **TensorRT-LLM ships this rule** for MTP heads — `MTPDecodingConfig`'s
+`use_relaxed_acceptance_for_thinking` accepts a draft token in the target's top `relaxed_topk` with
+log P(top 1) − log P(t) ≤ `relaxed_delta` (the features page; its API reference words `relaxed_delta` as
+a PROBABILITY gap, unreconciled). It is OFF by default (`False`, topk 1, delta 0) and applies ONLY
+between `begin_thinking_phase_token` and `end_thinking_phase_token`; "strict acceptance resumes after
+this" — the reply a user reads stays exact. vLLM's Medusa-style `TypicalAcceptanceSampler`
+(`acceptance_method="typical_acceptance_sampler"`, `posterior_threshold` 0.09 / `posterior_alpha` 0.3;
+`vllm/model_executor/layers/typical_acceptance_sampler.py` at v0.8.5) is absent from v0.10.0, whose
+engine keeps only the lossless rejection sampler (`vllm/v1/sample/rejection_sampler.py`; no removal
+rationale found). Fuzzy Speculative Decoding (arXiv 2502.20704) thresholds a divergence of whole
+distributions and finds its threshold-to-accuracy mapping varies by dataset (calibrate on 8-16
+questions; ~2 points of accuracy for its speed). No primary source measures drift after a kept
+near-tie or treats structured output. **What it changes here**: the mode's first form is the
+thinking-only one — near-ties kept inside a `<think>` span (Qwen 3/3.5, the reasoning families), the
+answer checked exactly — before any whole-reply form; tool calls and `response_format` stay exact.
+
 **7.4 Fewer bytes a row without losing anything: ~8% is all there is.** For a large model on a
 home uplink the rows, not the round trip, set the tree's width: a 70B row is 8,192 values, ~8.7 KB
 at Q8_0, so 64 guesses a round at ~6.5 rounds a second is ~29 Mbit/s a hop, past most home uploads,
