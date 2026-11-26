@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.3.313-alpha] — 2026-11-26
+
+**A coding model guesses ahead with the general small model, which agrees with it more often.** A split of
+Qwen2.5-Coder-7B had its next words guessed by the coder 0.5B model whenever a computer held both 0.5B models, and a
+computer holding only the general 0.5B downloaded the coder one beside it. Measured on the coder 7B's own replies
+(11 prompts, 2,200 positions), the general 0.5B guesses the 7B's next word 64.4% of the time on prose against the
+coder 0.5B's 57.1%, ahead on all nine prose prompts, and the two are level on code (88.2% and 88.0%). Fewer wrong
+guesses on prose mean fewer round trips in a split. Of two helpers the same size, a general model is now chosen
+before a coder one for any model, then the model's own line as before, so a general model's helper is unchanged.
+The 1.5B and 3B pairs and the speed over a real link are not measured yet.
+
+**Also:** the dashboard looks a model up by id through one shared helper instead of six copies of the same code (no
+visible change), and a timing test no longer fails on a slow build machine.
+
 ## [0.3.312-alpha] — 2026-11-26
 
 **A computer serving part of a model for two splits of different shapes runs both on its graphics card.** A computer
