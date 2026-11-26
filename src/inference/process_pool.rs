@@ -298,6 +298,34 @@ fn starts_a_pass(forward: &crate::types::LayerForward) -> bool {
         && forward.prompt_span.is_none_or(|span| span.start == 0)
 }
 
+/// What a forward's stamp of its request's conversation hold
+/// ([`WorkerHandle::note_conversation`]) may do once that request was
+/// released here: only a pass from the first position — what a re-plan or a
+/// continued reply sends, keeping its id (#448) — holds the worker again; a
+/// later step of a released request is a straggler and holds nothing (#503).
+/// REQUIRED at every stamp, so a new forward path states which it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HoldStamp {
+    /// A prompt pass from its first position, an up-front admission, or a
+    /// drafter's guess (keyed by its attempt): it holds the worker whatever
+    /// was released before.
+    OpensAPass,
+    /// A step or later piece of a pass: it holds the worker only while its
+    /// request has not been released here.
+    WithinAPass,
+}
+
+impl HoldStamp {
+    /// The stamp `forward` makes ([`starts_a_pass`]).
+    fn of(forward: &crate::types::LayerForward) -> Self {
+        if starts_a_pass(forward) {
+            Self::OpensAPass
+        } else {
+            Self::WithinAPass
+        }
+    }
+}
+
 /// The `DaemonMsg::AdmitPrompt` a peer's question becomes
 /// ([`ModelProcessPool::weigh_peer_prompt`]): weighed only, under a FRESH
 /// correlation id — the worker routes its answer by it — and naming the
@@ -1395,6 +1423,19 @@ struct WorkerHandle {
     /// has, since nothing tells this node that reply finished. Read only
     /// through [`WorkerHandle::in_use`].
     kv_holders: std::sync::Mutex<std::collections::HashMap<Uuid, std::time::Instant>>,
+    /// Requests whose cache was released here (or cancelled), by when, kept
+    /// [`CONVERSATION_GAP_SECS`]: a forward of one that does not open a new
+    /// pass is a STRAGGLER and stamps no hold ([`HoldStamp`], #503). A flow
+    /// sends its forwards ahead of the reply; Australia answered four of a
+    /// 14B flow's after its coordinator had released the request, each
+    /// stamping the hold again, and refused the next split's shape "beside the
+    /// copy this node is running for a conversation now" for two minutes
+    /// (2026-11-26, real link n312r). Prior art: HTTP/2 ignores the frames
+    /// still in flight on a stream it has reset, which never reopen it (RFC
+    /// 9113 § 5.1); vLLM V1's `OutputProcessor.process_outputs` skips output
+    /// for a request it already aborted; the worker remembers a cancel that
+    /// overtakes its own request (`CANCEL_RETENTION_SECS`).
+    released: std::sync::Mutex<std::collections::HashMap<Uuid, std::time::Instant>>,
     /// Requests whose prompt pass was sent to this worker and whose first step
     /// has not come yet, by when the pass was sent (#448 (b)) — the daemon's
     /// half of the worker's own hold (`KvCacheStore::note_forward_ran`). A
@@ -2658,12 +2699,39 @@ impl WorkerHandle {
     }
 
     /// `request_id` has — or is about to have — a conversation cache on this
-    /// worker. Called by every forward, so the stamp is its last activity here.
-    fn note_conversation(&self, request_id: Uuid) {
-        self.kv_holders
+    /// worker. Called by every forward, so the stamp is its last activity here
+    /// — except a straggler's: a forward that does not open a pass, of a
+    /// request released here within [`CONVERSATION_GAP_SECS`], holds nothing
+    /// ([`Self::released`], #503). `true` where it stamped the hold.
+    fn note_conversation(&self, request_id: Uuid, stamp: HoldStamp) -> bool {
+        let mut holders = self
+            .kv_holders
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(request_id, std::time::Instant::now());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut released = self
+            .released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let window = std::time::Duration::from_secs(CONVERSATION_GAP_SECS);
+        released.retain(|_, at| at.elapsed() <= window);
+        match stamp {
+            HoldStamp::OpensAPass => {
+                released.remove(&request_id);
+            }
+            HoldStamp::WithinAPass => {
+                if let Some(at) = released.get(&request_id) {
+                    tracing::debug!(
+                        %request_id,
+                        released_ms_ago = at.elapsed().as_millis() as u64,
+                        "a forward of a request already released here — it holds this \
+                         model's worker for nothing (#503)"
+                    );
+                    return false;
+                }
+            }
+        }
+        holders.insert(request_id, std::time::Instant::now());
+        true
     }
 
     /// A new pass of `request_id` from its first position over `range`
@@ -2712,12 +2780,31 @@ impl WorkerHandle {
         }
     }
 
-    /// `request_id` released its cache here, or was cancelled.
+    /// For a refusal's words (#503): how many seconds ago the conversation
+    /// held here most recently heard from, other than `beside`'s, sent its
+    /// last forward. `None` where no other conversation holds it — then a
+    /// reply in flight does.
+    fn last_heard_beside(&self, beside: Option<Uuid>) -> Option<u64> {
+        self.kv_holders
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter(|(id, _)| Some(**id) != beside)
+            .map(|(_, at)| at.elapsed().as_secs())
+            .min()
+    }
+
+    /// `request_id` released its cache here, or was cancelled: its hold goes,
+    /// and a straggling forward of it stamps none ([`Self::note_conversation`]).
     fn forget_conversation(&self, request_id: Uuid) {
         self.kv_holders
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&request_id);
+        self.released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(request_id, std::time::Instant::now());
         self.pass_ranges
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -5719,7 +5806,7 @@ impl ModelProcessPool {
     #[cfg(test)]
     pub(crate) async fn hold_a_conversation_for_test(&self, model: ModelId, request: Uuid) {
         let h = tests::fake_worker_handle(false).await;
-        h.note_conversation(request);
+        h.note_conversation(request, HoldStamp::OpensAPass);
         self.workers.insert(model, h);
     }
 
@@ -11068,11 +11155,17 @@ impl ModelProcessPool {
                 "DIAG: a peer's split asks this node for a range that does not fit beside the copy \
                  a conversation is using here — answering no before its prompt pass"
             );
+            // What holds it, so a far computer's refusal can be read from
+            // here: its own log is out of reach (#503).
+            let holding = h.last_heard_beside(beside).map_or_else(
+                || "a reply is under way".to_string(),
+                |secs| format!("its last forward came {secs} s ago"),
+            );
             let message = format!(
                 "Layers {start}..{end} of {} do not fit beside the copy this node is running \
-                 for a conversation now, which is kept until that conversation ends; try again \
-                 in about {} minutes. Of layers {start}..{end} of the model, {layers_that_fit} \
-                 would load here.",
+                 for a conversation now, which is kept until that conversation ends \
+                 ({holding}); try again in about {} minutes. Of layers {start}..{end} of the \
+                 model, {layers_that_fit} would load here.",
                 model_id.0,
                 CONVERSATION_GAP_SECS.div_ceil(60)
             );
@@ -11360,7 +11453,7 @@ impl ModelProcessPool {
                 // The admission holds a reservation for this request until its
                 // forwards arrive, so the worker is in use from here
                 // (`kv_holders`).
-                handle.note_conversation(request_id);
+                handle.note_conversation(request_id, HoldStamp::OpensAPass);
                 Ok(())
             }
             Admission::Refused {
@@ -13446,6 +13539,7 @@ impl ModelProcessPool {
             promotion_missed: false,
             asked_to_load,
             kv_holders: std::sync::Mutex::new(std::collections::HashMap::new()),
+            released: std::sync::Mutex::new(std::collections::HashMap::new()),
             awaiting_first_step: std::sync::Mutex::new(std::collections::HashMap::new()),
             pass_ranges: std::sync::Mutex::new(std::collections::HashMap::new()),
             placed_on_cpu_because,
@@ -13791,7 +13885,14 @@ impl ModelProcessPool {
         let attempt_token = guard.token;
         // A forward leaves this request's cache on the worker for the next one,
         // so the worker stays in use after `guard` is gone (`kv_holders`).
-        handle.note_conversation(request_id);
+        handle.note_conversation(
+            request_id,
+            if starts_a_pass {
+                HoldStamp::OpensAPass
+            } else {
+                HoldStamp::WithinAPass
+            },
+        );
         handle.note_forward_sent(request_id, sequence_num, pass_parties);
 
         let payload_buf: Vec<u8> = if vision_len == 0 {
@@ -13943,7 +14044,7 @@ impl ModelProcessPool {
         let (resp_tx, mut resp_rx) = mpsc::channel(RESPONSE_CHANNEL_CAPACITY);
         let (mut guard, _) = handle.register_response(request_id, resp_tx, true, guessing_for);
         let attempt_token = guard.token;
-        handle.note_conversation(request_id);
+        handle.note_conversation(request_id, HoldStamp::OpensAPass);
         {
             let mut writer = handle.writer.lock().await;
             if let Err(e) = send_daemon(&mut *writer, &DaemonMsg::Draft(d), &[]).await {
@@ -14274,7 +14375,7 @@ impl ModelProcessPool {
             // cannot skip a single member, so cancelling one is meaningless.
             // Matches `cancelled_request_id`'s exclusion.
             let (g, _) = handle.register_response(f.request_id, tx, false, user);
-            handle.note_conversation(f.request_id);
+            handle.note_conversation(f.request_id, HoldStamp::of(f));
             // A batch carries decode steps only (`model_worker` refuses a
             // sequence-0 member), so this only ever ends a wait.
             handle.note_forward_sent(f.request_id, f.sequence_num, PassParties::default());
@@ -16570,7 +16671,7 @@ mod tests {
             sender: Some(hop.clone()),
             requester: Some(coordinator.clone()),
         };
-        h.note_conversation(pass);
+        h.note_conversation(pass, HoldStamp::OpensAPass);
         h.note_forward_sent(pass, 0, both.clone());
         h.note_forward_sent(local, 0, PassParties::default());
         let gone = std::time::Duration::from_secs(300);
@@ -17083,7 +17184,7 @@ mod tests {
 
         // Mid-reply, nobody takes it.
         let busy = Uuid::new_v4();
-        h.note_conversation(busy);
+        h.note_conversation(busy, HoldStamp::OpensAPass);
         assert_eq!(p.idle_vram_reclaimable_mb(&wanted, Requester::Owner), 0);
         h.forget_conversation(busy);
 
@@ -17236,7 +17337,7 @@ mod tests {
         );
 
         // In use, it cannot be replaced (#93): no fresh run.
-        h.note_conversation(uuid::Uuid::new_v4());
+        h.note_conversation(uuid::Uuid::new_v4(), HoldStamp::OpensAPass);
         assert_eq!(p.fresh_run_layers_for_planning(&m, Requester::Swarm), None);
     }
 
@@ -17295,7 +17396,7 @@ mod tests {
 
         // Control: in use by another request, the forward will not replace it.
         h.last_used.store(LONG_AGO, Ordering::Relaxed);
-        h.note_conversation(Uuid::new_v4());
+        h.note_conversation(Uuid::new_v4(), HoldStamp::OpensAPass);
         assert!(p
             .admit_prompt(admit(vec![(0, run)]), Requester::Swarm, None)
             .await
@@ -17348,7 +17449,7 @@ mod tests {
             .expect("still a split, on the free 2,862 MB");
         h.drafts_for_another_model.store(false, Ordering::Release);
 
-        h.note_conversation(uuid::Uuid::new_v4());
+        h.note_conversation(uuid::Uuid::new_v4(), HoldStamp::OpensAPass);
         let (busy_on_card, _) = p
             .card_share_for_planning(&m, Requester::Swarm)
             .expect("still a split, on the free 2,862 MB");
@@ -17387,7 +17488,9 @@ mod tests {
             let (p, m, idle, h) =
                 seventy_b_beside_an_idle_model(&format!("/tmp/swarmllm-355-spawn-{case}")).await;
             match case {
-                "in-use" => h.note_conversation(uuid::Uuid::new_v4()),
+                "in-use" => {
+                    h.note_conversation(uuid::Uuid::new_v4(), HoldStamp::OpensAPass);
+                }
                 "drafter" => h.drafts_for_another_model.store(true, Ordering::Release),
                 "drafter-of-it" | "drafter-of-it-part" => h.note_guessing_for(&m),
                 "drafter-of-it-and-another" => {
@@ -17537,7 +17640,7 @@ mod tests {
 
         // Mid-reply, nobody moves it.
         let busy = Uuid::new_v4();
-        h.note_conversation(busy);
+        h.note_conversation(busy, HoldStamp::OpensAPass);
         assert!(!pool.promotion_weighed(&fourteen_b, &h, (0, 48), false, Requester::Owner));
     }
 
@@ -19445,7 +19548,7 @@ mod tests {
         let (p, dir) = setup("in-use");
         p.set_ram_budget_mb(asked_mb);
         let h = cpu_worker_holding(&p, &model, held, held_mb).await;
-        h.note_conversation(Uuid::new_v4());
+        h.note_conversation(Uuid::new_v4(), HoldStamp::OpensAPass);
         let refused = p
             .grow_worker(&model, asked, h.clone(), Requester::Swarm, RunShape::Plain)
             .await;
@@ -19534,7 +19637,7 @@ mod tests {
         let (p, dir) = setup("in-use");
         p.set_ram_budget_mb(asked_mb);
         let h = cpu_worker_holding(&p, &model, held, held_mb).await;
-        h.note_conversation(Uuid::new_v4());
+        h.note_conversation(Uuid::new_v4(), HoldStamp::OpensAPass);
         match p
             .weigh_peer_prompt(&model, vec![asked], 64, Uuid::new_v4())
             .await
@@ -19547,6 +19650,11 @@ mod tests {
                 assert!(layers_that_fit < 4, "{layers_that_fit}");
                 // Told why: the copy in use, never a memory figure (#461).
                 assert!(message.contains("for a conversation now"), "{message}");
+                // And what holds it, readable from the asking computer (#503).
+                assert!(
+                    message.contains("its last forward came 0 s ago"),
+                    "{message}"
+                );
                 // The advice: when retrying helps (#377).
                 assert!(
                     message.contains("try again in about 2 minutes"),
@@ -19568,7 +19676,7 @@ mod tests {
         p.set_ram_budget_mb(asked_mb);
         let h = cpu_worker_holding(&p, &model, held, held_mb).await;
         let earlier = Uuid::new_v4();
-        h.note_conversation(earlier);
+        h.note_conversation(earlier, HoldStamp::OpensAPass);
         assert!(matches!(
             p.weigh_peer_prompt(&model, vec![asked], 64, earlier).await,
             PeerPromptWeight::Fits
@@ -19590,6 +19698,57 @@ mod tests {
         assert!(h.release_an_earlier_pass(earlier, asked));
         assert!(!h.in_use(p.conversation_window()));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A request released here keeps no hold through its stragglers (#503).
+    /// A 14B flow's forwards, sent ahead of the reply, reached Australia after
+    /// its coordinator's release and stamped the hold again; the next split's
+    /// range was refused "beside the copy this node is running for a
+    /// conversation now" for two minutes (real link n312r, 2026-11-26). Only a
+    /// pass from the first position — a re-plan keeping the id (#448) — holds
+    /// the worker again.
+    #[tokio::test]
+    async fn a_released_requests_straggling_forward_does_not_hold_the_worker() {
+        let model = ModelId("seventy-b-shaped-straggler".into());
+        let (held, asked) = ((1, 4), (3, 7));
+        let data_dir = header_only_seventy_b("straggler", &model, false);
+        let p = ModelProcessPool::new(data_dir.clone());
+        let held_mb = p.fresh_spawn_machine_mb(&model, held, Requester::Swarm);
+        let asked_mb = p.fresh_spawn_machine_mb(&model, asked, Requester::Swarm);
+        p.set_ram_budget_mb(asked_mb);
+        let h = cpu_worker_holding(&p, &model, held, held_mb).await;
+        let flow = Uuid::new_v4();
+        assert!(h.note_conversation(flow, HoldStamp::OpensAPass));
+        assert!(
+            matches!(
+                p.weigh_peer_prompt(&model, vec![asked], 64, Uuid::new_v4())
+                    .await,
+                PeerPromptWeight::DoesNotFit { .. }
+            ),
+            "fixture: while the flow holds the worker, another shape is refused beside it"
+        );
+        // The coordinator releases the flow at its reply's end; a step it had
+        // sent ahead arrives after.
+        p.release_request_kv(flow).await;
+        assert!(
+            !h.note_conversation(flow, HoldStamp::WithinAPass),
+            "a released request's straggler stamps no hold"
+        );
+        assert!(!h.in_use(p.conversation_window()));
+        assert!(
+            matches!(
+                p.weigh_peer_prompt(&model, vec![asked], 64, Uuid::new_v4())
+                    .await,
+                PeerPromptWeight::Fits
+            ),
+            "the next shape is answered go ahead: the idle worker steps aside for it"
+        );
+        // A re-plan of the same request sends its pass from the first
+        // position: that holds the worker again, and so do its later steps.
+        assert!(h.note_conversation(flow, HoldStamp::OpensAPass));
+        assert!(h.in_use(p.conversation_window()));
+        assert!(h.note_conversation(flow, HoldStamp::WithinAPass));
+        let _ = std::fs::remove_dir_all(&data_dir);
     }
 
     /// Which forward starts a pass and so releases its request's earlier hold
@@ -19999,7 +20158,7 @@ mod tests {
 
         let busy = setup("busy");
         let h = admit_and_insert_gpu_worker(&busy, &other, 3138, hour).await;
-        h.note_conversation(Uuid::new_v4());
+        h.note_conversation(Uuid::new_v4(), HoldStamp::OpensAPass);
         assert_eq!(
             busy.max_local_hostable_layers(&wanted, true, Requester::Swarm),
             with_it_resident
@@ -20057,7 +20216,7 @@ mod tests {
             Some(28),
             "an idle worker is replaced by a fresh one, which splits the model"
         );
-        h.note_conversation(Uuid::new_v4());
+        h.note_conversation(Uuid::new_v4(), HoldStamp::OpensAPass);
         assert_eq!(
             p.fresh_run_layers_for_planning(&m, Requester::Owner),
             None,
@@ -20136,7 +20295,7 @@ mod tests {
 
         let (busy, _) = setup("busy");
         let h = admit_and_insert_gpu_worker(&busy, &idle, 2000, hour).await;
-        h.note_conversation(Uuid::new_v4());
+        h.note_conversation(Uuid::new_v4(), HoldStamp::OpensAPass);
         assert_eq!(
             busy.would_fit_on_gpu(&wanted, Requester::Swarm),
             Some(false),
@@ -20331,7 +20490,7 @@ mod tests {
     async fn a_worker_in_use_that_cannot_grow_keeps_its_refusal() {
         let pool = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-grow-busy"));
         let (_idle, wanted, h) = card_with_an_idle_model_and_a_one_layer_worker(&pool, 190).await;
-        h.note_conversation(Uuid::new_v4());
+        h.note_conversation(Uuid::new_v4(), HoldStamp::OpensAPass);
 
         let err = match pool
             .grow_worker(
@@ -21296,6 +21455,7 @@ mod tests {
             promotion_missed: false,
             asked_to_load: Arc::new(AtomicBool::new(false)),
             kv_holders: std::sync::Mutex::new(std::collections::HashMap::new()),
+            released: std::sync::Mutex::new(std::collections::HashMap::new()),
             awaiting_first_step: std::sync::Mutex::new(std::collections::HashMap::new()),
             pass_ranges: std::sync::Mutex::new(std::collections::HashMap::new()),
             charged_mb: AtomicU64::new(0),
@@ -21967,7 +22127,7 @@ mod tests {
             "nothing has used it yet"
         );
 
-        h.note_conversation(reply);
+        h.note_conversation(reply, HoldStamp::OpensAPass);
         assert!(
             h.responses.is_empty(),
             "between two forwards, nothing is in flight"
@@ -21983,7 +22143,7 @@ mod tests {
             p.models_with_inflight_requests().is_empty(),
             "released the moment the reply finished"
         );
-        h.note_conversation(reply);
+        h.note_conversation(reply, HoldStamp::OpensAPass);
         p.cancel_request(reply).await;
         assert!(
             p.models_with_inflight_requests().is_empty(),
@@ -22016,7 +22176,7 @@ mod tests {
             !h.in_use(window),
             "quiet for twice the gap: the reply is over"
         );
-        h.note_conversation(Uuid::new_v4());
+        h.note_conversation(Uuid::new_v4(), HoldStamp::OpensAPass);
         assert!(h.in_use(window), "a forward just now: the reply is live");
     }
 
@@ -24483,7 +24643,7 @@ mod admission_tests {
         assert!(q.admit_to_cpu(&other, 3_600, Requester::Swarm));
         let h = super::tests::fake_worker_handle(false).await;
         h.charged_mb.store(3_600, Ordering::Release);
-        h.note_conversation(Uuid::new_v4());
+        h.note_conversation(Uuid::new_v4(), HoldStamp::OpensAPass);
         q.workers.insert(other, h);
         assert_eq!(
             q.max_local_hostable_layers(&m, true, Requester::Swarm),
@@ -24674,7 +24834,7 @@ mod admission_tests {
         h.charged_mb.store(3_345, Ordering::Release);
         h.record_charged_segment((0, 26), 0);
         p.workers.insert(m.clone(), h.clone());
-        h.note_conversation(Uuid::new_v4());
+        h.note_conversation(Uuid::new_v4(), HoldStamp::OpensAPass);
         /// The next thing the worker was told, which must be a placement —
         /// past a refused growth's question about its pool (#481 (5)), which
         /// this fake worker leaves unanswered.
@@ -24805,7 +24965,7 @@ mod admission_tests {
         h.charged_mb.store(3_345, Ordering::Release);
         h.record_charged_segment((0, 26), 0);
         p.workers.insert(m.clone(), h.clone());
-        h.note_conversation(Uuid::new_v4());
+        h.note_conversation(Uuid::new_v4(), HoldStamp::OpensAPass);
         let Some((
             CardSplit::ExpertsInRam {
                 in_ram: beside_it, ..
@@ -25344,7 +25504,7 @@ mod admission_tests {
     #[tokio::test]
     async fn a_worker_in_use_still_takes_a_wider_range_as_a_split() {
         let (p, m, h, _worker_end) = fourteen_b_spawned_as_0_24("fourteen-b-461-in-use").await;
-        h.note_conversation(Uuid::new_v4());
+        h.note_conversation(Uuid::new_v4(), HoldStamp::OpensAPass);
         let grown = p
             .grow_worker(&m, (0, 26), h.clone(), Requester::Owner, RunShape::Plain)
             .await
@@ -25390,7 +25550,7 @@ mod admission_tests {
     async fn a_worker_in_use_still_takes_an_overlapping_range_as_a_split() {
         let (p, m, h, _worker_end) =
             fourteen_b_spawned_as_0_24("fourteen-b-461-overlap-in-use").await;
-        h.note_conversation(Uuid::new_v4());
+        h.note_conversation(Uuid::new_v4(), HoldStamp::OpensAPass);
         let grown = p
             .grow_worker(&m, (12, 36), h.clone(), Requester::Owner, RunShape::Plain)
             .await

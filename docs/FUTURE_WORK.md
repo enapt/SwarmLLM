@@ -6903,7 +6903,7 @@ StarCoder2, inert while refused).
 ### Memory and admission
 
 #### #503 — A far computer that just served one split shape refuses the next shape for two minutes, then serves it slow
-`P1` · memory · **OPEN — cause UNDETERMINED** — 2026-11-26 · history: rig `~/swarmllm-gate/deep/fr/real_link_n312r/` (`run_n312r.sh`, the n311r arms on .313)
+`P1` · memory · **PARTIAL — the cause fixed on main; the real-link check waits for a release Australia runs** — 2026-11-26 · history: rig `~/swarmllm-gate/deep/fr/real_link_n312r/` (`run_n312r.sh`, the n311r arms on .313)
 
 On the real link to Australia (aa3d1e66, on v0.3.313), five arms of the 14B, each on a fresh node here:
 "start and finish" (dsdwfit: here [0,12) + [38,48), AU [12,38)), the flow (flowq: AU [16,48) + the head),
@@ -6918,7 +6918,7 @@ The third ask (78 s after) loaded [12,38) BESIDE [16,48) (AU advertised both, 46
 wrote 31 tokens at 0.79 tok/s, then every forward timed out (52, 36, 40 s) until AU was ejected from the model's
 plans. Arm 5 found [12,38) held and ran at ~0.7x arm 1 (prose 6.3, code 18.7).
 
-Hypotheses, to discriminate on the real link before any fix: (a) a flow leaves a hold on the far worker that
+**Cause (2026-11-26, CAUSED on the evidence that can be had from here):** straggling forwards. The flow's last request completed at 13:52:32.813Z and was released at .816, and Australia went on answering four more of its forwards (results at .845-.910 reached "No pending channel"); each stamped the released hold again. `run_n313g.sh` asked the same second shape ~130 s after the flow (past the window): Australia stepped aside, held [12,38) alone with all 26 layers on its card, and the shape ran prose 10.4 / code 32.1 tok/s. **Fixed**: a released id is remembered for the window and only a pass from the first position holds the worker again (`HoldStamp`, `WorkerHandle::released`; test `a_released_requests_straggling_forward_does_not_hold_the_worker`, red with the check off); the refusal now says what holds the copy. Prior art: HTTP/2 ignores frames in flight on a reset stream (RFC 9113 § 5.1); vLLM V1 skips output for an aborted request. Still to do: n312r's five arms again once Australia runs the release carrying it (arm 3 must step aside, not refuse); and the beside-copy's 0.79 tok/s and timeouts, a slow placement in its own right. The original hypotheses, kept for the record: (a) a flow leaves a hold on the far worker that
 the end-of-request release does not clear (`forget_conversation` clears `kv_holders` by the request id only; a
 response slot left in `responses` would also read as use); (b) any request's hold lasts the 120 s window
 whatever the release (then it is not flow-specific); (c) another requester used AU's [16,48) copy in that

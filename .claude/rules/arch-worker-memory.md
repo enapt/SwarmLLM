@@ -78,6 +78,7 @@ Code waiting for a subprocess handles it dying instead (`spawn_worker` races `ch
 
 - Idle time starts at a reply's END (`ResponseGuard::used_until_now`, set only by `register_response`, never a peer's question).
 - **`WorkerHandle::in_use` is the single answer to "is this worker in use?"** — a response in flight OR a conversation held between forwards (`kv_holders`, `CONVERSATION_GAP_SECS`); promotion, both reclaims and `models_with_inflight_requests` ask it. Guard: `whether_a_worker_is_in_use_is_decided_in_one_place`. A forward past the prompt pass with no conversation is refused (`model_worker::forward_lacks_its_conversation`).
+- **A released request's straggler holds nothing** (#503): `WorkerHandle::note_conversation`'s `HoldStamp` is REQUIRED; once `forget_conversation` ran (a release or cancel), only `OpensAPass` — a pass from the first position (`starts_a_pass`: a re-plan or a continued reply keeping its id) — holds the worker again; a later step of it (`WithinAPass`) stamps nothing for `CONVERSATION_GAP_SECS`. A new forward path states its stamp.
 - **A retirement waits for the request it last handed the worker to** (#483 (a) F2, HikariCP's borrow/evict CAS):
   - Every hand-out is stamped under the `workers` read guard (`WorkerHandle::handed_out_ms`: `live_worker`, `get_existing`, `get_or_spawn_once`).
   - `unload_model` waits `HAND_OUT_GRACE` past the last stamp before its drain.

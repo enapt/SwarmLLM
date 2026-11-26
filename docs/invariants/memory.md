@@ -2934,6 +2934,33 @@ prompt pass whose conversation is gone is refused**
 (`model_worker::forward_lacks_its_conversation`, `ServiceUnavailable`), never
 decoded from nothing — whatever lost the worker.
 
+### A released request's straggler holds nothing (2026-11-26, #503)
+
+A flow sends its forwards ahead of the reply. On the real link to Australia (v0.3.313, `real_link_n312r`),
+the coordinator finished a 14B flow at 13:52:32.813Z and told Australia it was over at .816; Australia went on
+answering four more forwards of it (results at .845-.910 reached "No pending channel"), and each forward the
+daemon handed its worker stamped `kv_holders` again AFTER the release had cleared it. For the next 120 s
+`in_use_beside` read true: a "start and finish" split asked 44 s and 63 s later was refused "beside the copy this
+node is running for a conversation now", then loaded `[12,38)` BESIDE `[16,48)` (12 of the 58 layers off the card)
+and timed out; asked ~130 s after the flow instead (`run_n313g.sh`), Australia stepped aside and held `[12,38)`
+alone on its card (prose 10.4, code 32.1 tok/s against 8.8 / 25.7 for the same shape from nothing).
+
+The fix remembers a released id for `CONVERSATION_GAP_SECS` (`WorkerHandle::released`) and makes every stamp say
+what it is (`HoldStamp`): a forward that opens a pass from the first position holds the worker whatever was
+released (a re-plan and a continued reply keep their id, #448, and send their pass from 0 — `starts_a_pass`); a
+later step of a released request is a straggler and holds nothing. What a change must keep: a released request's
+straggler never makes `in_use` true, and a pass from 0 after a release always does
+(`a_released_requests_straggling_forward_does_not_hold_the_worker`, red with the check off). The residual risk
+is a request cancelled on a computer mid-request (a failover's `cancel_segment_on`) and sent back to the same
+computer within two minutes RESUMING past a kept opening: its steps would not hold the worker. A written-off
+computer is barred from that request's retry, so no path is known to do it.
+
+Prior art: HTTP/2 ignores the frames still in flight on a stream it has reset, and they never reopen it (RFC 9113
+§ 5.1); vLLM V1's `OutputProcessor.process_outputs` skips output for a request it has already aborted; this
+repo's worker remembers a cancel that overtakes its own request for `CANCEL_RETENTION_SECS`. And the refusal now
+says what holds the copy ("its last forward came N s ago" / "a reply is under way"): Australia's own log is out
+of reach, and its words are all the asking computer sees.
+
 ## The contribution level caps the swarm's work, not the owner's prompt (2026-09-26)
 
 The Settings page defines the contribution level as "how much of your computer
