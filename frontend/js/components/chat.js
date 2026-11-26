@@ -346,7 +346,7 @@
         tokenHtml;
 
       if (encBanner) {
-        var modelData = s.model ? (App.data.cache.models || []).find(function(m) { return m.id === s.model; }) : null;
+        var modelData = U.cachedModel(s.model);
         var isDistributed = modelData && modelData.shard_count > 1;
         // Whether this machine will actually ANSWER the request, not whether it
         // holds the files. Reading inventory here told the user "your prompts
@@ -392,7 +392,7 @@
 
       var sendBtn = document.getElementById('send-btn');
       if (sendBtn) {
-        var modelData2 = s.model ? (App.data.cache.models || []).find(function(m) { return m.id === s.model; }) : null;
+        var modelData2 = U.cachedModel(s.model);
         var sendEncActive = !!(modelData2 && modelData2.encrypted_pipeline && modelData2.shard_count > 1);
         sendBtn.innerHTML = sendEncActive
           ? App.utils.escapeHtml(I18n.t('chat.send')) + ' <span class="send-enc-lock" aria-hidden="true">&#128274;</span>'
@@ -499,7 +499,7 @@
       var session = S.currentSessionId && S.sessions[S.currentSessionId];
       var model = (session && session.model) || S.currentModel;
       if (!model) return;
-      var item = (S._modelDropdownData || []).find(function(m) { return m.id === model; });
+      var item = U.dropdownModel(model);
       if (!item || item.group !== 'local') return;
       var now = Date.now();
       if (now - (App.chat._loadAheadAt[model] || 0) < 60000) return;
@@ -544,7 +544,7 @@
       var session = S.sessions[S.currentSessionId];
       var displayText = text || (images.length > 0 ? I18n.t('chat.image_placeholder') : '');
       var _sendModel = session.model || S.currentModel || '';
-      var _sendModelData = _sendModel ? (App.data.cache.models || []).find(function(m) { return m.id === _sendModel; }) : null;
+      var _sendModelData = U.cachedModel(_sendModel);
       var msgEncrypted = !!(_sendModelData && _sendModelData.encrypted_pipeline && _sendModelData.shard_count > 1);
       session.messages.push({ role: 'user', content: displayText, images: images.map(function(i) { return i.data_url; }), encrypted: msgEncrypted });
 

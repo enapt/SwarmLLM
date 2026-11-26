@@ -10186,7 +10186,7 @@ alone, sustained", v0.3.262)
   `docs/invariants/memory.md` § "A full node makes room for its planned part". Field check owed:
   `bf7b3263`'s `hosted_models` on the release (`/api/admin/peers`), and `wants a place here` in a
   full node's log.
-- #370 — **Of two drafters the same size, the one of the target's own release line guesses**
+- #370 — **Of two drafters the same size, the one of the target's own release line guesses** (⚠ superseded for a CODER target by #502, 2026-11-26: a general line ranks first there too, `engine_drafter::line_rank`; the tests named below were renamed then)
   (found 2026-10-29 while ranking drafters for #369's prose: every drafter ranked for the 14B
   Instruct had been a CODER model). Ranked offline on the 14B's own replies, the general Qwen2.5
   sibling took the target's first choice more often at every size — chat 0.691 / 0.745 / 0.784

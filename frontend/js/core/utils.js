@@ -159,6 +159,13 @@
     return S._modelDropdownData.find(function(m) { return m.id === modelId; }) || null;
   }
 
+  // The loaded model list's entry for `modelId` (App.data.cache.models), or null —
+  // the one lookup; it was written out at six sites.
+  function cachedModel(modelId) {
+    if (!modelId) return null;
+    return (App.data.cache.models || []).find(function(m) { return m.id === modelId; }) || null;
+  }
+
   function getModelSource(modelId) {
     if (!modelId) return 'local';
     var match = dropdownModel(modelId);
@@ -368,7 +375,7 @@
     if (S.currentModel) {
       item = dropdownModel(S.currentModel);
       modelName = item ? item.name : S.currentModel;
-      modelData = (App.data.cache.models || []).find(function(m) { return m.id === S.currentModel; });
+      modelData = cachedModel(S.currentModel);
     }
 
     var title = modelName ? I18n.t('chat.title_with_model', { model: escapeHtml(modelName) }) : I18n.t('chat.empty_title');
@@ -1485,6 +1492,7 @@
     timeAgo: timeAgo,
     getModelSource: getModelSource,
     dropdownModel: dropdownModel,
+    cachedModel: cachedModel,
     formatModelDisplayName: formatModelDisplayName,
     applyMessageGrouping: applyMessageGrouping,
     appendMessageToDOM: appendMessageToDOM,

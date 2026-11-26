@@ -557,7 +557,7 @@
       var encToggleEl = target.closest('[data-enc-toggle]');
       if (encToggleEl) {
         var encToggle = encToggleEl.getAttribute('data-enc-toggle');
-        var encModelData = (App.data.cache.models || []).find(function(m) { return m.id === encToggle; });
+        var encModelData = U.cachedModel(encToggle);
         // `encrypted_pipeline` is the EFFECTIVE value (setting AND both ends
         // present), so a blocked model reports false — and clicking its
         // toggle would have asked to ENABLE what is already on, which the API
@@ -662,7 +662,7 @@
       if (modelCard && !target.closest('button, a, summary, details, .shard-row, .badge-encrypted, [data-cancel-download], [data-remove-model], [data-unload-model], [data-enc-toggle], [data-am-gear], input, select, .model-expand-chevron, .availability-bar')) {
         var cardModelId = modelCard.getAttribute('data-model-id');
         if (cardModelId) {
-          var cardModel = (App.data.cache.models || []).find(function(mm) { return mm.id === cardModelId; });
+          var cardModel = U.cachedModel(cardModelId);
           var cardReady = cardModel && (cardModel.status === 'loaded' || cardModel.status === 'ready' ||
             (cardModel.global_available === cardModel.shard_count && cardModel.shard_count > 0));
           if (cardReady) {
