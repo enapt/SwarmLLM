@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.3.312-alpha] — 2026-11-26
+
+**A computer serving part of a model for two splits of different shapes runs both on its graphics card.** A computer
+holding some of a model's layers for one split, asked for a range that shares layers with them without containing
+them, kept the first range on its card and put most of the second range on its processor beside it. Whichever split
+came second ran several times slower for as long as the copy stayed loaded. Seen on a 14B split between Thailand and
+Australia: Australia held layers 12-38 whole on its card, then loaded 16-48 beside them with 17 of their 32 on the card.
+Its own time for each step of the second split rose from 33 ms to 135 ms, and that split's prose fell to about
+3 tokens a second. An idle model process asked for such a range now gives up what it holds and loads the new range
+afresh, as it already did for a range taking in the one it started with. A process a conversation is using keeps the
+old way, and so does one whose fresh copy would not fit: a slower answer beats a refused request.
+`SWARMLLM_GROWTH_ACROSS_HELD_RANGE=split` keeps the old placement. Checked on a graphics card with two nodes on
+Qwen2.5-Coder-7B: the far node holding layers 6-28 and asked for 0-22 loaded them whole in 2.4 s and answered each
+step in 10 ms, against 77-79 ms with 5 of the 22 layers on its card the old way. Both placements' replies agree
+with llama.cpp's. A far computer needs this release for its split partners to see it.
+
+**A model part asked for on its own through the API is kept.** Asking a node for one part of a model
+(`POST /api/admin/models/<id>/shards/<n>/download`) did not record it as your download, as the dashboard's Download
+and the HuggingFace part download do. On a node whose storage was nearly at its limit, the part could then be judged
+surplus and dropped before it finished, and the download read as stalled. It is now kept like any download you
+start. The dashboard does not use this route, so only scripts and API callers were affected.
+
+**A retried request gives back its memory when it is cancelled again.** A computer serving part of a split frees a
+request's cache when that request is cancelled. A retry keeps its request's id, and a second cancel of the same id
+was taken for the first and skipped, so the retry's cache stayed held for up to a minute, and a new conversation
+could be refused the room meanwhile. Each cancel now counts.
+
+**Recording a step for the graphics card reads only what the driver wrote.** Reading back the copies a recorded
+step makes handed the driver a structure it need not fill completely, and trusted every field afterwards. The
+structure is now cleared and given valid values first.
+
 ## [0.3.311-alpha] — 2026-11-25
 
 **A request sent right after another is no longer turned down by the computer serving part of it.** A computer
