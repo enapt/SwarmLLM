@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #503**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #504**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -6901,6 +6901,32 @@ against llama.cpp 0.3.16, then flip `is_supported` and re-read `arch_supports_hy
 StarCoder2, inert while refused).
 
 ### Memory and admission
+
+#### #503 — A far computer that just served one split shape refuses the next shape for two minutes, then serves it slow
+`P1` · memory · **OPEN — cause UNDETERMINED** — 2026-11-26 · history: rig `~/swarmllm-gate/deep/fr/real_link_n312r/` (`run_n312r.sh`, the n311r arms on .313)
+
+On the real link to Australia (aa3d1e66, on v0.3.313), five arms of the 14B, each on a fresh node here:
+"start and finish" (dsdwfit: here [0,12) + [38,48), AU [12,38)), the flow (flowq: AU [16,48) + the head),
+dsdwfit, flowq, dsdwfit. Arms 1, 2 and 4 ran (dsdwfit prose 8.8 / code 25.7; flowq 15.9-16.3 / 34.2-38.7 tok/s).
+**Arm 3 failed every request.** Its first two asks, 44 s and 63 s after arm 2's last request ended and was
+released on AU (`Told the peers … told=1`, 13:52:32.816Z), were refused up front: "Layers 12..38 … do not fit
+beside the copy this node is running for a conversation now … try again in about 2 minutes. Of layers 12..38,
+14 would load here" (`ModelProcessPool::peer_load_refusal` → `busy_beside` → `WorkerHandle::in_use_beside`).
+So AU counted its [16,48) copy in use by ANOTHER request, though the flow's request had been released: the
+.312 step-aside (`charge_segment_as_split`'s `partly_overlaps_a_charged_range`) is skipped for a worker in use.
+The third ask (78 s after) loaded [12,38) BESIDE [16,48) (AU advertised both, 46 of their 58 layers on its card),
+wrote 31 tokens at 0.79 tok/s, then every forward timed out (52, 36, 40 s) until AU was ejected from the model's
+plans. Arm 5 found [12,38) held and ran at ~0.7x arm 1 (prose 6.3, code 18.7).
+
+Hypotheses, to discriminate on the real link before any fix: (a) a flow leaves a hold on the far worker that
+the end-of-request release does not clear (`forget_conversation` clears `kv_holders` by the request id only; a
+response slot left in `responses` would also read as use); (b) any request's hold lasts the 120 s window
+whatever the release (then it is not flow-specific); (c) another requester used AU's [16,48) copy in that
+window. Runs: arm 3 again ≥ 130 s after arm 2 (past `CONVERSATION_GAP_SECS`): stepping aside → the hold is the
+cause; and a dsdw (non-flow) arm before it at the same 45 s gap → flow vs any request. ⚠ AU's own log is out
+of reach: an up-front "in use" refusal should name what holds the copy (a reply in flight or a conversation,
+how long ago), or the next report from a far computer is as blind as this one. The 0.79 tok/s and the timeouts
+of the beside-copy are their own question: the copy put 12 layers on AU's processor.
 
 #### #462 — A flowing split drafts, then runs this node's layers, one after the other: overlap them
 `P3` · perf-split · **OPEN** (measured: worth ~2-3 ms a forward on one card, behind #411's balance) — 2026-11-15 · evidence: `docs/invariants/scheduling.md` § "A tree that flows" (*Rows and levels, a third time*), `examples/two_device_overlap_bench.rs`
