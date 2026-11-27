@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #510**; #505 is reserved for the carry ask, memory `next_up.md` item 5b). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #511**; #505 is reserved for the carry ask, memory `next_up.md` item 5b). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -32,6 +32,12 @@ Status is **OPEN** (nothing material done) or **PARTIAL** (part shipped; the ent
 residual).
 
 ## ▶ PRIORITIES — read this first
+
+**2026-11-27: a split that flows is DELAY-bound on prose, pace-bound on code** (design memo, arithmetic on t509rd's
+14B TH↔AU flow; HYPOTHESES until #510's step 0 is measured): the flow fits R = λ / (1 + m·λ·D) (λ levels a second, D
+the verdict's delay, m the loss a level in flight; checked against the 11-16 US link, 11.5 predicted vs 11.7-11.8),
+prose's ceiling with today's drafter and D ≈ 36 tok/s, so a faster head alone is damped (pace ×1.3 → +9%). First
+build: #510 (the far computes only rows still alive). The 27B's 20-30 bar needs a ring of D ≤ ~150 ms — one region.**
 
 **2026-11-20: split speed is the focus (owner: "we need to focus on getting split speeds going"; each node a small
 slice, nobody's card locked by a whole model). The plan: `docs/plans/small_slices.md`. The bar (owner, same day):
@@ -3768,6 +3774,28 @@ TAG=fresh303, 02:26-02:29Z, the thread sampler beside it in `threads_fresh303.tx
 0 ms, the far wait 0-5 ms, and the longest continuous `dxgvmb_send_sync_msg` wait any thread made was 45 ms (0.45-5 s at
 50.8 h). These are the 14B rows' fresh-boot figures for the next bump (uptime 0.1 h). Detecting the stall and telling
 the owner is #146 (4).
+
+#### #510 — A split's far card computes every row of a guess tree, the ones the walk has already left too
+`P2` · perf-split · **OPEN** (conceptual, step 0 first) — 2026-11-27 · evidence: memory `archive/fable_flow_law_1127.md`
+
+In a flow whose far end draws (`peer-last`), the far learns the walk ~62 ms before this node, yet serves every row it is
+sent: the head counts dead rows only for a shape it finishes itself (`dsd_flow::note_dead_here`, `sent.here`), and
+`far_left_behind` is a timing exclusion, not a skip. Measured on t509rd (14B TH↔AU, here [0,16) + the 1.5B, AU [16,48),
+2026-11-27): one prose reply's 181 forwards of 23.2 rows bought 160 tokens; 52 levels died under its 7 misses and the
+34 tokens taken at the drafter's rank 2 or later each killed the first guess's trunk ~5 levels deep. Since the 11-24
+row kernels 8 rows run 1.09-1.26× the floor against 1.55-2.0× at 24, so § 13's "dropping is worthless on a card" no
+longer holds. **The change**: the far answers a wholly dead forward at once and computes the rest's live rows only,
+padded to 8 / 16 / 24 (graph shapes, #357); dense models first (a recurrent layer's per-row state needs its own pass);
+gated on a head-advertised bit if an older head needs a draw for every row. **Arithmetic** (the memo's law, above):
+half the rows dead at service → far 35 → ~25 ms, #504's balance moves 6-8 layers off the head, λ 68 → 86, D 193 →
+163 ms → prose ~29, code ~60 (from 22-24 / 48-51). With #412 and the opt-in near-tie acceptance (§ 7.3) ≈ 35.
+**Step 0, before building**: on this node, count rows already off the walk when the far served them (the peer-last
+form of `note_dead_here`) and levels lost at non-first takes; `prefill_bench` the far range at 8 / 16 / 24 rows on a
+3060-class card. **Kill it** if under 35% of rows are dead at service or 8 against 24 rows differ by under 15%. Then
+build behind `SWARMLLM_FLOW_LIVE_ROWS=0` (read at the far), rig it with this card as the far over a delayed link
+(§ 13), and the real link once the far runs the release. Prior art: PipeInfer (2407.11798 § IV-D) cancels invalid
+queued runs, a node polling a flag mid-run; FlowSpec (2507.02620) and SpecPipe (2504.04104) prune rows after a verify,
+not before a stage serves them; #149 (b) skips a whole unstarted stream chunk stood on a refused walk.
 
 #### #412 — A busy far card is busy with our own forwards: run its backlog as one
 `P2` · perf-split · **OPEN** (conceptual, tests first) — 2026-11-06 · evidence: `docs/plans/faster_than_local.md` § 13; history: #388
