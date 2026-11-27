@@ -149,23 +149,23 @@ idea, applied to running AI instead of sharing files.)
 
 ## How fast is it?
 
-<!-- speeds:begin, reviewed for 0.3.315-alpha. Refreshed at every release: .claude/rules/completeness.md § "README speeds" -->
+<!-- speeds:begin, reviewed for 0.3.316-alpha. Refreshed at every release: .claude/rules/completeness.md § "README speeds" -->
 Speed is in **tokens a second**: a token is a word or part of one, and most
 people read about 5 a second. The figures are from the project's test laptop,
 with an 8 GB NVIDIA RTX 3070 graphics card and an 8-core AMD Ryzen 7 5800H
 processor, on its own or teamed up with volunteers' computers.
 
 <!-- release-check:begin -->
-<!-- from the v0.3.314 release check, timed on the downloaded release -->
+<!-- from the v0.3.315 release check, timed on the downloaded release -->
 **On one computer.** Each model reads a 1,800-token document and writes 128
 tokens about it.
 
 | Model | Runs on | Writing (tokens a second) | Reading (tokens a second) |
 |---|---|---|---|
-| Qwen2.5 Coder 7B | the graphics card | 83 | 2,020–2,030 |
-| Qwen2.5 14B | card and processor (too big for the card) | 15.8–16.4 | 720–750 |
-| Qwen3 30B-A3B (2-bit) | card and processor (a mixture of experts, too big for the card) | 25–31 | 260 |
-| Llama 3.2 3B | the processor only | 19.5–19.9 | 90 |
+| Qwen2.5 Coder 7B | the graphics card | 75 | 1,820–1,840 |
+| Qwen2.5 14B | card and processor (too big for the card) | 13.7–14.1 | 580–640 |
+| Qwen3 30B-A3B (2-bit) | card and processor (a mixture of experts, too big for the card) | 19.5–26.5 | 240–250 |
+| Llama 3.2 3B | the processor only | 17.3–17.9 | 80 |
 <!-- release-check:end -->
 
 **Across computers.** The same laptop, in Thailand, asking a volunteer's
@@ -177,11 +177,11 @@ several words.
 
 | Model, and how it is shared | Writing code | Writing prose |
 |---|---|---|
-| Qwen2.5 14B, half on this laptop and half in Australia | 39–48 | 17.3–20.4 |
-| The same, set to "Start and finish on this computer" | 32.7–33.3 | 15.8–16.0 |
+| Qwen2.5 14B, about a third on this laptop and the rest in Australia | 41.5–53.7 | 19.5–27.1 |
+| Qwen2.5 14B, half on each, set to "Start and finish on this computer" | 32.7–33.3 | 15.8–16.0 |
 | Qwen3.5 9B, about half on this laptop and half in Australia, a smaller Qwen 3.5 guessing on this laptop's card | 23.5–30.9 | 17.2–17.5 |
 | Qwen3.8 27B across three computers: this laptop (its first and last layers), one in the US or Thailand, and one in Australia running its 47 layers on its processor | 3.2–3.7 | 2.3–2.4 |
-<!-- measured on: the 14B half-and-half row main as v0.3.305 ships it, the card clock hold on (real_link.sh flowhalf, the far computer aa3d1e66, 160-token greedy replies, the client's decode_tok_s — the node's own decode_ms within 1% — five runs in two sittings: readme305 arms 1 and 3, 11-21 14:28-14:35Z on main 7633b9296's CUDA build, far_least_ms 22-32 — code 46.3 / 48.3, prose 20.4 / 18.7; real_link_ab489c's held arms 2, 4 and 6, main as v0.3.304 ships it, 11-21 03:52-04:03Z, far_least_ms 17-32 — code 44.3, 38.8, 41.1, prose 18.8, 18.5, 17.3; the readme304 sitting, 11-21 09:02-09:13Z, left out: the far computer queued 31-44 s of each prose reply and the published v0.3.303 read the same in that hour); the laptop-alone 14B figures below main as v0.3.307 ships it (readme307 locald arms 1-3, 11-22 20:40-20:55Z on main cbc7e9499's CUDA build, the 0.5B helper on the card, the client's decode_tok_s — the node's own decode_ms within 1% — code 14.99 / 15.83 / 16.47, prose 13.88 / 13.03 / 14.13); the "start and finish" row main as v0.3.305 ships it (readme305 dsdwfit arms 2 and 4, 11-21 14:30-14:34Z, one sitting, the 0.5B helper on the card, the client's decode_tok_s: code 33.3 / 32.7, prose 15.8 / 16.0) and its processor-helper figures v0.3.308 (readme308h, the published release, 11-23 15:53-16:04Z, 116-125 ms: dsdw × 3 with the helper on the processor in every reply — code 21.22 / 22.27 / 21.82, prose 11.50 / 11.45 / 11.65); every figure the node's own decode_ms (the client's wall clock stepped, gotcha #1112); the Qwen3.5 9B row main as v0.3.309 ships it (real_link9b.sh flowc, parts 0-4 [0, 17) here, 5-9 and the head on aa3d1e66's card, Qwen3.5-2B Q8_0 guessing on this card, 160-token greedy replies, the client's decode_tok_s, rf9b25_1123 arms 1 and 8 on 11-23 16:39-16:57Z, main 4a204cc76's code in a CUDA release build with no switch set (two levels a call, the 16-row near step captured) — code 23.54 / 30.91, prose 17.16 / 17.46; the owner's reply store on as a user's node runs it, no prompt asked twice in an arm (copied_rows 10-78 a reply)); the 27B row v0.3.308 (tier27_1123, the live node's own route: here, US 5bfbd36e (TH 96842635 for the second prose ask), AU aa3d1e66 with 47 layers on its processor (card_layers 0 beside 10,063 MB of its card free, FUTURE_WORK #498), here; ask_tier.py, 160 tokens, thinking off, code and prose twice each after a warm-up, 11-23 17:37-17:49Z: code 3.16 / 3.70, prose 2.38 / 2.28) -->
+<!-- measured on: the 14B third-and-rest row main as v0.3.316 ships it, the card clock hold on (real_link.sh flowroom: the planner's cut, [0, 16) or [0, 17) of 48 layers here and the rest on the far computer aa3d1e66's card, the 1.5B helper on this card, the owner's reply store off, 160-token greedy replies, the client's decode_tok_s — the node's own decode_ms within 1% — four arms in two sittings on main 03f0441e2's CUDA build, later commits before the cut changing only storage room and a log line: t509rd 11-27 18:47-18:57Z arm 1 code 41.51 / 45.89, prose 24.21, 20.77, 19.77, 20.88, 20.31 (its warm-up and first prose reply left out: the far computer took 1.5 s a forward, still holding [26, 48) from the sitting before, cause UNDETERMINED), arm 2 code 53.66 / 49.16, prose 22.36, 23.64, 27.12, 22.08, 23.64, 25.39; t509rd2 11-27 19:47-19:55Z arm 1 code 47.39 / 50.64, prose 22.35, 23.92, 25.48, 24.03, 24.49, 21.34, arm 2 code 48.14 / 49.92, prose 21.50, 24.09, 21.18, 23.91, 23.15, 19.53); the laptop-alone 14B figures below main as v0.3.307 ships it (readme307 locald arms 1-3, 11-22 20:40-20:55Z on main cbc7e9499's CUDA build, the 0.5B helper on the card, the client's decode_tok_s — the node's own decode_ms within 1% — code 14.99 / 15.83 / 16.47, prose 13.88 / 13.03 / 14.13); the "start and finish" row main as v0.3.305 ships it (readme305 dsdwfit arms 2 and 4, 11-21 14:30-14:34Z, one sitting, the 0.5B helper on the card, the client's decode_tok_s: code 33.3 / 32.7, prose 15.8 / 16.0) and its processor-helper figures v0.3.308 (readme308h, the published release, 11-23 15:53-16:04Z, 116-125 ms: dsdw × 3 with the helper on the processor in every reply — code 21.22 / 22.27 / 21.82, prose 11.50 / 11.45 / 11.65); every figure the node's own decode_ms (the client's wall clock stepped, gotcha #1112); the Qwen3.5 9B row main as v0.3.309 ships it (real_link9b.sh flowc, parts 0-4 [0, 17) here, 5-9 and the head on aa3d1e66's card, Qwen3.5-2B Q8_0 guessing on this card, 160-token greedy replies, the client's decode_tok_s, rf9b25_1123 arms 1 and 8 on 11-23 16:39-16:57Z, main 4a204cc76's code in a CUDA release build with no switch set (two levels a call, the 16-row near step captured) — code 23.54 / 30.91, prose 17.16 / 17.46; the owner's reply store on as a user's node runs it, no prompt asked twice in an arm (copied_rows 10-78 a reply)); the 27B row v0.3.308 (tier27_1123, the live node's own route: here, US 5bfbd36e (TH 96842635 for the second prose ask), AU aa3d1e66 with 47 layers on its processor (card_layers 0 beside 10,063 MB of its card free, FUTURE_WORK #498), here; ask_tier.py, 160 tokens, thinking off, code and prose twice each after a warm-up, 11-23 17:37-17:49Z: code 3.16 / 3.70, prose 2.38 / 2.28) -->
 
 These replies always take the model's likeliest next word. Many chat apps ask
 for some randomness instead (a "temperature" of 0.7 to 1.0): on the 14B split
@@ -190,7 +190,7 @@ guess.
 
 On its own this laptop writes the 14B's code at 15.0–16.5 tokens a second and
 its prose at 13.0–14.1, so the two continents together write code two and a half
-to three times as fast, and prose a quarter to a half faster. Code is easier to
+to three and a half times as fast, and prose 40% faster to twice as fast. Code is easier to
 guess, and the guesses keep the long link busy ([how](docs/plans/faster_than_local.md)).
 "Start and finish on this computer" is that fast only while its small helper
 model fits on this laptop's card beside the 14B: with other programs holding a
@@ -411,7 +411,7 @@ SwarmLLM is built by a human developer working with Claude Code, an AI
 programming assistant: the human sets the direction, tests and reviews, and
 Claude writes the code. We say so openly so you can judge the project on its
 merits. Every change is checked by thousands of automated tests
-(4879 lib tests + 80 integration tests) before it ships, and regular
+(4899 lib tests + 80 integration tests) before it ships, and regular
 automated audits are logged in the repository. Scrutiny and contributions are
 welcome.
 

@@ -1,5 +1,63 @@
 # Changelog
 
+## [0.3.316-alpha] — 2026-11-28
+
+**Computers with a graphics card now keep whole runs of a model, so cards across the swarm can serve it together.**
+A graphics card can only run a model's layers in one unbroken stretch, but the rules that chose which parts of a
+model a computer downloads, or gives back to make room, judged one part at a time. So cards ended up holding
+scattered parts. Those were good for others to download, but no card could run them: on 27 November two cards held
+five and nine scattered parts of a 27B, and one of them had served layers 21-64 of it four days earlier. Now each
+computer whose models run on its card is given one run of a wanted model, sized to its card. The runs overlap, so
+every layer is on as many cards as the swarm's spare-copy target asks. Runs already held stay where they are, so a
+computer joining moves nobody. Downloads fetch the run, and a computer gives back copies outside its run only once
+enough other cards hold those parts inside theirs. It never gives back the last copy in a region, or a model it
+holds whole. Computers on older releases are planned no run. This takes effect as computers update.
+
+**The first computer of a split keeps its token table in its own memory, leaving its graphics card room for more
+of the model.** That computer reads only a few rows of the table each step, yet kept the whole table on its card:
+682 MB for Qwen3.8-27B, 417 MB for Qwen2.5-14B. That is two of the 27B's layers, or the small helper model that
+guesses ahead. llama.cpp keeps this layer on the processor for the same reason. Now the table stays in system
+memory and only the rows a step needs are copied to the card. On a split of the 27B between this laptop's 8 GB card
+and a computer with a 16 GB card, the laptop's card now runs 21 of its layers instead of 18, and every reply was
+correct. On Qwen2.5-14B split with a computer in Australia, with the same layout either way, replies ran as fast or slightly faster: prose about 24 tokens a second against 22-23, code about 50 against 46-48. A whole model on one computer, and a model whose token table is also its output layer, keep
+the table on the card.
+
+**A split no longer slows to a quarter of its speed when its layout shifts by a layer.** Since the last release, a
+split moves layers between its computers as their pace changes. When the first computer was given one more layer,
+its memory books counted the whole wider range as extra, though the old range is freed as the new one loads. To make
+room for that count it unloaded the small helper model that guesses words for the split, and the helper came back
+on the processor. Every reply after that ran three to four times slower for the rest of the session. On Qwen2.5-14B
+split with a computer in Australia, prose fell from 21-24 tokens a second to 5.5-6.8 and code from 48-52 to 11.5.
+Now an idle model process whose range would be reloaded anyway is replaced first, where the new range fits in its
+place, and the helper keeps the card. In the same split, the same shift now left the helper on the card for every
+reply, and replies ran 19.5-27.1 tokens a second on prose and 41.5-53.7 on code over four sessions.
+
+**A split's first computer now lets the helper's guesses stream from the far end whenever the layers it runs are
+all on its graphics card.** That streaming, the "flow", needs every part of the split on a card. This computer
+answered for its whole model process. A process loaded earlier for a wider range, with some layers on the processor,
+said no even when later replies used only layers on its card. It stayed that way for as long as the process lived.
+On Qwen2.5-14B split with Australia, eight replies planned for layers 0-16 (all on the card) used slower checks
+because an earlier reply had loaded layers 0-26. They ran 13-18 tokens a second on prose and 35-36 on code, where the
+flow runs 20-26 and 48-49. Now the question is asked for the layers the reply uses. It is yes when they are on
+the card and inside what the process holds.
+
+**A computer whose disk is nearly full no longer gives away parts of other models for room it cannot use.**
+Every computer leaves the last 10% of its disk free and fetches nothing below that line. Under it, the room a
+computer reported still counted its spare copies as room, so it could be planned a run of a model, give back parts
+of another model to make room, and then fetch nothing. This project's own laptop, 92 GB under the line, gave back
+two of the four parts of a small model it held whole. Now what a computer frees pays off that shortfall before any
+of it counts as room, so a computer under the line gives nothing away for it, and tells the planners on other
+computers it has no room.
+
+**Also:** in a Qwen 3.5-family split where guesses flow (as in Qwen3.8-27B), the computer serving the far half
+counted each of its saved states up to four times and claimed memory for a step it had already freed, so it could
+refuse a reply it had room for. It now counts each state once and holds two fewer states per layer. This takes
+effect once that computer runs this release. It is not enough for the 27B to flow over this laptop and one 16 GB
+card; that needs three or four cards, which the runs above are for. And computers one release apart now agree on
+which holders of a part keep their copies when a full computer makes room. Before, each could count the other as
+the keeper, and both give their copy back. A split whose guesses flow now logs how many rows the far computer
+computed after the reply had already left them, the figure that decides the next speed-up for such splits.
+
 ## [0.3.315-alpha] — 2026-11-27
 
 **A split whose guesses flow now settles its own layout between the computer that guesses and the computer at the
