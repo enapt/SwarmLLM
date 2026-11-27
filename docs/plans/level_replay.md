@@ -96,7 +96,7 @@ Each lands alone, behind its own A/B switch, with its own proof.
     **(c) bit identity: 39 of 39 relaunched levels' outputs (all 23 of the 4B's) keep the recorded bits**, worst
     difference 0 — a relaunch is idempotent, so a replay that holds the inputs fixed reads what a recording does.
     **The 2B drafter** (Qwen3.5-2B Q8_0, which drafts the 9B split ~16-23% faster than the 0.8B on the link,
-    `recurrent_flow.md` § "The 2B drafter, captured"; `~/swarmllm-gate/deep/fr/s0_2b_1123/`, live node stopped):
+    `recurrent_flow.md` § "Stage 5 as measured" ("The 2B drafter, captured"); `~/swarmllm-gate/deep/fr/s0_2b_1123/`, live node stopped):
     an 8-row level **17.3-18.0 ms op by op, 13.9-14.9 captured, 9.4-10.0 relaunched** (host 0.08), a 2-row level
     12.1-13.2 op by op, 7.26 relaunched; 39 of 39 bit-identical at each width. llama.cpp on the same file reads 8
     rows in 9.4 ms (pp8 850 tok/s) and 2 in 8.1 (pp2 247) — a replayed 2B level would be llama.cpp's.
