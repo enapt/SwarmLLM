@@ -2797,20 +2797,25 @@ impl WorkerHandle {
     /// `request_id` released its cache here, or was cancelled: its hold goes,
     /// and a straggling forward of it stamps none ([`Self::note_conversation`]).
     fn forget_conversation(&self, request_id: Uuid) {
-        self.kv_holders
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&request_id);
         {
+            // ONE critical section, in `note_conversation`'s order (holders,
+            // then released): a straggler stamping between dropping the hold
+            // and writing the mark would find no mark and hold the worker for
+            // the whole window — the very refusal #503 removes.
+            let mut holders = self
+                .kv_holders
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut released = self
+                .released
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            holders.remove(&request_id);
             // Every worker hears every release (`forget_conversation_everywhere`),
             // so one that gets no forward would keep each id for ever: prune here
             // too, by the same window `note_conversation` prunes by (as the
             // worker's own cancel set does; Cassandra drops a tombstone past its
             // grace period the same way).
-            let mut released = self
-                .released
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let window = std::time::Duration::from_secs(CONVERSATION_GAP_SECS);
             released.retain(|_, at| at.elapsed() <= window);
             released.insert(request_id, std::time::Instant::now());
