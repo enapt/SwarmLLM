@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.3.315-alpha] — 2026-11-27
+
+**A split whose guesses flow now settles its own layout between the computer that guesses and the computer at the
+far end.** In such a split this computer guesses ahead with a small helper model and runs the first layers; a
+computer far away runs the rest, and the reply goes as fast as the slower of the two. The planner priced the split
+as the two sides added up and never counted the time this computer spends guessing, so it could leave too many
+layers here, or hand the far computer more than its card keeps up with. Now, as replies finish, the split moves one
+layer at a time towards whichever side is waiting, and keeps a move only if the replies after it, compared like for
+like (prose with prose, code with code), ran faster; a move that ran 3% slower is undone and not tried again for
+half an hour. Measured on a Qwen2.5-14B split to a computer in Australia: moving three layers off this computer by
+hand had run 21% faster on prose and 8% faster on code, and moving six ran 26% slower on prose, because the far card
+fell behind past a point. That is why each move is measured, not predicted. With the planner's own layout already
+balanced, the split tried a layer, found it no faster and moved it back, and the speed matched: prose 18.5-19.1
+tokens a second against 18.1-18.6 without it, code 41.4-42.0 against 42.1. The change runs on the computer that
+asks for the reply.
+
+**Also:** a CUDA build's own tests pass when run two at a time (they now take turns on the graphics card; nothing a
+node does changes).
+
 ## [0.3.314-alpha] — 2026-11-27
 
 **A computer that has just served part of a split takes the next, differently shaped split of the same model
