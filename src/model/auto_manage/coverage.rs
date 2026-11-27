@@ -46,8 +46,10 @@ use crate::types::{ModelId, ModelManifest, NodeId, ShardId, MMPROJ_SHARD_INDEX};
 
 use super::AutoShardManager;
 
+mod card_ranges;
 mod drafter;
 mod near_chain;
+pub(super) use card_ranges::{CardRangeBook, CardRangeCopy};
 pub(super) use drafter::DrafterBook;
 pub(super) use near_chain::{ChainPart, NearChainBook, Reach};
 
@@ -711,15 +713,17 @@ fn rendezvous(model: &ModelId, node: &NodeId) -> [u8; 32] {
     *h.finalize().as_bytes()
 }
 
-/// `node`'s rendezvous weight for one part, `blake3(model ‖ 0 ‖ index ‖ node)`:
-/// per part, so the holders a model's parts keep are spread across machines.
+/// `node`'s rank among a part's holders: its rendezvous weight for the part's
+/// MODEL ([`rendezvous`]), the same for every part of it (#506). Ranked per
+/// part (`blake3(model ‖ 0 ‖ index ‖ node)` until 2026-11-27), the holders that
+/// keep their copies when room is made differed part by part, so a run one
+/// card held was given back with holes in it — part 3 kept, 4 and 5 not — and
+/// a card can serve only a run: the 27B the Australian 3060 held as layers
+/// 21-64 of a chain on 11-23 was five scattered parts on 11-27. By the model, a
+/// holder keeps or gives back its run together, as cooled copies are ranked
+/// ([`keeps_a_cooled_copy`]).
 pub(super) fn part_rank_weight(part: &ShardId, node: &NodeId) -> [u8; 32] {
-    let mut h = blake3::Hasher::new();
-    h.update(part.model_id.0.as_bytes());
-    h.update(&[0]);
-    h.update(&part.index.to_le_bytes());
-    h.update(&node.0);
-    *h.finalize().as_bytes()
+    rendezvous(&part.model_id, node)
 }
 
 /// Is `node` among the first `keep` of `part`'s `holders` in rendezvous order
@@ -853,8 +857,8 @@ mod tests {
         for keeper in &keepers {
             assert!(super::keeps_a_cooled_copy(&model, &reversed, keeper));
         }
-        // The per-part rank scatters a model held whole: its 24 parts' first
-        // two holders are more than two computers. The model's rank never is.
+        // The rank room is made by is the model's too (#506): its 24 parts'
+        // first two holders are the same two computers, never scattered.
         let part_keepers: std::collections::HashSet<NodeId> = (0..24)
             .flat_map(|index| {
                 let part = ShardId {
@@ -868,10 +872,13 @@ mod tests {
                     .collect::<Vec<_>>()
             })
             .collect();
-        assert!(
-            part_keepers.len() > 2,
-            "control: ranked by the part, the 24 parts keep on {} computers",
-            part_keepers.len()
+        assert_eq!(
+            part_keepers,
+            keepers
+                .iter()
+                .cloned()
+                .collect::<std::collections::HashSet<NodeId>>(),
+            "the 24 parts keep on the cooled copies' two computers"
         );
         // Without the keepers, two of the rest keep.
         let others: Vec<NodeId> = holders

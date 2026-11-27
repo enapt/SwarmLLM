@@ -236,6 +236,7 @@ const RECENT_REQUEST_PENALTY: f64 = 1.5;
 const KEPT_FOR_ITS_COUNT: &str = "not more copies than the target";
 const KEPT_FOR_ITS_REGION: &str = "the last close holder in this region";
 const KEPT_WHOLE_HERE: &str = "this computer holds the whole model, or completes it";
+const KEPT_IN_CARD_RUN: &str = "this copy is in the run of the model this computer's card holds";
 /// A copy of a model its owner downloaded (`ModelTrustInfo::pinned_by_user`):
 /// kept at every pressure, never offered for room — and, where it keeps most
 /// parts, what the over-budget notice names ([`over_budget_notice`]).
@@ -2220,6 +2221,25 @@ impl AutoShardManager {
         // not possible.
         if pressure < PRESSURE_URGENT && self.copy_drafts_for_a_split(shard_id) {
             return Some("this copy guesses ahead for a split this computer runs");
+        }
+        // #506: this computer's run of the model's card ranges — every card one
+        // contiguous run, staggered so each layer is on the target's cards
+        // (`coverage::card_ranges`) — below urgent, like a near chain's: it
+        // makes the model run on cards. A part OUTSIDE the run, once the
+        // target's worth of other cards hold it inside theirs, is a copy no
+        // card here runs and the swarm does not need: given back whatever the
+        // count says — but never from a model held whole here, the one computer
+        // answering it with no hop.
+        match self.card_range_copy(shard_id) {
+            super::coverage::CardRangeCopy::InThisRun if pressure < PRESSURE_URGENT => {
+                return Some(KEPT_IN_CARD_RUN);
+            }
+            super::coverage::CardRangeCopy::Surplus
+                if !self.completes_model_here_counting(shard_id) =>
+            {
+                return None;
+            }
+            _ => {}
         }
         let pool_size = crate::pool::scope::effective_pool_size(&self.shared_state);
         // The highest target of the last day, not this instant's: demand and

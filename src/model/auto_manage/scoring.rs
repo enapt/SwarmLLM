@@ -355,6 +355,14 @@ impl AutoShardManager {
                     "DIAG: fetching this computer's part of a chain of machines for a model none of them can run whole (Stage 3, #346)"
                 );
             }
+            // #506: this node's run of the model's card ranges, where the plan
+            // weighs this node's card — every card one contiguous run, staggered
+            // so each layer is on the target's cards (`coverage::card_ranges`).
+            // What of it this node lacks skips the replica target and the ring,
+            // as a chain's segment does; nothing else of the model is fetched on
+            // this card (a hole excepted), so parts no longer land one at a time
+            // where no card can run them.
+            let card_run = self.this_nodes_card_run(&manifest);
             // A split driven from here ran with nothing to guess for it, or
             // with a smaller drafter than the swarm has: this model is the one
             // it lacked (`coverage::drafter`, #134, #331). Its parts skip the
@@ -500,11 +508,31 @@ impl AutoShardManager {
                 let completing_part = completing_parts.contains(&shard.index);
                 let near_part = near_parts.contains(&shard.index);
                 let drafter_part = drafter_parts.contains(&shard.index);
+                let card_run_part = card_run
+                    .as_ref()
+                    .is_some_and(|run| run.contains(&shard.index));
+                if card_run.is_some()
+                    && !card_run_part
+                    && !fills_a_hole
+                    && !in_configured_range
+                    && !carried_part
+                    && !completing_part
+                    && !near_part
+                    && !drafter_part
+                {
+                    tracing::debug!(
+                        model = %manifest.id,
+                        shard = shard.index,
+                        "Skipping shard — outside this card's run of the model (#506)"
+                    );
+                    continue;
+                }
                 if holder_count >= target_replicas
                     && !in_configured_range
                     && !carried_part
                     && !completing_part
                     && !near_part
+                    && !card_run_part
                     && !drafter_part
                 {
                     tracing::debug!(
@@ -532,6 +560,7 @@ impl AutoShardManager {
                     && !already_hosting_model
                     && !carried_part
                     && !near_part
+                    && !card_run_part
                     && !drafter_part
                 {
                     let replicas_needed =
@@ -762,7 +791,7 @@ impl AutoShardManager {
                 // A part fetched for what the copies can DO — carry the model
                 // (#231) or complete a near chain (Stage 3) — goes ahead of
                 // routine replication within the budget.
-                let carry_bonus = if carried_part || near_part || drafter_part {
+                let carry_bonus = if carried_part || near_part || card_run_part || drafter_part {
                     super::coverage::CARRY_BONUS
                 } else {
                     1.0
@@ -784,7 +813,7 @@ impl AutoShardManager {
                 // a part too few computers hold.
                 let asks_room = if fills_a_hole {
                     Some(RoomFor::Hole)
-                } else if carried_part || near_part {
+                } else if carried_part || near_part || card_run_part {
                     Some(RoomFor::Placed)
                 } else if is_scarce(
                     asked_for,

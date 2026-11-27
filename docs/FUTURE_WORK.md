@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #505**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #507**; #505 is reserved for the carry ask, memory `next_up.md` item 5b). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -958,6 +958,43 @@ the use window (`NodeCapability::models_served`) and now short of a whole copy �
 owner's ask. Weigh it against the use rule's give-back (#389 (d), #452) before building.
 
 ### Routing and placement
+
+#### #506 — Each card holds one contiguous run of a model, staggered for redundancy; a placed run is never moved to rebalance
+`P1` · placement · **PARTIAL** — 2026-11-27 · built `coverage/card_ranges.rs`; residual below
+
+The user, 2026-11-27: "improve the pruning and auto manage system to evenly distribute chunks
+including redundancy". Every rule choosing parts weighed ONE PART at a time — the score's
+rarest-first, the ring, the replica count, and the per-part rank prune gave copies back by — and a
+card serves only a contiguous run. The 27B's far chain was `225e6fe7:0-21 aa3d1e66:21-64` on 11-23,
+complete; on 11-27 the Australian 3060 held parts 0, 7, 12, 15, 30 and the Belgian 4050 0-5, 13, 17,
+18: two cards with nothing to run while the US 5080 and a Mac held it whole.
+
+**Built** (2026-11-27): for an asked-for model no chain is planned for, every machine whose models
+run on its card is weighed with the layers its card holds of the model; a machine holding a run of
+half its card's worth is SETTLED and planned first where its run lies (shortest held runs first, a
+whole copy last), every other one in rendezvous order takes the window of its card's width whose
+layers are on fewest cards (most on none, then one, … up to the replica target); a window lifting
+no layer below the target is not planned. The download pass fetches this node's run past the target
+and ring and nothing else of the model on a weighed card (a hole excepted); prune keeps the run below
+urgent and gives back an off-run copy the target's worth of other cards hold inside theirs, never
+from a model held whole here; a planned card fetching nothing for 20 min is passed over 2 h. Room is
+now given back by the MODEL's rank (`coverage::part_rank_weight`), so a holder keeps or gives back
+its run together. A/B `SWARMLLM_CARD_RANGES=0`. Tests `coverage::card_ranges::*` (the 27B's own
+parts and holdings: AU is planned one 38-layer run, every layer on a card).
+
+Prior art: Petals `block_selection.py` (`_choose_best_start`: the lexicographically weakest window
+of `num_blocks`; `should_choose_other_blocks`: stay unless the swarm's minimum rises by 1/0.75, never
+leave a block with nobody), Parallax (arXiv 2509.26182: water-filled consecutive ranges, a joining
+GPU at the bottleneck), Dynamo/CRUSH (a plan in hash order moves every later boundary on a join),
+Petals issue #389 (servers re-choosing at once overshoot), libtorrent's sequential mode (rarest-first
+only picks which end of a run grows). Taken: weakest window first in layer counts, and incumbency.
+
+**Residual**: (1) a SETTLED run is never moved, so a layout that started badly (three cards at the
+start) stays until a run is given back — Petals' rebalance with its 0.75 hysteresis and a cooldown
+is the next step; (2) the plan stands down while a chain is planned (the chain places its segments);
+(3) peers act on it only once they run the release that carries it — verify on the real swarm after
+the release: AU/BE fetch one run each of the 27B (`DIAG: card ranges planned` on this node names the
+plan), then a here → AU card chain is routable.
 
 #### #484 — For up to a minute after a peer's last reply of one model, the next model's plan prices that peer's room as still held
 `P2` · routing · **OPEN** — 2026-11-20 · history: #447, #479, #481 (5), #482 (whose measured case this is)

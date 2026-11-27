@@ -195,6 +195,9 @@ pub struct AutoShardManager {
     /// Stage 3): which machines are near, each model's chain, the parts this
     /// node was named for, and the named machines' leases.
     pub(super) near_chain_book: super::coverage::NearChainBook,
+    /// What the card ranges remember between passes (`coverage::card_ranges`,
+    /// #506): each model's plan and the planned machines' leases.
+    pub(super) card_range_book: super::coverage::CardRangeBook,
     /// Which drafter each split lacking one should fetch (`coverage::drafter`,
     /// FUTURE_WORK #134), kept a minute.
     pub(super) drafter_book: super::coverage::DrafterBook,
@@ -403,6 +406,7 @@ impl AutoShardManager {
             carrier_leases: dashmap::DashMap::new(),
             carriers_passed_over: dashmap::DashMap::new(),
             near_chain_book: Default::default(),
+            card_range_book: Default::default(),
             drafter_book: Default::default(),
             targets_seen,
             room_wanted: std::sync::Mutex::new(None),

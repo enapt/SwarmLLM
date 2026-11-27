@@ -316,11 +316,11 @@ impl NearChain {
 
 /// A part of the model, in layer order.
 #[derive(Debug, Clone, Copy)]
-struct Part {
-    index: u32,
-    start: u32,
-    end: u32,
-    size: u64,
+pub(super) struct Part {
+    pub(super) index: u32,
+    pub(super) start: u32,
+    pub(super) end: u32,
+    pub(super) size: u64,
 }
 
 /// A machine as the plan sees it.
@@ -382,9 +382,9 @@ fn describe_steps(chain: &ChosenChain, machines: &[Machine]) -> String {
 
 /// What a machine's devices give a chain of one model (#356).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct Devices {
+pub(super) struct Devices {
     /// The layers its card holds. `None`: its models run on its processor.
-    card: Option<u32>,
+    pub(super) card: Option<u32>,
     /// One layer a token on its card, µs.
     card_us: u64,
     /// One layer a token on its processor, µs.
@@ -452,7 +452,7 @@ type Best = (u64, u32, Step);
 /// whole layers, as every manifest `shard_layout` builds does, maybe with a
 /// part past the last layer (a file's next-token-prediction blocks beside the
 /// output head, `part_serves_layers`). Anything else is not planned for.
-fn parts_in_order(manifest: &ModelManifest) -> Option<Vec<Part>> {
+pub(super) fn parts_in_order(manifest: &ModelManifest) -> Option<Vec<Part>> {
     let mut parts: Vec<Part> = manifest
         .shards
         .iter()
@@ -478,7 +478,7 @@ fn parts_in_order(manifest: &ModelManifest) -> Option<Vec<Part>> {
 /// The parts a machine running `segment` needs: those its layers touch — the
 /// first part carries the embeddings, the last the output head
 /// (`part_serves_layers`: a part past the last layer too).
-fn parts_touching(manifest: &ModelManifest, segment: (u32, u32)) -> Vec<u32> {
+pub(super) fn parts_touching(manifest: &ModelManifest, segment: (u32, u32)) -> Vec<u32> {
     manifest
         .shards
         .iter()
@@ -935,7 +935,7 @@ impl AutoShardManager {
     /// capability it advertises — this node's own last broadcast for itself,
     /// as [`Self::advertised`] reads it, so every machine prices every other
     /// alike. `None`: it advertises none.
-    fn advertised_devices(
+    pub(super) fn advertised_devices(
         &self,
         node: &NodeId,
         num_layers: u32,
@@ -2940,6 +2940,18 @@ mod tests {
             s.chain().is_none(),
             "control: running it whole is cheaper than any chain"
         );
-        assert!(s.offered().is_empty());
+        // With no chain, the card ranges place this node's card (#506): its
+        // one run, and nothing else of the model.
+        s.manager.forget_card_ranges();
+        let mut run: Vec<u32> = s
+            .manager
+            .this_nodes_card_run(&s.manifest())
+            .expect("this card is weighed")
+            .into_iter()
+            .collect();
+        run.sort_unstable();
+        assert!(run.len() <= 3, "a 12-layer card: {run:?}");
+        s.manager.forget_card_ranges();
+        assert_eq!(s.offered(), run);
     }
 }
