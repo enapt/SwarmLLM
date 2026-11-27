@@ -6689,6 +6689,20 @@ width keeps +36% (the 11-18 processor measure). Now the layer reads the whole tr
   buffers the staging replaced, a free of memory made outside the capture, refused and leaked
   (gotcha #1165). Since, the drafter's call 25.7-28.4 against 37.3-40.2 ms a forward on the link,
   prose 13.9-14.9 / code 24.2-31.7 tok/s against 12.6-14.1 / 22.7-22.9 (`real_link_rf9b10_1123/`).
+  **And one scratch pair serves every layer** (2026-11-27): the pair a captured level's convolution
+  window and final state are written to and never read was made once a LAYER — on the 27B's far card
+  (35 recurrent layers) 114 MB, a whole state again, made in staging outside any claim. Now one pair
+  is lent to every layer of the conversation (`layers::stage_flowing_states` → `FlowRows::stage_level`,
+  one per shape), counted once by the store's occupancy (`KvCacheEntry::occupancy` dedups by buffer);
+  the kernels write it one after another on the device's one stream. llama.cpp likewise keeps one
+  zeroed cell (`rs_z`) for every empty sequence of a batch. Test: `a_captured_flowing_level_reads_as_the_ordinary_one`
+  asserts one pair. **And past a flow's second rebase `current` is a start the flow keeps**: a rebase keeps
+  two starts, so the second let go of the one `current` shared, and every layer held a whole state no cut
+  reaches (`state_at` reads only the starts and the state before the anchor). `SsmState::flow_from` points
+  it at the oldest start kept (`FlowRows::oldest_start_unless_holding`), outside any capture; the rollback
+  copy still holds the old buffer until the next forward's copy replaces it, so nothing is freed there.
+  *Must keep*: `current` is read during a flow only where its FIRST forward is put back (no rebase yet).
+  Test: the flow script's second rebase.
   **And a forward's rows go where the walk left others** (2026-11-25; A/B `SWARMLLM_FLOW_SLOTS=compacted`):
   every third level of a 0.8B drafter's 8-row tree had filled its 32-row store (`store_capacity_for`'s
   floor) and gathered the kept rows into a new one — 90 gathers and a table — although the walk had left

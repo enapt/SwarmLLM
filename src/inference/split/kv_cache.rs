@@ -1517,9 +1517,12 @@ impl KvCacheEntry {
             tokens += kv.k_cache().held();
         }
         // SSM state is per-layer and fixed-size, so it does not scale with the
-        // conversation, but it is real memory and belongs in the total.
+        // conversation, but it is real memory and belongs in the total — each
+        // buffer once: a flow's layers share one scratch pair
+        // (`FlowRows::stage_level`).
+        let mut counted = std::collections::HashSet::new();
         for ssm in self.ssm_states.iter().flatten() {
-            for t in ssm.tensors() {
+            for t in ssm.tensors().into_iter().filter(|t| counted.insert(t.id())) {
                 let bytes = t.elem_count() as u64 * t.dtype().size_in_bytes() as u64;
                 allocated += bytes;
                 used += bytes;

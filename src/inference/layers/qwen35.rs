@@ -1351,7 +1351,11 @@ pub(crate) struct FlowRows {
     /// delta rule the state after its last row — neither read: a tree's end is
     /// no state the reply holds. Made once, outside any capture
     /// ([`Self::stage_level`]); a forward made two memsets a layer without it,
-    /// and a captured one may make none (#221).
+    /// and a captured one may make none (#221). ONE pair every layer of the
+    /// conversation shares (`layers::stage_flowing_states` lends it): written,
+    /// never read, by kernels one after another on the device's one stream —
+    /// llama.cpp likewise keeps one zeroed cell (`rs_z`) for every empty
+    /// sequence of a batch to read, not one each.
     scratch: Option<SsmSlot>,
 }
 
@@ -1496,6 +1500,26 @@ impl FlowRows {
         &self.anchor
     }
 
+    /// The scratch pair, where a captured level made one ([`Self::stage_level`]).
+    pub(super) fn scratch(&self) -> Option<&SsmSlot> {
+        self.scratch.as_ref()
+    }
+
+    /// The oldest start kept, where no start shares `slot`'s buffers — what
+    /// `SsmState::flow_from` points its `current` at once a rebase has let go
+    /// of the start it shared ([`Self::rebase_onto`] keeps two).
+    pub(super) fn oldest_start_unless_holding(&self, slot: &SsmSlot) -> Option<SsmSlot> {
+        let held = slot.recurrent_state.id();
+        if self
+            .starts
+            .iter()
+            .any(|(_, start)| start.recurrent_state.id() == held)
+        {
+            return None;
+        }
+        self.starts.first().map(|(_, start)| start.clone())
+    }
+
     /// Every tensor kept, for a cache's accounting.
     pub(crate) fn tensors(&self) -> Vec<&Tensor> {
         let mut out: Vec<&Tensor> = self
@@ -1551,6 +1575,7 @@ impl FlowRows {
         parents: &[Option<usize>],
         seq_len: usize,
         device: &Device,
+        shared_scratch: &mut Option<SsmSlot>,
     ) -> CandleResult<bool> {
         if !device.is_cuda() || walk >= before || !self.holds_a_level() {
             tracing::debug!(
@@ -1563,10 +1588,26 @@ impl FlowRows {
         }
         self.make_room(seq_len)?;
         if self.scratch.is_none() {
-            self.scratch = Some(SsmSlot {
-                conv_state: self.anchor.conv_state.zeros_like()?,
-                recurrent_state: self.anchor.recurrent_state.zeros_like()?,
+            // The pair the other layers write, where it is this layer's shape:
+            // one a layer was the whole state again — 35 pairs, 114 MB, on
+            // the 27B's far card (US [18, 64), 2026-11-27), made outside any
+            // claim.
+            let like = |t: &Tensor, u: &Tensor| {
+                t.shape() == u.shape()
+                    && t.dtype() == u.dtype()
+                    && t.device().same_device(u.device())
+            };
+            let fits = shared_scratch.as_ref().is_some_and(|s| {
+                like(&s.conv_state, &self.anchor.conv_state)
+                    && like(&s.recurrent_state, &self.anchor.recurrent_state)
             });
+            if !fits {
+                *shared_scratch = Some(SsmSlot {
+                    conv_state: self.anchor.conv_state.zeros_like()?,
+                    recurrent_state: self.anchor.recurrent_state.zeros_like()?,
+                });
+            }
+            self.scratch = shared_scratch.clone();
         }
         let lines = self.lines(before, parents);
         self.rows_the_lines_read(&lines.earlier, seq_len, true, device)?;
@@ -5422,6 +5463,16 @@ mod tests {
         let mut held = None;
         w.forward_deltanet(&pool.narrow(1, 0, 3).unwrap(), &mut held, 0)
             .unwrap();
+        // What a state holds, each tensor once — what the store's occupancy
+        // counts it (`SsmState::tensors`).
+        let held_bytes = |h: &SsmState| {
+            let mut ids = std::collections::HashSet::new();
+            h.tensors()
+                .into_iter()
+                .filter(|t| ids.insert(t.id()))
+                .map(|t| (t.elem_count() * t.dtype().size_in_bytes()) as u64)
+                .sum::<u64>()
+        };
         // Sends tree rows `rows` of `tree` with the walk on `walk`; shows each
         // row in `live`.
         let send = |held: &mut Option<SsmState>,
@@ -5488,7 +5539,34 @@ mod tests {
             ],
             inputs: (3..19).collect(),
         };
+        // A flow's first forward claims no more than it adds: the `previous`
+        // pair it drops is credited (#228 residual).
+        let (claim, before) = {
+            let h = held.as_ref().unwrap();
+            (h.bytes_a_flowing_forward_may_add(5), held_bytes(h))
+        };
         send(&mut held, &first, 0..5, 0, &[0, 1, 2, 3, 4], seen).unwrap();
+        let grew = held_bytes(held.as_ref().unwrap()).saturating_sub(before);
+        assert!(
+            grew <= claim,
+            "a first flowing forward added {grew} bytes past its claim of {claim}"
+        );
+        // The flow's start shares `current`'s tensors: the store's occupancy
+        // (which sums `tensors()`) charges a shared tensor once, not once a
+        // holder.
+        {
+            let h = held.as_ref().unwrap();
+            let charged: u64 = h
+                .tensors()
+                .iter()
+                .map(|t| (t.elem_count() * t.dtype().size_in_bytes()) as u64)
+                .sum();
+            assert_eq!(
+                charged,
+                held_bytes(h),
+                "a tensor two holders share was charged twice"
+            );
+        }
         seen(anchor(&held, first.line(0), "after the first forward"));
         // Rows from both branches below the walk's row are read again ahead
         // of the new ones (1→2 and 3→4).
@@ -5532,13 +5610,16 @@ mod tests {
                     flow.store.capacity - flow.store.len
                 };
                 assert!(room > 0);
-                assert_eq!(h.bytes_a_flowing_forward_may_add(room), states);
+                // The states less the rollback copy's pair its begin lets go
+                // (checked against what a forward adds below).
+                let credit = states - h.bytes_a_flowing_forward_may_add(room);
                 assert_eq!(
                     h.bytes_a_flowing_forward_may_add(room + 1),
                     (store_capacity_for(flow.kept.len() + room + 1)
                         .saturating_sub(flow.store.capacity)) as u64
                         * row
                         + states
+                        - credit
                 );
             } else {
                 // The A/B arms join the held rows anew each forward: every
@@ -5552,11 +5633,34 @@ mod tests {
                     .flatten()
                     .all(|t| t.dim(1).unwrap() == held_rows));
                 let row = store / held_rows as u64;
-                assert_eq!(
-                    h.bytes_a_flowing_forward_may_add(3),
-                    (held_rows + 3) as u64 * row + states
+                assert!(
+                    h.bytes_a_flowing_forward_may_add(3) <= (held_rows + 3) as u64 * row + states
                 );
             }
+        }
+        {
+            // A forward claims no more than it adds, and credits what its
+            // begin lets go (#228 residual): the last forward's rollback copy
+            // holds the pair its walk replaced, dropped as this one begins.
+            // Claimed whole, the pair was counted twice — on 11-27 every flow
+            // of the 27B over a far card was refused at its first forward, 259
+            // MB in use plus 224 claimed against 441.
+            let mut next = held.clone();
+            let h = next.as_ref().unwrap();
+            let bytes = |t: &Tensor| (t.elem_count() * t.dtype().size_in_bytes()) as u64;
+            let states = 2 * (bytes(&h.current.conv_state) + bytes(&h.current.recurrent_state));
+            let claim = h.bytes_a_flowing_forward_may_add(3);
+            let before = held_bytes(h);
+            assert!(
+                claim < states,
+                "the rollback copy's pair is credited: claimed {claim} with the states at {states}"
+            );
+            send(&mut next, &first, 13..16, 13, &[], &mut |_| {}).unwrap();
+            let grew = held_bytes(next.as_ref().unwrap()).saturating_sub(before);
+            assert!(
+                grew <= claim,
+                "a forward added {grew} bytes past its claim of {claim}"
+            );
         }
         seen(anchor(&held, first.line(2), "after the walk reached row 2"));
         {
@@ -5639,6 +5743,9 @@ mod tests {
         ));
         let deep: Vec<usize> = (6..42).collect();
         send(&mut held, &second, 6..42, 1, &deep, seen).unwrap();
+        // Rebased a second time below, last: the cuts that follow read the
+        // starts this copy shares.
+        let rebased_once = held.clone();
 
         let next = row_of(60);
         let at = held.as_ref().unwrap().positions();
@@ -5671,6 +5778,37 @@ mod tests {
             line,
             out: w.forward_deltanet(&next, &mut held, 7).unwrap(),
         });
+
+        // A second rebase (the walk on the rebased tree's row 1, a chain from
+        // its first row) lets go of the start the flow began from, which
+        // `current` shared: it then points at the oldest start kept, or it
+        // holds a whole state no cut reaches — one a recurrent layer, 114 MB
+        // over the 27B's far card (2026-11-27).
+        let mut held = rebased_once;
+        let mut parents: Vec<Option<usize>> = second.parents[1..]
+            .iter()
+            .map(|p| p.and_then(|p| p.checked_sub(1)))
+            .collect();
+        parents.push(Some(0));
+        let mut inputs = second.inputs[1..].to_vec();
+        inputs.push(61);
+        let third = Epoch {
+            base: second.base + 1,
+            prefix: Vec::new(),
+            parents,
+            inputs,
+        };
+        let rows = third.parents.len() - 1;
+        send(&mut held, &third, rows..rows + 1, 0, &[], &mut |_| {}).unwrap();
+        let h = held.as_ref().unwrap();
+        let flow = h.flow.as_ref().unwrap();
+        assert_eq!(flow.base(), third.base, "the second rebase was not taken");
+        assert!(
+            flow.tensors()
+                .iter()
+                .any(|t| t.id() == h.current().recurrent_state.id()),
+            "past a second rebase `current` holds a state the flow does not"
+        );
     }
 
     /// [`flowing_script`] on the processor (`docs/plans/recurrent_flow.md`

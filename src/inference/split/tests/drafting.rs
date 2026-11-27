@@ -1296,6 +1296,26 @@ fn captured_flowing_levels_read_as_the_ordinary_ones(width: usize) {
             let out = out.to_device(&Device::Cpu).unwrap();
             rows.extend(out.squeeze(0).unwrap().to_vec2::<f32>().unwrap());
         }
+        // Captured levels write ONE scratch pair, every layer's
+        // (`FlowRows::stage_level`): one a layer was 114 MB over the 27B's
+        // far card's 35 recurrent layers (2026-11-27).
+        if rid == "captured" {
+            let key = KvCacheStore::cache_key(model.kv_model_key(), rid);
+            let entry = kv.get_entry(&key).expect("the captured run's caches");
+            let pairs: std::collections::HashSet<_> = entry
+                .ssm_states
+                .iter()
+                .flatten()
+                .filter_map(|state| state.flow_scratch())
+                .map(|scratch| scratch.recurrent_state.id())
+                .collect();
+            assert_eq!(
+                pairs.len(),
+                1,
+                "a flow's layers wrote {} scratch pairs",
+                pairs.len()
+            );
+        }
         rows
     };
     model.decode_graph = DecodeGraphSlot::Off;

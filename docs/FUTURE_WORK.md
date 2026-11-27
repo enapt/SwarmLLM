@@ -1009,11 +1009,36 @@ plan), then a here → AU card chain is routable; (4) the review's PLAUSIBLE fin
 a card with a large processor share is planned only its card's run (by design: cards across nodes);
 ranking by model concentrates room-making on a node's lowest-ranked models (`not_spare_for_room`); a
 run part of which cannot be fetched lapses its lease and returns after `PASSED_OVER_FOR`; the
-advertised room counts a copy kept in a run as spare; (5) a 27B flow over a peer's FULL card is
+advertised room counts a copy kept in a run as spare; (5) a 27B flow over a peer's FULL card was
 refused on memory whatever the tree's width (11-27 27j/27k/27l: 259 MB in use plus a claim of two
-state pairs a recurrent layer against a 200-441 MB budget) — the claim is an upper bound
-(`SsmState::bytes_a_flowing_forward_may_add`: `previous` and the last rollback copy are let go as
-the forward begins), and a card run sized to the card leaves no flow room; both are #228's residual.
+state pairs a recurrent layer against a 200-441 MB budget). **The claim's half fixed 2026-11-27**:
+a flowing forward's claim now credits what its begin lets go before it makes the walk's new pair —
+the last rollback copy's own pair (already counted in use), and on a flow's first forward the
+`previous` pair (`SsmState::bytes_a_flow_lets_go_as_it_begins`; tests in `qwen35.rs`'s flow script:
+every forward grows the held bytes by no more than its claim, and a forward after the first claims
+less than the pair). Prior art: llama.cpp's recurrent memory allocates every state cell up front,
+rollback copies included (`llama-memory-recurrent.cpp`, `n_rows = mem_size * (1 + n_rs_seq)`), so a
+moving checkpoint claims nothing. **And the count it is weighed against counted a shared state once
+per holder** (gotcha #1188): `SsmState::tensors()`, which the store's occupancy sums, listed the
+flow's start, anchor and the state before it — clones of `current` sharing its buffer — each as its
+own, so from a flow's first forward one state (114 MB over US's 35 recurrent layers) was charged four
+times; it now lists each tensor once (the flow script's test: the charged bytes are the distinct
+bytes). Both effective on a far card once IT runs this release; the 27B flow over US is measured then.
+**Left (read from code 2026-11-27, unmeasured)**: at steady state a far recurrent layer holds 7
+states (8 on a captured level, 9 on a forward that rebases) — `current` (never re-pointed once the
+flow starts, and no cut reads it), two starts, the anchor and the state before it, the rollback
+copy's old pair, a captured level's scratch — plus the store, at the default knobs up to 224 rows
+(`FLOW_LIVE` 128 kept + 16 new, `max(1.5n, 32)`). On the 27B (3.27 MB a recurrent layer a state,
+~82 KB a row) US's [18, 64) holds ~0.8-0.9 GB of states and ~0.65 GB of store against its 441 MB:
+the 27B flow over two cards is out of reach on that pair whatever the count, and waits for three
+or four cards (#506's card ranges). **Two cuts made the same day, a state a layer each**: a captured
+level's scratch pair (written, never read) is ONE pair every layer shares (`FlowRows::stage_level`,
+lent by `layers::stage_flowing_states`; the card test asserts one pair — and 114 MB on US made outside
+any claim gone); and past a flow's second rebase `current`, which no start shares any more, points at
+the oldest start kept (`SsmState::flow_from` → `FlowRows::oldest_start_unless_holding`; the flow
+script's second rebase asserts it). Next: the rollback copy dropped once a forward has finished (−1-2
+between forwards, medium risk: `note_begun` and `can_rewind_to` assume it lives), the store's default
+size; and a card run sized to the card leaves no flow room (#228's residual).
 
 #### #507 — A split's first segment kept its token table on the card: hundreds of megabytes read a few rows a forward
 

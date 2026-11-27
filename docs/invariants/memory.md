@@ -2342,7 +2342,15 @@ almost always "no") — or the forward is a tree that FLOWS through recurrent
 layers, which grows the cache on every forward by the rows the flow keeps
 (`KvCacheStore::bytes_a_flowing_forward_may_add`, added to the claim since
 2026-11-22: ~80 KB a row a layer on a 27B-class model, which the positions
-figure never saw — security review, `docs/plans/recurrent_flow.md`); it charges the
+figure never saw — security review, `docs/plans/recurrent_flow.md`; less what the
+forward lets go as it begins, since 2026-11-27 — the last rollback copy's own pair, counted in use
+until then, and a flow's first forward's `previous` pair: `SsmState::bytes_a_flow_lets_go_as_it_begins`.
+Claimed whole, the pair was counted twice, and every 27B flow over a far card refused at 259 MB in
+use plus 224 claimed against 441 at its first forward; a tensor anything else still holds is
+never credited, and the flow script's tests check every forward grows by no more than its claim; and
+the occupancy itself lists a tensor its holders share ONCE — `SsmState::tensors()` dedups by id, since
+the flow's start, anchor and the state before it are clones of `current`, gotcha #1188);
+it charges the
 POSITIONS claimed, not one quantum, because a prefill jumps many quanta in a
 single forward and charging one under-counted the largest claim a request
 ever makes by 10x; and `kv_budget_bytes: None` means UNKNOWN, never zero — every CPU node

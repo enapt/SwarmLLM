@@ -3323,6 +3323,7 @@ impl SsmState {
         parents: &[Option<usize>],
         rows: usize,
         device: &Device,
+        shared_scratch: &mut Option<SsmSlot>,
     ) -> CandleResult<bool> {
         if self.flow.is_none() {
             tracing::debug!(
@@ -3335,7 +3336,12 @@ impl SsmState {
         let flow = self.flow.as_mut().expect("kept by flow_from");
         flow.check_walk(walk, before, parents)?;
         flow.advance_to(walk)?;
-        flow.stage_level(walk, before, parents, rows, device)
+        flow.stage_level(walk, before, parents, rows, device, shared_scratch)
+    }
+
+    /// The scratch pair a captured level of this layer's flow writes, if made.
+    pub(crate) fn flow_scratch(&self) -> Option<&SsmSlot> {
+        self.flow.as_ref().and_then(|flow| flow.scratch())
     }
 
     /// Takes the buffers the next step writes into, if kept. The step about to
@@ -3479,6 +3485,25 @@ impl SsmState {
         if let Some(begun) = begun {
             self.flow_begun = Some(begun);
         }
+        // `current` is read again only where a flow's FIRST forward is put
+        // back (its rollback copy holds no flow; the state is the one the flow
+        // began from) or by a cut, which assigns it (`rewind_to`). Past the
+        // flow's second rebase no start shares it, and it held a whole state
+        // no cut reaches (`FlowRows::state_at` reads the starts and the state
+        // before the anchor): one a recurrent layer, 114 MB over the 27B's far
+        // card (2026-11-27). It points at the oldest start kept instead. The
+        // rollback copy still holds what it held, so nothing is freed here —
+        // it goes when the next forward's copy replaces this one — and never
+        // inside a capture (gotcha #1165).
+        if !qwen35::capturing(self.current.conv_state.device()) {
+            if let Some(start) = self
+                .flow
+                .as_ref()
+                .and_then(|flow| flow.oldest_start_unless_holding(&self.current))
+            {
+                self.current = start;
+            }
+        }
         Ok(())
     }
 
@@ -3486,11 +3511,14 @@ impl SsmState {
     /// device, at most: the rows of inputs its store may newly allocate
     /// (`qwen35::FlowRows::rows_a_forward_may_allocate` — none where the store
     /// has room, the rows it grows by where it is full), and the two states the walk's
-    /// checkpoint moves to. A row is its convolution's inputs and outputs
-    /// (`channels` each) and its gates (two a value head) — on a 27B-class
-    /// layer ~80 KB, far past its attention cache. An upper bound: what the
-    /// last flowing forward began from (`flow_begun`) and a full store's old
-    /// tensors are let go during the forward. The forward's head-room claim
+    /// checkpoint moves to, less what the forward lets go as it begins, before
+    /// it makes them ([`Self::bytes_a_flow_lets_go_as_it_begins`]: the last
+    /// rollback copy's own pair, counted in use until then — staging drops it
+    /// outside a capture too, gotcha #1165). A row is its convolution's inputs
+    /// and outputs (`channels` each) and its gates (two a value head) — on a
+    /// 27B-class layer ~80 KB, far past its attention cache. An upper bound
+    /// still: a full store's old tensors are let go during the forward, and a
+    /// walk that does not move makes no pair. The forward's head-room claim
     /// adds it (`executor`, security review 2026-11-22: unclaimed, a tree of
     /// 512 rows grew a segment's card memory past its budget).
     pub(crate) fn bytes_a_flowing_forward_may_add(&self, rows: usize) -> u64 {
@@ -3501,7 +3529,59 @@ impl SsmState {
         let row =
             (2 * channels + 2 * heads) as u64 * slot.conv_state.dtype().size_in_bytes() as u64;
         let allocated = qwen35::FlowRows::rows_a_forward_may_allocate(self.flow.as_ref(), rows);
-        allocated as u64 * row + 2 * (bytes(&slot.conv_state) + bytes(&slot.recurrent_state))
+        let pair = 2 * (bytes(&slot.conv_state) + bytes(&slot.recurrent_state));
+        allocated as u64 * row + pair.saturating_sub(self.bytes_a_flow_lets_go_as_it_begins())
+    }
+
+    /// What a flowing forward lets go as it BEGINS, before it makes anything:
+    /// the tensors only the last forward's rollback copy holds — the pair its
+    /// walk replaced, counted in [`Self::tensors`] — dropped when this
+    /// forward's copy replaces it ([`Self::flow_from`], or staging a captured
+    /// level before it, [`Self::stage_flowing_level`]), and on a flow's first
+    /// forward the `previous` pair it drops. The walk's new pair is made after
+    /// (the replay in `FlowRows::advance_to`), into the memory just given
+    /// back. Claimed whole, the pair counted twice what a flow holds: on the
+    /// 27B's far card (11-27, US [18, 64), 35 recurrent layers) 259 MB in use
+    /// — the rollback pair among it — and 224 MB more claimed for each
+    /// forward, against 441 MB, refused every flow whatever the tree's width.
+    /// A tensor anything left holds — the state, the kept rows, the flow, its
+    /// starts — is never counted, so what this credits is what is freed.
+    ///
+    /// Prior art: llama.cpp's recurrent memory allocates every state cell up
+    /// front, the copies a rollback needs included (`llama-memory-recurrent.cpp`,
+    /// `n_rows = mem_size * (1 + n_rs_seq)`), so a checkpoint that moves never
+    /// grows its memory and nothing is claimed per step. Ours makes the pair
+    /// per forward into the memory the last copy gave back; crediting it keeps
+    /// the claim to what is new, as fixed cells would.
+    fn bytes_a_flow_lets_go_as_it_begins(&self) -> u64 {
+        let begun = self.flow_begun.as_ref().and_then(|b| b.flow.as_deref());
+        let first = self.flow.is_none();
+        if begun.is_none() && !(first && self.previous.is_some()) {
+            return 0;
+        }
+        let mut kept: std::collections::HashSet<_> =
+            [&self.current.conv_state, &self.current.recurrent_state]
+                .into_iter()
+                .map(Tensor::id)
+                .collect();
+        if let Some(rows) = &self.rows {
+            kept.extend(rows.tensors().into_iter().map(Tensor::id));
+        }
+        if let Some(flow) = &self.flow {
+            kept.extend(flow.tensors().into_iter().map(Tensor::id));
+        }
+        let mut let_go: Vec<&Tensor> = begun.map(|b| b.tensors()).unwrap_or_default();
+        if first {
+            if let Some(p) = &self.previous {
+                let_go.extend([&p.conv_state, &p.recurrent_state]);
+            }
+        }
+        let mut counted = std::collections::HashSet::new();
+        let_go
+            .into_iter()
+            .filter(|t| !kept.contains(&t.id()) && counted.insert(t.id()))
+            .map(|t| t.elem_count() as u64 * t.dtype().size_in_bytes() as u64)
+            .sum()
     }
 
     /// The memory this layer's state lives in.
@@ -3632,7 +3712,15 @@ impl SsmState {
         Ok(true)
     }
 
-    /// Every buffer the state holds, for the memory it is charged.
+    /// Every buffer the state holds, for the memory it is charged — EACH ONCE.
+    /// A flow's holders share their tensors: `FlowRows::new` makes its start,
+    /// anchor and the state before the anchor clones of `current`, a rebase
+    /// keeps a clone of the state before the anchor, and the rollback copy
+    /// (`flow_begun`) shares all it did not replace. The store's occupancy
+    /// sums this list (`KvCacheEntry::occupancy`), so listed once per
+    /// holder one state was charged four times from a flow's first forward:
+    /// on the 27B's far card (11-27, US [18, 64), 35 recurrent layers) each
+    /// state is 114 MB against a 441 MB budget.
     pub(crate) fn tensors(&self) -> Vec<&Tensor> {
         let mut out = vec![&self.current.conv_state, &self.current.recurrent_state];
         if let Some(p) = &self.previous {
@@ -3644,17 +3732,12 @@ impl SsmState {
         if let Some(flow) = &self.flow {
             out.extend(flow.tensors());
         }
-        // A step's start holds only what the step replaced: what it shares
-        // with the live flow is counted once.
+        // A step's start holds only what the step replaced.
         if let Some(begun) = self.flow_begun.as_ref().and_then(|b| b.flow.as_deref()) {
-            let live: std::collections::HashSet<_> = out.iter().map(|t| t.id()).collect();
-            let replaced: Vec<&Tensor> = begun
-                .tensors()
-                .into_iter()
-                .filter(|t| !live.contains(&t.id()))
-                .collect();
-            out.extend(replaced);
+            out.extend(begun.tensors());
         }
+        let mut seen = std::collections::HashSet::with_capacity(out.len());
+        out.retain(|t| seen.insert(t.id()));
         out
     }
 }
@@ -4315,6 +4398,12 @@ pub(crate) fn stage_flowing_states(
         );
         return Ok(false);
     }
+    // One scratch pair for every layer (`FlowRows::stage_level`): the one a
+    // layer already writes, else made by the first that needs one.
+    let mut scratch = states
+        .iter()
+        .flatten()
+        .find_map(|state| state.flow_scratch().cloned());
     for state in states.iter_mut().flatten() {
         if !state.stage_flowing_level(
             seen.base,
@@ -4324,6 +4413,7 @@ pub(crate) fn stage_flowing_states(
             &parents,
             rows,
             device,
+            &mut scratch,
         )? {
             return Ok(false);
         }
