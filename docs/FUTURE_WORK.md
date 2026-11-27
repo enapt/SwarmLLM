@@ -8797,6 +8797,14 @@ grep `^| N |`).
   `an_idle_worker_whose_new_range_takes_in_its_own_is_replaced_before_another_model_gives_way` (red with the
   new rung switched off; A/B `SWARMLLM_GROWTH_RETIRE_FIRST=0`). Prior art: Ollama unloads a runner that `needsReload` rather than
   another (`server/sched.go`); llama.cpp's server keeps a draft model loaded with its target.
+  **Measured** (t509rd, 2026-11-27 18:47-18:57Z, main `03f0441e2`'s card build, same link and helper): the cut moved
+  `[0, 16)` → `[0, 17)` at 18:50:11, the new rung replaced the idle worker ("replacing it before any other model gives
+  the card back"), and the helper stayed on the card in all 18 replies; after the move prose 19.8-24.2 and code
+  41.5-45.9 tok/s (the respawn's reply: a 2.2 s first token). **Left** (the release review, both below its bar): (1)
+  the check reads the card's budget BEFORE the unload, whose "other programs" figure is the card's use less our
+  charges, so a worker using less than its charge leaves the fresh spawn less room than the check counted — its
+  admission then reclaims as the old ladder did, the worker already gone; (2) a worker grown by another request
+  between the check and the lock is kept and the request split without the reclaim rungs (`split_after_all`).
 
 **Closed 2026-11-27** (#508)
 - #508 — `P1` — **A split's head whose worker held a wider range across card and processor never let its tree
