@@ -1060,6 +1060,15 @@ fn answered_whole(result: &Result<LayerResult, SwarmError>) -> bool {
 /// receipt (65-80% of it), and the far's 2-4 s spikes hit the old arm as hard
 /// (147 against 138 ms a forward) — its two dead-wait arms ran back to back
 /// inside one.
+/// Of a forward's rows `[first, first + rows)`, those the walk can no longer
+/// reach (`FlowTree::is_live`): a row the walk has passed, or one following a
+/// row it did not take.
+fn rows_off_the_walk(flow: &FlowTree, first: usize, rows: usize) -> u32 {
+    (first..first.saturating_add(rows))
+        .filter(|&row| !flow.is_live(row))
+        .count() as u32
+}
+
 fn dead_wait_on() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| {
@@ -1463,6 +1472,13 @@ struct FlowRun<'a, 'r> {
     /// held their places could save (#369).
     dead_here: u32,
     dead_rows_here: u32,
+    /// This tree's own rows in the answers taken in turn (`next_in_turn`),
+    /// and of them the rows the walk had already left by then
+    /// (`rows_off_the_walk`): read in turn, before its own draws, the walk
+    /// holds every draw the far end had made as it began serving the forward,
+    /// so these are rows it computed that no draw could use (#510 step 0).
+    rows_answered: u32,
+    rows_dead_at_service: u32,
     /// Answers held back because the walk can reach none of their rows
     /// (`dead_wait_on`), in turn: read with the next answer it can reach, or
     /// never, where a rebase cuts this node's cache below them first.
@@ -1589,6 +1605,8 @@ impl PipelineExecutor {
             answers_joined: 0,
             dead_here: 0,
             dead_rows_here: 0,
+            rows_answered: 0,
+            rows_dead_at_service: 0,
             waiting_dead: Vec::new(),
             dead_waited: 0,
             dead_cut: 0,
@@ -1635,6 +1653,8 @@ impl PipelineExecutor {
             answers_joined = run.answers_joined,
             dead_here = run.dead_here,
             dead_rows_here = run.dead_rows_here,
+            rows_answered = run.rows_answered,
+            rows_dead_at_service = run.rows_dead_at_service,
             dead_wait = dead_wait_on(),
             dead_waited = run.dead_waited,
             // Those still waiting when the reply ended were never read either.
@@ -2401,6 +2421,22 @@ impl FlowRun<'_, '_> {
         }
     }
 
+    /// The next answer in turn, its own rows counted against the walk as it
+    /// stands (`rows_dead_at_service`, #510 step 0). Only this epoch's own
+    /// rows. Two counts run low, never high: an answer joined behind another
+    /// (`tail_join_on`, a shape finishing here) is weighed before the one
+    /// ahead of it moves the walk, and after a miss the walk waits for the
+    /// bonus row (`bonus_waiting`) before it moves.
+    fn next_in_turn(&mut self) -> Option<Answer> {
+        let answer = self.in_turn.next_due()?;
+        let sent = &answer.0;
+        if sent.epoch == self.epoch && sent.lead == 0 {
+            self.rows_answered += sent.rows as u32;
+            self.rows_dead_at_service += rows_off_the_walk(&self.flow, sent.first_row, sent.rows);
+        }
+        Some(answer)
+    }
+
     /// Count an answer about to be read here whose rows the walk can no
     /// longer reach (`dead_here`). Only this epoch's own rows: an older
     /// answer's rows are remapped, and a rebase's lead is the walk's path.
@@ -2477,7 +2513,7 @@ impl FlowRun<'_, '_> {
                 if self.reaches_the_walk(next) || !self.reads_on_from_the_dead(next) {
                     break;
                 }
-                let answer = self.in_turn.next_due().expect("peeked");
+                let answer = self.next_in_turn().expect("peeked");
                 self.dead_waited += 1;
                 self.waiting_dead.push(answer);
             }
@@ -2502,7 +2538,7 @@ impl FlowRun<'_, '_> {
             return Vec::new();
         }
         let mut due = std::mem::take(&mut self.waiting_dead);
-        due.push(self.in_turn.next_due().expect("peeked"));
+        due.push(self.next_in_turn().expect("peeked"));
         let mut rows: usize = due.iter().map(|a| a.0.rows).sum();
         if !tail_join_on() {
             return due;
@@ -2522,7 +2558,7 @@ impl FlowRun<'_, '_> {
                 break;
             }
             rows += next.0.rows;
-            due.push(self.in_turn.next_due().expect("peeked"));
+            due.push(self.next_in_turn().expect("peeked"));
         }
         due
     }
@@ -3057,6 +3093,29 @@ fn median_of(values: &[f32]) -> f32 {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_forwards_rows_the_walk_has_left_are_counted_as_dead_at_service() {
+        // Row 0 the root; 1 and 2 follow it; 3 follows 1, 4 follows 2.
+        let mut flow = FlowTree::new(100, 5).unwrap();
+        let one = flow.push(0, 10).unwrap();
+        let two = flow.push(0, 11).unwrap();
+        let three = flow.push(one, 20).unwrap();
+        let four = flow.push(two, 21).unwrap();
+        assert_eq!((one, two, three, four), (1, 2, 3, 4));
+        assert_eq!(
+            rows_off_the_walk(&flow, 1, 4),
+            0,
+            "the walk at the root reaches every row"
+        );
+        flow.advance(one).unwrap();
+        // A later forward's rows 3 and 4: 3 follows the walk, 4 a row it left.
+        assert_eq!(rows_off_the_walk(&flow, 3, 2), 1);
+        // Rows 0-2: the root it passed and the sibling it did not take.
+        assert_eq!(rows_off_the_walk(&flow, 0, 3), 2);
+        // Rows the tree does not hold are never reached.
+        assert_eq!(rows_off_the_walk(&flow, 5, 3), 3);
+    }
 
     fn at(t0: Instant, ms: u64) -> Instant {
         t0 + Duration::from_millis(ms)

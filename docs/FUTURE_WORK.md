@@ -3791,7 +3791,10 @@ half the rows dead at service → far 35 → ~25 ms, #504's balance moves 6-8 la
 163 ms → prose ~29, code ~60 (from 22-24 / 48-51). With #412 and the opt-in near-tie acceptance (§ 7.3) ≈ 35.
 **Step 0, before building**: on this node, count rows already off the walk when the far served them (the peer-last
 form of `note_dead_here`) and levels lost at non-first takes; `prefill_bench` the far range at 8 / 16 / 24 rows on a
-3060-class card. **Kill it** if under 35% of rows are dead at service or 8 against 24 rows differ by under 15%. Then
+3060-class card (the first count is BUILT, 2026-11-27: `rows_answered` / `rows_dead_at_service` on the reply
+line — an answer's own rows the walk had left as it was read in turn, before its own draws, i.e. as the far end
+knew the walk when it began serving it; low, never high, after a miss and for a joined answer). **Kill it** if
+under 35% of rows are dead at service or 8 against 24 rows differ by under 15%. Then
 build behind `SWARMLLM_FLOW_LIVE_ROWS=0` (read at the far), rig it with this card as the far over a delayed link
 (§ 13), and the real link once the far runs the release. Prior art: PipeInfer (2407.11798 § IV-D) cancels invalid
 queued runs, a node polling a flag mid-run; FlowSpec (2507.02620) and SpecPipe (2504.04104) prune rows after a verify,
