@@ -361,6 +361,14 @@ struct NodeCandidate {
     /// may use the run's WIDTH up to this; a plan giving it two or more is held
     /// to `max_hostable_layers` in layers added, as before (2026-10-08).
     fresh_run_layers: Option<u32>,
+    /// For THIS node only: the leading layers a split whose guesses flow to
+    /// [`FlowCap::far`](crate::daemon::state::flow_balance::FlowCap::far) runs
+    /// here at most, stepped from the flows' own stage times
+    /// (`daemon::state::flow_balance`, FUTURE_WORK #504). Read only by the
+    /// search's far-tail pass (`parallax::route_over`) as
+    /// `parallax::route_each_tail` re-cuts the plan it chose. `None` for every
+    /// peer, before a balance has stepped, and with `SWARMLLM_FLOW_BALANCE=0`.
+    flow_cap: Option<crate::daemon::state::flow_balance::FlowCap>,
     /// How many layers of a range this candidate runs on its graphics card
     /// before the rest go to its processor — the loader's card/processor split
     /// (`process_pool::CardSplit`): a peer stating the processor's room beside
@@ -3234,6 +3242,14 @@ fn drafter_room_priced() -> bool {
     })
 }
 
+/// `SWARMLLM_FLOW_BALANCE=0` plans every flowing split as the sum prices it,
+/// never re-cut for the balance its flows measured (`NodeCandidate::flow_cap`,
+/// #504) — for an A/B inside one binary; the balance still records. Read once.
+fn flow_balance_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SWARMLLM_FLOW_BALANCE").map_or(true, |v| v.trim() != "0"))
+}
+
 /// What [`the_plan_beside_the_drafter`] chose, and the prices it chose by.
 #[derive(Debug)]
 enum BesideTheDrafter {
@@ -5511,6 +5527,15 @@ impl PipelineScheduler {
             split_yield(crate::daemon::state::split_rounds::SplitTail::Here);
         let split_tokens_per_round_far_tail =
             split_yield(crate::daemon::state::split_rounds::SplitTail::Far);
+        // How many leading layers a flowing split runs here (#504).
+        let flow_cap = flow_balance_on()
+            .then(|| {
+                self.shared_state
+                    .metrics
+                    .flow_balances
+                    .cap(&manifest.id.0, std::time::Instant::now())
+            })
+            .flatten();
 
         // Average bytes a layer occupies, for a load's price below. The
         // manifest is the only size the coordinator has; it is the on-disk
@@ -6661,6 +6686,7 @@ impl PipelineScheduler {
                     split_tokens_per_round,
                     split_tokens_per_round_far_tail,
                     fresh_run_layers,
+                    flow_cap: if is_local { flow_cap.clone() } else { None },
                     card_layers,
                     processor_run_first,
                     room_held_by_other_models,

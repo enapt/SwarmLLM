@@ -7244,6 +7244,67 @@ to a next segment advertising it. Tests: `a_walks_row_survives_the_wire_and_a_ma
 whole). Security review 2026-11-22: no High or Medium; three Low fixed (the processor's per-row states, the
 unclaimed kept rows, a refused rebase left in place — `docs/plans/recurrent_flow.md` § Stage 3 (a)).
 
+## A flowing split is cut where its flows balanced (2026-11-27, #504)
+
+**What it replaced.** The planner prices a chain as the SUM of its segments (`parallax::chain_cost_terms`) — a
+reply's time when one check is in flight at a time. A flowing split keeps several forwards in flight, so it runs at
+its SLOWEST stage's forward (`docs/plans/small_slices.md` § 2), and the drafting node's stage carries the drafter's
+time beside its layers, which no planner input holds. Measured on the 14B, this node (8 GB card, 0.5B drafter on it)
+↔ Australia (3060, all its layers on its card every poll), v0.3.313/.314 both ends, ABBA, `SWARMLLM_FLOW_COPY_STORE=0`:
+
+| layers here | prose tok/s | code tok/s | here a forward | drafting | far said (median) | far's longest queue |
+|---|---|---|---|---|---|---|
+| 26 (`real_link_bal313/`, flowhalf) | 16.99 / 18.47 | 44.41 / 42.54 | 34.3-38.8 ms | 12.6-14.6 | 31-45 | 7-48 |
+| 23 (bal313) | 20.27 / 22.53 | 46.53 / 47.02 | 31.9-34.4 | 12.5-14.1 | 30-49 | 23-95 |
+| 23 (`real_link_bal314/`) | 19.90 / 17.77 | 45.11 / 39.80 | 30.5-34.3 | 12.0-14.0 | 27-29 | 7-21 |
+| 20 (bal314) | 13.58 / 14.29 | 33.33 / 40.50 | 24.9-30.5 | 11.8-14.8 | 24-70 | 27-541 |
+
+Three layers off this node: +21% prose, +8% code. Six: −26% / −13% — the far card's forward was flat from 22 to 25
+layers and queued at 28 (the flow's guard cut the far's window 1-5 times a reply, against 0 at 26). So the stage
+times are not a straight line in the layers, and a far stage priced from the planner's per-layer figures (the first
+plan, `memory/issue504_design_1127.md`) would have moved about eight — slower than the sum's plan.
+
+**What it does.** `daemon::state::flow_balance::FlowBalances` keeps, per model, the far node and drafter it was
+measured with, the flows at the latest cut and each cut's measured pace. After four flows at one cut the median of
+the far end's own time a forward (`far_said_ms`, its queue included) ÷ this node's (`here_ms_a_forward`, drafting
+included) says WHICH WAY: under 0.97 one layer moves away (`Shed`), over 1.10 one comes back (`Back`). The flow's
+WALL time a forward (`flowed_ms` ÷ `forwards`) says WHETHER IT STAYS: the first four flows at the cut a move reached
+are compared with the cut it left, like for like by reply kind (`pipeline::reply_kind`; a code reply's forward runs
+~6% quicker than prose's at one cut), and 3% slower undoes the move (`Undone`); a cut measured no faster is not gone
+to again for 30 min (`Kept`; then tried again — the far's load changes). Prior art for the verdict: TCP BBR keeps or
+drops a probe by the delivery rate it measured, not by a loss signal.
+
+The first version stepped on the ratio alone, with a guard far-cut as a second trigger and a 30 min floor after
+every step back. On the real link (`real_link_bal504/`, 11-27 05:53-06:27Z, ABBA off/on/on/off, 16 replies an arm)
+the sum planned [0,20) here; the ratio read 1.3-1.4 there, yet 21 ran its forwards no faster (prose 32.4 against
+32.6 ms; balance-off arms 19.98 / 19.63 prose tok/s, on 20.76 / 18.45). In the third arm two far cuts in three
+flows stepped it on to 22, which ran 5% slower (37.3 against 35.5 ms a prose forward), and the floor held it there
+for the rest of the arm. The far's reported time carries its queue, so the ratio overstates how much the far end
+binds; the wall time is what a reply's speed is made of. A three-flow median of it spread 4-5% at one cut, hence
+four flows and a 3% verdict. The verdict's own A/B on the same link (`real_link_bal504/`, 06:52-07:23Z, 68 of 68
+served): prose 18.11 / 18.63 tok/s off, 18.53 / 19.10 on; code 42.09 / 42.15 off, 41.37 / 42.04 on — neutral where
+the sum's cut is balanced, which is what a loop must be there. Arm 2 stepped to 21, measured it slower and shed back
+to 20; arm 3 kept 21 (as fast). The days it is for — the far queuing at the sum's cut, a sum that loads this node —
+did not occur in that sitting. `parallax::cut_for_the_flow` applies the cap
+after `route_each_tail` chose — the far pass re-searched with the cut offered (`route_over`: a split point, and the
+cut pushed for a range containing it even with partial ranges off, which is how most plans run, #180), taken only as
+the SAME machines in order, at the cap or the nearest wider cut (up to four), so a far node holding none of the cap's
+layers leaves the balance resting at what it can take. It grows this node's share too: on the real link the sum's
+plan, with this node holding [0,26) and the far end [20,48), was [0,20) here — the cut the far card queued at — since
+the sum hands the far end all it has room for where it prices it the cheaper per layer. Growth is held to the room
+the candidates give this node, so in the plan that leaves the drafter room (#275) never past that room: #275's
+evidence is that layers grown past it left every reply unguessed.
+
+**What a change must keep.** The cap never decides the tail (the tail is chosen without it). A cap measured with
+another far node or drafter is not applied. Every step is one layer, waits for four flows, and is kept only if its forwards ran no slower like for like. A/B in one binary:
+`SWARMLLM_FLOW_BALANCE=0` (the balance still records). Tests: `flow_balance::tests::*` (the sittings' own figures),
+`parallax::tests::a_flowing_split_is_cut_where_its_flows_balanced_and_only_there`.
+
+**Prior art.** PipeDream's partitioner minimises the slowest stage from profiled times (arXiv 1806.03377); PipeLive
+re-partitions a live pipeline as its bottleneck drifts (2604.12171); Petals moves a server's blocks only where the
+slowest stage falls enough (`MOVE_AT_MOST`, copied by `auto_manage::coverage::near_chain`). None steps from a
+running pipeline's own stage times; this does, as TCP's congestion window does from its acks.
+
 ## A chunk is as wide as it pays (2026-10-30, #374)
 
 **The rule**: the continuous stream sends each chunk at one of two widths — the narrow one

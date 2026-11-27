@@ -6969,7 +6969,7 @@ reverse — and its post-verify keeps drafting while the target verifies (up to 
 between the two; here they would.
 
 #### #504 — A split whose guesses flow is priced as the sum of its stages, but runs at its slowest stage's pace
-`P2` · perf-split · **OPEN — MEASURED, build it** (2026-11-27) — 2026-11-26 · evidence: `docs/plans/faster_than_local.md` § 15, `docs/plans/small_slices.md` § 2 and step 6, `docs/invariants/scheduling.md` § "A tree that flows"
+`P2` · perf-split · **OPEN — BUILT (closed loop, `daemon::state::flow_balance` + `parallax::cut_for_the_flow`), real-link A/B pending** (2026-11-27) — 2026-11-26 · evidence: `docs/plans/faster_than_local.md` § 15, `docs/plans/small_slices.md` § 2 and step 6, `docs/invariants/scheduling.md` § "A tree that flows"
 
 **Seen** (arithmetic on measured stage times, nothing run): the planner prices a chain as the SUM of its segments'
 costs (`scheduler::parallax::chain_cost_terms`, every `VertexCost` field added up). That is a reply's time when one
@@ -7011,6 +7011,22 @@ stage times, not priced ones — move a layer off the drafting node only while t
 (`far_queue_ms_most`, `far_said_ms_median` against `here_ms_a_forward`), and back when its queue grows (PipeLive's
 re-partitioning as the bottleneck drifts, arXiv 2604.12171; a closed loop, Petals' `MOVE_AT_MOST`-style one step at a
 time). The open-loop min-max over priced stages (PipeDream) is the wrong first build here.
+
+**Built (2026-11-27) as that closed loop**: `FlowBalances` steps this node's leading layers one at a time — the
+stages say which way (four flows' median of far said ÷ here a forward: under 0.97 shed, over 1.10 back), the flow's
+wall time a forward, like for like by reply kind, says whether the step stays (3% slower than the cut it left →
+undone, not tried again for 30 min); `cut_for_the_flow` re-cuts the plan `route_each_tail` chose — same machines,
+fewer layers here or more, never past the room this node keeps for its drafter — and never decides the tail; A/B
+`SWARMLLM_FLOW_BALANCE=0`. Rule `arch-scheduling.md` § "A flowing split is cut where its flows balanced", evidence
+`docs/invariants/scheduling.md` § same. The first real-link A/B (`real_link_bal504/`, 05:53-06:27Z, a first version
+deciding on the ratio, a far-cut trigger and a 30 min floor) showed the sum's [0,20) already as fast as 21, and a
+noisy step to 22 held 5% slower — hence the wall-time verdict. Its A/B (`real_link_bal504/`, 06:52-07:23Z, ABBA
+off/on/on/off, 68 of 68 replies served): prose 18.11 / 18.63 off against 18.53 / 19.10 on, code 42.09 / 42.15
+against 41.37 / 42.04 (four a arm) — neutral, as it should be where the sum's cut is already balanced; arm 2 tried 21,
+measured it slower and went back to 20 (and re-cut eight of the sum's later [0,21) plans to 20), arm 3 kept 21,
+which ran as fast. **Residual**: the gain case on a real link — a day the far end queues at the sum's cut (bal314's
+20, −26%) or a sum that loads this node (bal313's 26, +21% at 23) — has not yet been met by the loop itself; read
+its `DIAG: a flowing split moves a layer` lines on the next split runs that show either.
 
 **Design if it wins**: price a flow-capable plan by its bottleneck — the slowest stage's forward, this node's drafting
 counted on the stage that drafts — and break ties by the sum, so rounds and a single segment price as today. The

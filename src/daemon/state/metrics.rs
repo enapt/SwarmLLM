@@ -55,6 +55,11 @@ pub struct MetricsProviders {
     /// of a split this node drove; read ONLY by the scheduler's candidate
     /// builder.
     pub split_rounds: super::split_rounds::SplitRounds,
+    /// How many leading layers a flowing split of each model runs here,
+    /// stepped one layer at a time from the flows' own stage times (#504).
+    /// Written ONLY by `pipeline::dsd_flow` at a flow's end (the far end
+    /// drawing); read ONLY by the scheduler's candidate builder. Memory only.
+    pub flow_balances: super::flow_balance::FlowBalances,
     pub inference_requests_total: AtomicU64,
     /// Mirror of node_stats.requests_served as an AtomicU64 — written from
     /// multiple async contexts. The RwLock-guarded field on NodeStats was

@@ -22,6 +22,7 @@ mod credits;
 pub(crate) mod declined_leads;
 pub(crate) mod demand_heard;
 mod events;
+pub(crate) mod flow_balance;
 pub(crate) mod forward_streams;
 mod hf;
 pub(crate) mod hop_reports;
@@ -1574,6 +1575,7 @@ impl SharedState {
                 network_coord_samples: dashmap::DashMap::new(),
                 reply_lengths: reply_lengths::ReplyLengths::default(),
                 split_rounds: split_rounds::SplitRounds::default(),
+                flow_balances: flow_balance::FlowBalances::default(),
                 node_stats: RwLock::new(NodeStats::default()),
                 inference_requests_total: AtomicU64::new(0),
                 requests_served_atomic: AtomicU64::new(0),

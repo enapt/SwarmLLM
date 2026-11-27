@@ -334,6 +334,24 @@ plan{…}: … DIAG: a split of this model is priced from the drafter's prior �
          candidate lines carry both figures (`split_tokens_per_round`,
          `split_tokens_per_round_far_tail`); a plan that ends on a peer was
          priced with the second)
+plan{…}: … DIAG: a split whose guesses flow is cut for the balance its flows measured (#504)
+        layers_here_summed= layers_here= cap= far=
+        (WHY DID THIS NODE RUN FEWER LAYERS THAN THE SUM CHOSE? #504, 2026-11-27:
+         the plan the sum priced, re-cut to the leading layers this node's flows
+         to `far` measured as balanced — same machines, `layers_here` the cap or
+         the nearest wider cut the far node could take. Absent = no balance has
+         stepped, another far node, `SWARMLLM_FLOW_BALANCE=0`, or no cut routed)
+DIAG: a flowing split moves a layer between this computer and the far end (#504)
+        request_id= model_id= step=Shed|Back|Undone layers_here= kind=
+        here_ms_a_forward= far_said_ms_median= wall_ms_a_forward=
+        (WHICH WAY IS THE BALANCE GOING? #504: after the fourth flow at one cut,
+         `Shed` when the far end's own time a forward was under 0.97 of this
+         node's (it waits on us), `Back` over 1.10 (it is the slower);
+         `Undone` when the cut a move reached ran its forwards 3% slower than
+         the cut it left, like for like by reply `kind` — that cut is then not
+         gone to again for 30 min. Medians of the four flows; the `DSD: a tree
+         that flowed is complete` lines carry each flow's own figures, its
+         wall time a forward is `flowed_ms` ÷ `forwards`)
 This node holds the whole model but would run it on its processor; a pipeline across
   peers' cards is priced faster, so the request goes there
         local_processor_cost_ms= pipeline_cost_ms= segments= prompt_tokens=

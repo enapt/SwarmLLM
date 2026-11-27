@@ -1698,6 +1698,51 @@ impl PipelineExecutor {
             levels_ahead_median = format_args!("{:.0}", run.verdicts.levels_ahead_median()),
             "DSD: a tree that flowed is complete"
         );
+        // How many leading layers the next flow of this model runs here
+        // (#504, `daemon::state::flow_balance`): a flow the far end drew, with
+        // this node's one run first, is the balance's one measurement.
+        if let ([near], true, false, true) = (
+            run.shape.near.as_slice(),
+            run.shape.far_walks(),
+            run.drafting_off,
+            outcome.is_ok(),
+        ) {
+            if near.layer_range.0 == 0 {
+                let forwards = f64::from(run.forwards.max(1));
+                let sample = crate::daemon::state::flow_balance::FlowBalanceSample {
+                    layers_here: near.layer_range.1,
+                    kind: super::reply_kind(&self.request),
+                    here_ms_a_forward: (run.drafting_ms + run.near_ms + run.here_ms) / forwards,
+                    far_said_ms_median: f64::from(median_of(&run.far_said_ms)),
+                    wall_ms_a_forward: flowed_ms / forwards,
+                    forwards: run.forwards,
+                };
+                let step = run.state.metrics.flow_balances.record(
+                    &self.request.model_id.0,
+                    &run.shape.far.node_id,
+                    &run.drafter.model_id().0,
+                    sample,
+                    std::time::Instant::now(),
+                );
+                use crate::daemon::state::flow_balance::FlowBalanceStep;
+                if matches!(
+                    step,
+                    FlowBalanceStep::Shed | FlowBalanceStep::Back | FlowBalanceStep::Undone
+                ) {
+                    tracing::info!(
+                        request_id = %self.request.id,
+                        model_id = %self.request.model_id,
+                        step = ?step,
+                        layers_here = sample.layers_here,
+                        kind = ?sample.kind,
+                        here_ms_a_forward = format_args!("{:.1}", sample.here_ms_a_forward),
+                        far_said_ms_median = format_args!("{:.1}", sample.far_said_ms_median),
+                        wall_ms_a_forward = format_args!("{:.1}", sample.wall_ms_a_forward),
+                        "DIAG: a flowing split moves a layer between this computer and the far end (#504)"
+                    );
+                }
+            }
+        }
         outcome.map_err(|error| FlowFailed {
             error,
             base: run.settled_base,

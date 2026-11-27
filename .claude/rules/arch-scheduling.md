@@ -369,6 +369,12 @@ Each names the ONE place a decision is made; a second implementation of any is t
 
 → `docs/invariants/scheduling.md` § "A tree that flows" (On the REAL link: the knob sweep and the drafter table)
 
+## A flowing split is cut where its flows balanced (2026-11-27, #504)
+
+A flow runs at its SLOWEST stage, the sum prices every stage added, and the drafting node's stage carries the drafter's time no planner input holds. **`daemon::state::flow_balance::FlowBalances`** steps this node's leading layers ONE at a time from the flows' own times, never priced from per-layer figures: the stages say which way (`far_said_ms` median ÷ `here_ms_a_forward`: under 0.97 shed, over 1.10 back), the flow's WALL time a forward, like for like by reply kind, says whether a step stays (3% slower than the cut it left → undone, and not taken again for 30 min) — the ratio alone carries the far's queue and held a slower cut (2026-11-27) — the far card's forward is not a straight line in its layers (flat 22-25, queued at 28). **`parallax::cut_for_the_flow`** applies it AFTER `route_each_tail` chose (the cap never decides the tail): the far pass searched again with the cut offered (`route_over`'s `flow_cap_layers`, partial ranges or not), this node's leading run held to EXACTLY the cap, taken only as the SAME machines in order, at the cap or the nearest cut toward the sum's (`MOST_FLOW_CUTS_TRIED`) — fewer layers here or MORE (the sum often hands the far end all it has room for, 2026-11-27: [0,20) of a [0,26) here, the cut where the far card queued), never past the room the candidates give this node (the drafter's, #275). A/B `SWARMLLM_FLOW_BALANCE=0`.
+
+→ `docs/invariants/scheduling.md` § "A flowing split is cut where its flows balanced"
+
 ## A stream's chunk is as wide as it pays (2026-10-30, #374, #375)
 
 **`dsd_stream::StreamWidth` chooses each chunk's width** of two — `SWARMLLM_SPEC_STREAM_GUESSES` (3) or two more — by `chunk_rate`, with **`dsd_controller::FarPace`** (the gap between two answers where the later chunk was already waiting at the far end; median of ≥ 3, #375). Never price a row from whole checks sent alone where chunks queue at the far end. A width with no gaps is tried on every other queued chunk; every 16th goes the width not chosen; only where no chunk waits does the lone-check fit (`CheckCost::slope_is_measured`) price both. Each chunk's wait is its own task (`stamp_on_arrival`). Never one fixed width; at most two (a new shape costs a card a capture). A/B `SWARMLLM_STREAM_WIDTH=fixed`; `examples/stream_width_sim.py`.

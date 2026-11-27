@@ -1299,12 +1299,33 @@ fn route_each_tail(
     prompt_tokens: Option<u32>,
     search: impl Fn(&[NodeCandidate], Option<SplitTail>) -> Result<Vec<PipelineSegment>, SwarmError>,
 ) -> Result<Vec<PipelineSegment>, SwarmError> {
-    if !tails_priced_apart(candidates) {
-        return search(candidates, None);
-    }
+    let plan = if !tails_priced_apart(candidates) {
+        search(candidates, None)
+    } else {
+        cheaper_tail(
+            num_layers,
+            candidates,
+            local_node_id,
+            prompt_tokens,
+            &search,
+        )
+    }?;
+    Ok(cut_for_the_flow(plan, candidates, local_node_id, &search))
+}
+
+/// [`route_each_tail`]'s two passes, the cheaper kept — the far pass as the
+/// sum prices it, without this node's flow cap ([`cut_for_the_flow`] applies
+/// that after the choice, so a cap never decides the tail).
+fn cheaper_tail(
+    num_layers: u32,
+    candidates: &[NodeCandidate],
+    local_node_id: &NodeId,
+    prompt_tokens: Option<u32>,
+    search: &impl Fn(&[NodeCandidate], Option<SplitTail>) -> Result<Vec<PipelineSegment>, SwarmError>,
+) -> Result<Vec<PipelineSegment>, SwarmError> {
     let here = search(candidates, Some(SplitTail::Here));
     let far = search(
-        &priced_for_tail(candidates, SplitTail::Far),
+        &priced_for_tail(&without_flow_cap(candidates), SplitTail::Far),
         Some(SplitTail::Far),
     );
     match (here, far) {
@@ -1325,6 +1346,120 @@ fn route_each_tail(
         // the log for the far pass's real answer (#483 (b) E).
         (Err(here), Err(far)) => Err(if found_no_tail(&here) { far } else { here }),
     }
+}
+
+/// `plan`, re-cut to the leading layers its flows' balance holds this node to
+/// (FUTURE_WORK #504, `daemon::state::flow_balance`) — fewer where this node's
+/// stage was the slower, more where the far end queued: a split whose guesses
+/// flow runs at its slowest stage's pace, and the drafting node's stage
+/// carries the drafter's time, which the sum never sees. Only the shape the
+/// balance was measured on — this node's one run first, then the far node it
+/// was measured with, the tail away from here — and only to exactly the cap:
+/// the far pass is searched again with this node's leading run held to it
+/// (`route_over`), and the answer is taken only where it is the SAME machines
+/// in the same order. Anything else keeps the plan the sum chose.
+fn cut_for_the_flow(
+    plan: Vec<PipelineSegment>,
+    candidates: &[NodeCandidate],
+    local_node_id: &NodeId,
+    search: &impl Fn(&[NodeCandidate], Option<SplitTail>) -> Result<Vec<PipelineSegment>, SwarmError>,
+) -> Vec<PipelineSegment> {
+    let Some(cap) = candidates
+        .iter()
+        .find(|c| &c.node_id == local_node_id)
+        .and_then(|c| c.flow_cap.clone())
+    else {
+        return plan;
+    };
+    let measured_shape = match plan.as_slice() {
+        [head, next, rest @ ..] => {
+            &head.node_id == local_node_id
+                && head.layer_range.0 == 0
+                && head.layer_range.1 != cap.layers
+                && next.node_id == cap.far
+                && rest.iter().all(|s| &s.node_id != local_node_id)
+        }
+        _ => false,
+    };
+    if !measured_shape {
+        return plan;
+    }
+    // The cap first, then each cut after it toward the sum's: a far node
+    // holding none of the cap's layers still takes what it holds — and this
+    // node, growing, only what its candidate has room for, so in the plan that
+    // leaves the drafter room (#275) never past that room — so the balance
+    // rests at the nearest cut instead of falling back to the sum's and
+    // stepping into the same wall again.
+    let head = plan[0].layer_range.1;
+    let cuts: Vec<u32> = if cap.layers < head {
+        (cap.layers..head).collect()
+    } else {
+        (head + 1..=cap.layers).rev().collect()
+    };
+    for layers in cuts.into_iter().take(MOST_FLOW_CUTS_TRIED) {
+        let held_to = with_flow_cap_at(candidates, local_node_id, layers);
+        let Ok(cut) = search(
+            &priced_for_tail(&held_to, SplitTail::Far),
+            Some(SplitTail::Far),
+        ) else {
+            continue;
+        };
+        let same_machines =
+            cut.len() == plan.len() && cut.iter().zip(&plan).all(|(a, b)| a.node_id == b.node_id);
+        if same_machines && cut[0].layer_range == (0, layers) {
+            tracing::info!(
+                layers_here_summed = head,
+                layers_here = layers,
+                cap = cap.layers,
+                far = %cap.far,
+                "DIAG: a split whose guesses flow is cut for the balance its flows measured (#504)"
+            );
+            return cut;
+        }
+    }
+    plan
+}
+
+/// The cuts [`cut_for_the_flow`] searches at most: the cap and the ones after
+/// it toward the sum's. A balance steps one layer at a time, so the cap is
+/// rarely more than one from a cut the machines can take.
+const MOST_FLOW_CUTS_TRIED: usize = 4;
+
+/// `candidates` with this node's flow cap at `layers`.
+fn with_flow_cap_at(
+    candidates: &[NodeCandidate],
+    local_node_id: &NodeId,
+    layers: u32,
+) -> Vec<NodeCandidate> {
+    candidates
+        .iter()
+        .map(|c| {
+            let mut c = c.clone();
+            if &c.node_id == local_node_id {
+                if let Some(cap) = c.flow_cap.as_mut() {
+                    cap.layers = layers;
+                }
+            }
+            c
+        })
+        .collect()
+}
+
+/// `candidates` with no flow cap — the plan the sum chooses
+/// ([`cut_for_the_flow`]).
+fn without_flow_cap(candidates: &[NodeCandidate]) -> std::borrow::Cow<'_, [NodeCandidate]> {
+    if candidates.iter().all(|c| c.flow_cap.is_none()) {
+        return std::borrow::Cow::Borrowed(candidates);
+    }
+    std::borrow::Cow::Owned(
+        candidates
+            .iter()
+            .map(|c| NodeCandidate {
+                flow_cap: None,
+                ..c.clone()
+            })
+            .collect(),
+    )
 }
 
 /// The search's answer where no vertex ends the model on a computer
@@ -1426,6 +1561,19 @@ fn route_over(
             }
         }
     }
+    // This node's flow cap (#504, `cut_for_the_flow`): on the far pass only,
+    // its leading run ends at it, so the cut needs it as a boundary.
+    let flow_cap_layers = (tail == Some(SplitTail::Far))
+        .then(|| {
+            candidates
+                .iter()
+                .find(|c| &c.node_id == local_node_id)
+                .and_then(|c| c.flow_cap.as_ref())
+                .map(|cap| cap.layers)
+        })
+        .flatten()
+        .filter(|&k| 0 < k && k < num_layers);
+    split_points.extend(flow_cap_layers);
     // A local candidate holding the WHOLE model offers the search no boundary
     // to cut at: its one range starts at 0 and ends at `num_layers`, and under
     // encryption it is the only legal source and sink, so every other chain
@@ -1746,6 +1894,12 @@ fn route_over(
                     push(range);
                 }
             }
+            // Its range cut at this node's flow cap, on the far pass (#504,
+            // `cut_for_the_flow`): the one cut a balance asks for.
+            if let Some(k) = flow_cap_layers.filter(|&k| lo < k && k < hi) {
+                push((lo, k));
+                push((k, hi));
+            }
             // Its range cut where some machine's held range begins or ends:
             // a cut in a route that exists, so only on a pass that found none
             // (#275's rule — see `route_shortest_path`).
@@ -1788,6 +1942,17 @@ fn route_over(
             v.range.1 < num_layers
                 || v.range.0 == 0
                 || SplitTail::of(&candidates[v.cand_idx].node_id, local_node_id) == tail
+        });
+    }
+    // And this node's leading run ends AT its flow cap: no layer past it here,
+    // in pieces either (a run cut back to back, [0,12) + [12,16), is the same
+    // run past the cap), and no shorter first piece. Its whole-model vertex
+    // stays, and is not the flow's shape.
+    if let Some(k) = flow_cap_layers {
+        vertices.retain(|v| {
+            &candidates[v.cand_idx].node_id != local_node_id
+                || (v.range.0 == 0 && v.range.1 >= num_layers)
+                || (v.range.1 <= k && (v.range.0 != 0 || v.range.1 == k))
         });
     }
     if vertices.is_empty() {
@@ -2455,6 +2620,7 @@ mod tests {
             ring: Default::default(),
             stated_ms_per_layer: None,
             fresh_run_layers: None,
+            flow_cap: None,
             card_layers: None,
             processor_run_first: false,
             room_held_by_other_models: false,
@@ -2818,6 +2984,100 @@ mod tests {
             chain_tokens_per_round(&ends_far, &flows, &local, 32),
             Some(8.0),
             "the completion line reports the figure the plan was priced at"
+        );
+    }
+
+    /// FUTURE_WORK #504: a flowing split is re-cut to the leading layers its
+    /// flows' balance holds this node to — the same machines, the cap exact —
+    /// and only the shape it was measured on: the far node it names, a plan
+    /// the far peer can take the layers in. The cap never decides the tail.
+    /// This node is the faster per layer, so the sum keeps all it may here.
+    #[test]
+    fn a_flowing_split_is_cut_where_its_flows_balanced_and_only_there() {
+        use crate::daemon::state::flow_balance::FlowCap;
+        let local = NodeId([1; 32]);
+        let peer = NodeId([2; 32]);
+        let at_speed = |cap: Option<FlowCap>, peer_room: u32, here: f32, far: f32, mine: f32| {
+            let mut me = cand(1, vec![(0, 32)], 0, 0.0, true, true, mine);
+            me.max_hostable_layers = Some(16);
+            me.flow_cap = cap;
+            let mut p = cand(2, vec![(0, 32)], 60, 0.0, true, true, 30.0);
+            p.max_hostable_layers = Some(peer_room);
+            for c in [&mut me, &mut p] {
+                c.split_tokens_per_round = Some(here);
+                c.split_tokens_per_round_far_tail = Some(far);
+            }
+            vec![me, p]
+        };
+        let with = |cap, peer_room, here, far| at_speed(cap, peer_room, here, far, 60.0);
+        let plan = |cands: &[NodeCandidate]| {
+            route_shortest_path(
+                32,
+                cands,
+                &local,
+                false,
+                false,
+                CapacityBound::Everyone,
+                None,
+            )
+            .expect("routable")
+        };
+        let shape = |segs: &[PipelineSegment]| {
+            segs.iter()
+                .map(|s| (s.node_id.0[0], s.layer_range))
+                .collect::<Vec<_>>()
+        };
+        let cap = |layers, far: &NodeId| {
+            Some(FlowCap {
+                layers,
+                far: far.clone(),
+            })
+        };
+        let summed = shape(&plan(&with(None, 20, 1.0, 8.0)));
+        assert_eq!(
+            summed,
+            vec![(1, (0, 16)), (2, (16, 32))],
+            "the sum's flowing plan"
+        );
+        assert_eq!(
+            shape(&plan(&with(cap(13, &peer), 20, 1.0, 8.0))),
+            vec![(1, (0, 13)), (2, (13, 32))],
+            "re-cut to the balance's cap, the same two machines"
+        );
+        assert_eq!(
+            shape(&plan(&with(cap(13, &NodeId([9; 32])), 20, 1.0, 8.0))),
+            summed,
+            "a cap measured with another far node is not this plan's"
+        );
+        assert_eq!(
+            shape(&plan(&with(cap(13, &peer), 16, 1.0, 8.0))),
+            summed,
+            "a peer with no room for the layers keeps the sum's plan"
+        );
+        // A plan whose tail is here is not a flowing one: the cap changes
+        // nothing, and decides nothing about the tail.
+        let streams = shape(&plan(&with(None, 20, 8.0, 1.0)));
+        assert_eq!(streams.last().map(|s| s.0), Some(1), "{streams:?}");
+        assert_eq!(shape(&plan(&with(cap(13, &peer), 20, 8.0, 1.0))), streams);
+        // Grown back where the far end queued: this node the slower per layer,
+        // the sum gives the peer all it has room for, and a cap above that is
+        // taken — but only as far as this node has room for (16).
+        let slow = |cap, peer_room| at_speed(cap, peer_room, 1.0, 8.0, 15.0);
+        let summed = shape(&plan(&slow(None, 20)));
+        assert_eq!(
+            summed,
+            vec![(1, (0, 12)), (2, (12, 32))],
+            "the sum's flowing plan"
+        );
+        assert_eq!(
+            shape(&plan(&slow(cap(14, &peer), 20))),
+            vec![(1, (0, 14)), (2, (14, 32))],
+            "grown to the cap"
+        );
+        assert_eq!(
+            shape(&plan(&slow(cap(18, &peer), 20))),
+            vec![(1, (0, 16)), (2, (16, 32))],
+            "grown only to the room this node has"
         );
     }
 
@@ -6283,6 +6543,7 @@ mod transfer_cost_tests {
             ring: Default::default(),
             stated_ms_per_layer: None,
             fresh_run_layers: None,
+            flow_cap: None,
             card_layers: None,
             processor_run_first: false,
             room_held_by_other_models: false,
