@@ -2955,6 +2955,10 @@ is a request cancelled on a computer mid-request (a failover's `cancel_segment_o
 computer within two minutes RESUMING past a kept opening: its steps would not hold the worker. A written-off
 computer is barred from that request's retry, so no path is known to do it.
 
+The remembered ids are pruned at BOTH ends — at every stamp and at every release — because every worker
+hears every release (`forget_conversation_everywhere`): pruned only at a stamp, a worker that got no forward kept
+each id for ever (found by the v0.3.314 pre-release review; the test plants an expired id and fails without it).
+
 Prior art: HTTP/2 ignores the frames still in flight on a stream it has reset, and they never reopen it (RFC 9113
 § 5.1); vLLM V1's `OutputProcessor.process_outputs` skips output for a request it has already aborted; this
 repo's worker remembers a cancel that overtakes its own request for `CANCEL_RETENTION_SECS`. And the refusal now

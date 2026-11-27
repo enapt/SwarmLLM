@@ -2801,10 +2801,20 @@ impl WorkerHandle {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&request_id);
-        self.released
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(request_id, std::time::Instant::now());
+        {
+            // Every worker hears every release (`forget_conversation_everywhere`),
+            // so one that gets no forward would keep each id for ever: prune here
+            // too, by the same window `note_conversation` prunes by (as the
+            // worker's own cancel set does; Cassandra drops a tombstone past its
+            // grace period the same way).
+            let mut released = self
+                .released
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let window = std::time::Duration::from_secs(CONVERSATION_GAP_SECS);
+            released.retain(|_, at| at.elapsed() <= window);
+            released.insert(request_id, std::time::Instant::now());
+        }
         self.pass_ranges
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -19748,6 +19758,18 @@ mod tests {
         assert!(h.note_conversation(flow, HoldStamp::OpensAPass));
         assert!(h.in_use(p.conversation_window()));
         assert!(h.note_conversation(flow, HoldStamp::WithinAPass));
+        // Every worker hears every release, so a worker that gets no forward
+        // keeps only the window's: a release prunes the expired ones too.
+        let expired = Uuid::new_v4();
+        let past = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(CONVERSATION_GAP_SECS + 1))
+            .expect("fixture: the clock is past the window");
+        h.released.lock().unwrap().insert(expired, past);
+        h.forget_conversation(Uuid::new_v4());
+        assert!(
+            !h.released.lock().unwrap().contains_key(&expired),
+            "a release prunes the tombstones past the window"
+        );
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 
