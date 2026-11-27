@@ -3776,7 +3776,7 @@ TAG=fresh303, 02:26-02:29Z, the thread sampler beside it in `threads_fresh303.tx
 the owner is #146 (4).
 
 #### #510 — A split's far card computes every row of a guess tree, the ones the walk has already left too
-`P2` · perf-split · **OPEN** (conceptual, step 0 first) — 2026-11-27 · evidence: memory `archive/fable_flow_law_1127.md`
+`P2` · perf-split · **OPEN** (step 0's first half MEASURED: 86-90% of the far's rows dead at service; its second half next) — 2026-11-27 · evidence: memory `archive/fable_flow_law_1127.md`
 
 In a flow whose far end draws (`peer-last`), the far learns the walk ~62 ms before this node, yet serves every row it is
 sent: the head counts dead rows only for a shape it finishes itself (`dsd_flow::note_dead_here`, `sent.here`), and
@@ -3795,7 +3795,12 @@ form of `note_dead_here`) and levels lost at non-first takes; `prefill_bench` th
 line — an answer's own rows the walk had left as it was read, before its own draws, i.e. as the far end knew the
 walk when it served it where the far walks; counted in `take_answer`, which every shape reaches — a first cut
 counted in the turn order only, which a far-walking shape never enters, and read 0 on the real link). **Kill it** if
-under 35% of rows are dead at service or 8 against 24 rows differ by under 15%. Then
+under 35% of rows are dead at service or 8 against 24 rows differ by under 15%. **The first half MEASURED
+2026-11-27 (t511d, 20:56Z, `463c07b0f`'s code in a CUDA build, the 14B to AU's 3060, the 1.5B helper, the copy
+store off, one reply each, 160 tokens): 85.8-89.5% of rows dead at service** — prose 2,474 / 2,848, 2,971 / 3,319,
+2,525 / 2,825, 2,706 / 3,026; code 1,125 / 1,311 — the shape's own arithmetic (one row of a level's 8 on the walk,
+so ~7/8 of the next level hangs off rows it left). Far past the kill line; the second half (the far card's forward
+at 8 against 24 rows) decides whether it pays. Then
 build behind `SWARMLLM_FLOW_LIVE_ROWS=0` (read at the far), rig it with this card as the far over a delayed link
 (§ 13), and the real link once the far runs the release. Prior art: PipeInfer (2407.11798 § IV-D) cancels invalid
 queued runs, a node polling a flag mid-run; FlowSpec (2507.02620) and SpecPipe (2504.04104) prune rows after a verify,
