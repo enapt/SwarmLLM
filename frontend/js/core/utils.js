@@ -778,9 +778,7 @@
     }
 
     var active = acquisitions.find(function(a) {
-      return App.downloads && App.downloads.isActiveDlState
-        ? App.downloads.isActiveDlState(a.state)
-        : (typeof a.state === 'string' && (a.state === 'downloading' || a.state === 'awaiting_manifest'));
+      return !!(App.downloads && App.downloads.isActiveDlState(a.state));
     });
     if (!active) {
       if (existing) existing.remove();

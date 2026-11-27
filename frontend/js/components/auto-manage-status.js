@@ -47,11 +47,9 @@
         //   object  {"failed": {...}}    — terminal failure (don't count)
         // Prior code matched PascalCase ('Downloading', 'Queued',
         // 'Verifying') which never fires, so the orb always read zero.
-        var s = a.state;
-        if (typeof s === 'string') {
-          if (s === 'downloading' || s === 'awaiting_manifest') active++;
-        }
-        // No object-form active states; {"failed": {...}} is terminal.
+        // One answer with the download queue and the chat bar
+        // (`App.downloads.isActiveDlState`, which carries the type-guard).
+        if (App.downloads && App.downloads.isActiveDlState(a.state)) active++;
       });
     }
     state.activeDownloads = active;
