@@ -177,7 +177,8 @@ fn segment_weight_bytes(
     // allocation in `load_split_model` exactly; see the truth table there.
     if let Some(info) = ct.tensor_infos.get("token_embd.weight") {
         let tied = !ct.tensor_infos.contains_key("output.weight");
-        if is_first {
+        // Kept in the machine's memory, off the device (#507).
+        if is_first && !super::token_table_in_system_memory(is_first, is_last, tied) {
             total = total.saturating_add(if rows_on_demand {
                 // Held quantized, rows dequantized as looked up.
                 tensor_bytes(info)
@@ -2005,9 +2006,23 @@ impl SplitModel {
         // its LM head below instead of loading `token_embd.weight` a second
         // time. That second load is why the tied models save more than the
         // dequantized-vs-quantized difference alone.
+        //
+        // A split's first segment that does not finish the model keeps it in
+        // the machine's memory (`token_table_in_system_memory`, #507): the
+        // lookup reads a few rows a forward and `SplitModel::embed_tokens`
+        // copies them up.
+        let table_device = if super::token_table_in_system_memory(
+            is_first,
+            is_last,
+            !ct.tensor_infos.contains_key("output.weight"),
+        ) {
+            Device::Cpu
+        } else {
+            device.clone()
+        };
         let tok_embd_q: Option<std::sync::Arc<QTensor>> = if is_first {
             Some(std::sync::Arc::new(
-                ct.tensor(&mut file, "token_embd.weight", &device)
+                ct.tensor(&mut file, "token_embd.weight", &table_device)
                     .map_err(|e| SwarmError::Internal(format!("Failed to load embeddings: {e}")))?,
             ))
         } else {
@@ -2016,7 +2031,7 @@ impl SplitModel {
 
         let tok_embeddings = match &tok_embd_q {
             None => None,
-            Some(q) => match TokenEmbedding::try_quantized(q, &device) {
+            Some(q) => match TokenEmbedding::try_quantized(q, &table_device) {
                 // Rows read out of the quantized table as they are looked up —
                 // bit-identical to the dense path and several times smaller.
                 Some(e) => Some(e),
@@ -2059,6 +2074,8 @@ impl SplitModel {
             tracing::info!(
                 rows_read_on_demand = matches!(emb, TokenEmbedding::Quantized(_)),
                 resident_mb = emb.resident_bytes() / (1024 * 1024),
+                // A split's first segment keeps it off the card (#507).
+                in_system_memory = !table_device.same_device(&device),
                 "Loaded token embedding table"
             );
         }

@@ -4173,12 +4173,20 @@ impl ModelWeights {
             0
         };
         let output_head = if is_last { self.output_head } else { 0 };
+        // A split's first segment keeps its table in the machine's memory
+        // (#507): still loaded, no longer the device's.
+        let table_at_home =
+            crate::inference::split::token_table_in_system_memory(is_first, is_last, self.tied);
         let (host_resident, beside_embedding) = if is_first {
-            (self.host_resident, self.beside_embedding)
+            (
+                self.host_resident
+                    .saturating_add(if table_at_home { token_table } else { 0 }),
+                self.beside_embedding,
+            )
         } else {
             (0, 0)
         };
-        let head = token_table.saturating_add(output_head);
+        let head = (if table_at_home { 0 } else { token_table }).saturating_add(output_head);
         SegmentWeights {
             total: self
                 .layer_bytes(start, end)
@@ -20830,6 +20838,41 @@ mod tests {
         assert!(pool.admit_to_cpu(&small, 100, Requester::Owner));
     }
 
+    /// A split's first segment keeps an untied model's token table in the
+    /// machine's memory (#507): still loaded, so its total is unchanged, but
+    /// counted off the card — `bytes_added_by` on a card leaves it out. A
+    /// whole model and a tied one keep it where the segment runs.
+    #[test]
+    fn a_first_segments_token_table_is_counted_in_the_machines_memory() {
+        let names: Vec<String> = (0..10).map(|i| format!("blk.{i}.attn_q.weight")).collect();
+        let mut tensors: Vec<(&str, u64)> = names.iter().map(|n| (n.as_str(), 100)).collect();
+        tensors.push(("token_embd.weight", 30));
+        tensors.push(("output.weight", 50));
+        let untied = ModelWeights::of(&tensors).expect("layers named");
+        let first = untied.segment((0, 4), true, false);
+        assert_eq!(first.total, 400 + 30);
+        assert_eq!(first.host_resident, 30, "the table is the machine's");
+        assert_eq!(first.head, 0, "nothing of it is the device's");
+        assert_eq!(bytes_added_by((0, 4), &[], &untied, 10, true), 400);
+        assert_eq!(bytes_added_by((0, 4), &[], &untied, 10, false), 430);
+        let whole = untied.segment((0, 10), true, true);
+        assert_eq!((whole.host_resident, whole.head), (0, 30 + 50));
+        tensors.pop();
+        let tied = ModelWeights::of(&tensors).expect("layers named");
+        let tied_first = tied.segment((0, 4), true, false);
+        assert_eq!(
+            (tied_first.host_resident, tied_first.head),
+            (0, 30),
+            "a tied table stays where the segment runs"
+        );
+        // The rule itself, its switch handed in.
+        use crate::inference::split::table_home_is_the_machine as home;
+        assert!(home(true, false, false, false));
+        assert!(!home(true, false, false, true), "SWARMLLM_TOKEN_TABLE=card");
+        assert!(!home(true, true, false, false) && !home(false, false, false, false));
+        assert!(!home(true, false, true, false));
+    }
+
     /// `bytes_added_by` is `layers_added_by` in bytes, ends' tables included:
     /// an exact hit adds nothing, a range containing a held one adds what the
     /// held one did not already load, and the head goes with the model's end.
@@ -23181,10 +23224,22 @@ mod tests {
             };
             let last_head = if tied { TOKEN_TABLE } else { OUTPUT_HEAD } + NORM;
 
+            // An untied first segment keeps its table in the machine's
+            // memory (#507): loaded all the same, but not the card's head.
             assert_eq!(
                 charged(Some((0, 1))),
-                (Q8_FIRST_LAYER + TOKEN_TABLE + ROPE, TOKEN_TABLE),
+                (
+                    Q8_FIRST_LAYER + TOKEN_TABLE + ROPE,
+                    if tied { TOKEN_TABLE } else { 0 }
+                ),
                 "the first segment, tied {tied}"
+            );
+            assert_eq!(
+                pool.footprint_inputs(&model, Some((0, 1)))
+                    .expect("the header alone is enough")
+                    .host_resident_bytes,
+                if tied { 0 } else { TOKEN_TABLE },
+                "the first segment's table at home, tied {tied}"
             );
             assert_eq!(
                 charged(Some((1, 3))),

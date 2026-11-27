@@ -10310,3 +10310,32 @@ keep**: re-measure all three shapes — one process (the 27B), a drafter model b
 owner's reply beside a held card — with the small model PROVEN to run here (`route=local` in its `request complete`,
 `device=Cuda` at its load): a Qwen2.5-0.5B asked from here for that check was served from Australia, and the run
 measured nothing.
+
+## A split's first segment keeps its token table in system memory (2026-11-27, FUTURE_WORK #507)
+
+**What it replaced.** A split's first segment loaded `token_embd.weight` on its card, where the only
+reader is the lookup — a few rows a forward. On Qwen3.8-27B that is 682 MB (Q4_K, 248,320 × 5,120)
+of an RTX 3070 Laptop's 6.5 GB budget: two of its layers, or the 0.8B guessing model beside them. On
+11-27 (27l) this card ran [0, 18) at an estimated 5,685 MB, the 0.8B fell to the processor, and the US
+card at [18, 64) had 441 MB of cache room for a flow claiming ~483.
+
+**Prior art.** llama.cpp keeps its input layer on the processor always: "there is very little benefit
+to offloading the input layer, so always keep it on the CPU" (`llama_model::load_tensors`,
+`pimpl->dev_input = { cpu_dev, … }`). We take it only for a split's first segment that does not finish
+the model: a whole model's drafter feeds its card-side picks back in (#233), and reading each back to
+look it up on the host would wait every step. A tied table is the output head (and a block drafter's
+guess head beside a tied first segment), so it stays on the card.
+
+**What a change must keep.**
+- ONE rule (`split::token_table_in_system_memory`) for the loader, the loader's card count
+  (`segment_weight_bytes`) and the pool's (`ModelWeights::segment`, `host_resident`): a table placed
+  by one and charged by another is the estimate that refuses a load that fits, or admits one that
+  does not.
+- The lookup copies its rows to the card (`SplitModel::embed_tokens`), from the ids as they ARRIVED
+  (`forward_inner_body`'s `arrived`; the captured step's input before its `to_device`) — never from a
+  copy already on the card, which reads back.
+- A captured step never looks a host table up inside the capture: a pageable copy there is replayed
+  from an address no longer holding the step's rows (`htod_copies_so_far`). `decode_step_with_graph`
+  makes the rows before it and hands them in (`Prepared::Embedded`), as Gemma 4's per-layer inputs are
+  (#295). Test `a_first_segment_with_its_table_at_home_answers_as_with_it_on_the_card`: bit for bit
+  against the table on the card, every step after the recording captured.

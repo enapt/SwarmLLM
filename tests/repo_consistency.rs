@@ -15923,7 +15923,8 @@ fn the_capacity_snapshot_built_on_the_network_loop_reads_nothing_from_the_card()
 ///
 /// Outside that one method the table may only be asked about (`is_some`,
 /// `is_none`, how many rows it has — `SplitModel::embedding_rows`, which a
-/// forward's token ids are checked against), set aside (`take`), put back
+/// forward's token ids are checked against — and where it lives,
+/// `SplitModel::token_table_at_home`, #507), set aside (`take`), put back
 /// (`=`) or handed on whole to a view of the model (`split::view`, #449: a
 /// `.clone()` the statement does nothing else with — the view's own lookups go
 /// through ITS `embed_tokens`). Anything else reads it.
@@ -15948,6 +15949,7 @@ fn token_table_reads_outside_embed_tokens(text: &str) -> Vec<(usize, String)> {
                 ".take()",
                 " = ",
                 ".as_ref().map(TokenEmbedding::rows)",
+                ".as_ref().map(TokenEmbedding::device)",
             ]
             .iter()
             .any(|ok| after.starts_with(ok))

@@ -102,6 +102,15 @@ impl TokenEmbedding {
         }
     }
 
+    /// Where the table is kept — the segment's device, or the machine's
+    /// memory for a split's first segment (`token_table_in_system_memory`).
+    pub(crate) fn device(&self) -> Device {
+        match self {
+            Self::Dense(e) => e.embeddings().device().clone(),
+            Self::Quantized(q) => q.table.device(),
+        }
+    }
+
     /// How many rows the table holds: the ids it can look up are `0..rows`.
     pub(crate) fn rows(&self) -> usize {
         let dims = match self {

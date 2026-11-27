@@ -16,6 +16,7 @@ use crate::model::lora::LoraAdapter;
 use super::entry::BatchItem;
 use super::kv_cache::{KvCacheStore, KvHome};
 use super::model::SplitModel;
+use super::token_embedding::TokenEmbedding;
 use super::{FfnVariant, LayerVariant, SsmState};
 use crate::inference::layers::{LayerOnTheCard, LayerWeights};
 use crate::inference::residual_norm::Residual;
@@ -94,6 +95,11 @@ enum Prepared<'a> {
         embedded: &'a Tensor,
         per_layer: &'a Tensor,
     },
+    /// The step's token rows, looked up in a table kept in the machine's
+    /// memory (#507) and copied to the card before the capture: copied inside
+    /// it, they would be replayed from a host address that no longer holds
+    /// this step's rows (`htod_copies_so_far`).
+    Embedded(&'a Tensor),
 }
 
 /// Gemma 4 E2B/E4B: build a recorded step's token embedding and per-layer
@@ -111,6 +117,7 @@ enum Staged {
     Nothing,
     Rows(Tensor),
     Inputs(Tensor, Tensor),
+    Embedded(Tensor),
 }
 
 impl Staged {
@@ -122,6 +129,7 @@ impl Staged {
                 embedded,
                 per_layer,
             },
+            Staged::Embedded(embedded) => Prepared::Embedded(embedded),
         }
     }
 }
@@ -1756,6 +1764,11 @@ impl SplitModel {
         } else {
             input.clone()
         };
+        // A table kept in the machine's memory (#507) is read here, from the
+        // ids as they arrived, its rows copied up outside the capture.
+        let embedded_at_home = (!skip_embedding && self.token_table_at_home())
+            .then(|| self.embed_tokens(&input))
+            .transpose()?;
         let input = input.to_device(&device).map_err(SwarmError::internal)?;
         // Gemma 4 E2B/E4B's per-layer inputs, from the step's tokens: the rows
         // are gathered on the processor, so at least they are copied up here.
@@ -1776,7 +1789,7 @@ impl SplitModel {
                     )
                 }
             }
-            _ => Staged::Nothing,
+            _ => embedded_at_home.map_or(Staged::Nothing, Staged::Embedded),
         };
         let (dims, dtype) = template;
         let out = Tensor::zeros(dims, dtype, &device).map_err(SwarmError::internal)?;
@@ -2180,6 +2193,9 @@ impl SplitModel {
         let is_first = self.tok_embeddings.is_some();
         let is_last = self.output.is_some();
 
+        // The ids as they arrived: a table kept in the machine's memory
+        // (#507) is read from these, never from a copy on the card.
+        let arrived = input;
         // Move input to model's device if needed (e.g. CPU → CUDA)
         let input = input
             .to_device(&self.device)
@@ -2195,13 +2211,18 @@ impl SplitModel {
                         embedded,
                         per_layer,
                     }) => (Tensor::clone(embedded), Some(Tensor::clone(per_layer))),
+                    Some(Prepared::Embedded(embedded)) => (Tensor::clone(embedded), None),
                     Some(Prepared::PerLayerRows(rows)) => {
                         let embedded = self.embed_tokens(&input)?;
                         let per_layer = self.per_layer_inputs_from_rows(rows, &embedded)?;
                         (embedded, per_layer)
                     }
                     Some(Prepared::Nothing) | None => {
-                        let embedded = self.embed_tokens(&input)?;
+                        let embedded = self.embed_tokens(if self.token_table_at_home() {
+                            arrived
+                        } else {
+                            &input
+                        })?;
                         let per_layer = self.per_layer_inputs_for(&input, &embedded)?;
                         (embedded, per_layer)
                     }
@@ -2851,12 +2872,30 @@ impl SplitModel {
     /// Widening the result rather than the table costs a few KB per step
     /// instead of gigabytes of residency.
     fn embed_tokens(&self, input: &Tensor) -> Result<Tensor, SwarmError> {
-        let mut emb = self
+        let table = self
             .tok_embeddings
             .as_ref()
-            .ok_or_else(|| SwarmError::Internal("Missing embedding table".into()))?
-            .forward(input)
+            .ok_or_else(|| SwarmError::Internal("Missing embedding table".into()))?;
+        // A table kept in the machine's memory (#507) is read there and its
+        // rows copied to the segment's device — the ids go to it first, a
+        // no-op where they arrived from the host. Never inside a capture: a
+        // captured step is handed its rows made before it (`Prepared::Embedded`).
+        let at_home = self.token_table_at_home();
+        let ids = if at_home {
+            input
+                .to_device(&table.device())
+                .map_err(|e| SwarmError::Internal(format!("Embedding ids: {e}")))?
+        } else {
+            input.clone()
+        };
+        let mut emb = table
+            .forward(&ids)
             .map_err(|e| SwarmError::Internal(format!("Embedding forward failed: {e}")))?;
+        if at_home {
+            emb = emb
+                .to_device(&self.device)
+                .map_err(|e| SwarmError::Internal(format!("Embedding rows to the card: {e}")))?;
+        }
         if emb.dtype() != candle_core::DType::F32 {
             emb = emb
                 .to_dtype(candle_core::DType::F32)
@@ -2869,6 +2908,16 @@ impl SplitModel {
                 .map_err(|e| SwarmError::Internal(format!("Embedding scale failed: {e}")))?;
         }
         Ok(emb)
+    }
+
+    /// Is the token table kept in the machine's memory while the segment
+    /// runs elsewhere (`split::token_table_in_system_memory`, #507)? Then a
+    /// lookup copies its rows up, and a captured step is handed them.
+    pub(crate) fn token_table_at_home(&self) -> bool {
+        self.tok_embeddings
+            .as_ref()
+            .map(TokenEmbedding::device)
+            .is_some_and(|table| !table.same_device(&self.device))
     }
 
     /// What [`Self::embed_tokens`] multiplies a table row by: Gemma models
@@ -2890,7 +2939,12 @@ impl SplitModel {
     /// computer reads as if it had looked them up itself, so they must be
     /// this lookup's, bit for bit (FUTURE_WORK #316).
     pub(crate) fn embed_ids(&self, ids: &[i64]) -> Result<Tensor, SwarmError> {
-        let input = Tensor::new(ids, &self.device)
+        let at = if self.token_table_at_home() {
+            candle_core::Device::Cpu
+        } else {
+            self.device.clone()
+        };
+        let input = Tensor::new(ids, &at)
             .and_then(|t| t.unsqueeze(0))
             .map_err(|e| SwarmError::Internal(format!("Token tensor: {e}")))?;
         self.embed_tokens(&input)

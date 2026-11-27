@@ -649,6 +649,42 @@ pub(crate) fn host_resident(name: &str) -> bool {
     name == PER_LAYER_TOKEN_TABLE
 }
 
+/// Does a segment keep `token_embd.weight` in the machine's memory rather than
+/// on its device? Yes for a split's FIRST segment that does not finish the
+/// model, of a model shipping its own `output.weight` (#507): there nothing
+/// reads the table but the lookup — a few rows a forward, copied up — so on a
+/// card it was hundreds of megabytes doing almost nothing (the 27B's 682 MB:
+/// two of its layers, or the guessing model beside them). A tied table IS a
+/// last segment's output head, and a block drafter beside a tied first segment
+/// reads its guesses through it (`TokenEmbedding::quantized_table`), so a tied
+/// table stays where the segment runs.
+///
+/// Prior art: llama.cpp keeps its input layer on the processor always — "there
+/// is very little benefit to offloading the input layer, so always keep it on
+/// the CPU" (`llama_model::load_tensors`, `dev_input = cpu`). A whole model
+/// here keeps it on the card all the same: a drafter feeds its own card-side
+/// picks back in, and reading each back would put a wait in every step.
+///
+/// The ONE answer for the loader, which places the table, its own count of a
+/// card's weights (`segment_weight_bytes`) and the pool's
+/// (`process_pool::ModelWeights::segment`). A/B `SWARMLLM_TOKEN_TABLE=card`.
+pub(crate) fn token_table_in_system_memory(is_first: bool, is_last: bool, tied: bool) -> bool {
+    static CARD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let on_card =
+        *CARD.get_or_init(|| std::env::var("SWARMLLM_TOKEN_TABLE").as_deref() == Ok("card"));
+    table_home_is_the_machine(is_first, is_last, tied, on_card)
+}
+
+/// [`token_table_in_system_memory`] with its switch handed in, for tests.
+pub(crate) fn table_home_is_the_machine(
+    is_first: bool,
+    is_last: bool,
+    tied: bool,
+    switched_to_the_card: bool,
+) -> bool {
+    is_first && !is_last && !tied && !switched_to_the_card
+}
+
 /// Which segment of a model loads a GGUF tensor ([`segment_tensor`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SegmentTensor {

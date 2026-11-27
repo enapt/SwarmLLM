@@ -271,6 +271,12 @@ A DFlash drafter (`block_drafter.gguf` beside a WHOLE model) is loaded by **`spl
 
 → `docs/invariants/inference.md` § "A sliding window is cut where it binds", § "A windowed layer's cache keeps its window", § "A windowed layer is charged as its window", § "A family's attention scale is read", § "Gemma 3: each layer turns at its own rate", § "A file's RoPE scaling is read for every family", § "Gemma 4: each layer's attention has a shape of its own", § "Gemma 4's E2B and E4B: shared caches and per-layer inputs"
 
+## A split's first segment keeps its token table in system memory (2026-11-27, #507)
+
+`split::token_table_in_system_memory` (first segment, not last, untied — llama.cpp keeps its input layer on the processor) is the one answer for the loader, `segment_weight_bytes` and `ModelWeights::segment` (the table is `host_resident`). `SplitModel::embed_tokens` copies its rows up; a CAPTURED step is handed them made before the capture (`Prepared::Embedded`) — never a lookup of a host table inside one. A whole model and a tied table keep it on the card. A/B `SWARMLLM_TOKEN_TABLE=card`. Test `a_first_segment_with_its_table_at_home_answers_as_with_it_on_the_card`.
+
+→ `docs/invariants/inference.md` § "A split's first segment keeps its token table in system memory"
+
 ## A model that cannot write replies is refused off its header (2026-10-15)
 
 **`GgufTensorMeta::refusal`** (→ `ModelRefusal`, one wording via `into_error`): no loader for the family, or an embedding model (`<arch>.pooling_type` non-zero — Ollama's rule). Asked by the loader, the router (`SharedState::refused_model`), auto-manage, the user's download, `/v1/models` and the dashboard list (`cannot_chat`). Before a header exists, `model::huggingface::is_embedding_repo` reads HuggingFace's tags. A new path that runs or fetches a model asks it.

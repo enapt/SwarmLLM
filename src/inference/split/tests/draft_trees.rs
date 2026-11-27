@@ -499,6 +499,89 @@ fn a_first_segment_records_its_shapes_before_a_reply_needs_them() {
     );
 }
 
+/// A first segment whose token table is kept in the machine's memory (#507)
+/// answers every step as it did with the table on the card — bit for bit:
+/// the lookup copies its rows, and a CAPTURED step is handed them made before
+/// the capture (`Prepared::Embedded`). Copied inside the capture, they would
+/// be replayed from a host address no longer holding the step's rows. The
+/// steps after the recording make no graph, so each WAS captured.
+///
+/// ⚠ Gated as above.
+#[cfg(feature = "candle-cuda")]
+#[test]
+fn a_first_segment_with_its_table_at_home_answers_as_with_it_on_the_card() {
+    let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
+    let card = match Device::new_cuda(0) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("SKIPPED table at home: no CUDA device ({e})");
+            return;
+        }
+    };
+    let mut model = first_segment_on(&card);
+    let table = match model.tok_embeddings.as_ref() {
+        Some(TokenEmbedding::Dense(e)) => e.embeddings().clone(),
+        _ => unreachable!("the test model's table is dense"),
+    };
+    let steps = |model: &mut SplitModel| -> Vec<Vec<f32>> {
+        let kv = KvCacheStore::new(std::time::Duration::from_secs(60));
+        let widths = model.widths_to_record();
+        let finished =
+            crate::inference::model_worker::record_check_widths(model, &kv, &widths, &|| true)
+                .unwrap();
+        assert!(finished, "nothing asked the recording to stop");
+        let prompt = model.tensor_from_ids(&PROMPT).unwrap();
+        let mut out = vec![rows_of(
+            &model
+                .forward_prompt_in_chunks_keeping(&prompt, 0, &kv, "home", None, false, 0, None)
+                .unwrap()
+                .0
+                .to_device(&Device::Cpu)
+                .unwrap(),
+        )
+        .concat()];
+        // A reply's first step is a one-off in every reply (nothing of its
+        // own ran before it: `one_offs_in_a_reply_after_the_recording`); each
+        // step after it is counted.
+        let mut before = None;
+        for (i, id) in [7u32, 19, 3, 44].into_iter().enumerate() {
+            let next = model.tensor_from_ids(&[id]).unwrap();
+            let (step, _) = model
+                .forward_prompt_in_chunks_keeping(
+                    &next,
+                    PROMPT.len() + i,
+                    &kv,
+                    "home",
+                    None,
+                    false,
+                    0,
+                    None,
+                )
+                .unwrap();
+            out.push(rows_of(&step.to_device(&Device::Cpu).unwrap()).concat());
+            before.get_or_insert_with(|| model.one_off_forwards());
+        }
+        assert_eq!(
+            model.one_off_forwards() - before.expect("four steps"),
+            0,
+            "a step after the reply's first made its graph"
+        );
+        out
+    };
+    assert!(!model.token_table_at_home());
+    let on_card = steps(&mut model);
+    model.tok_embeddings = Some(TokenEmbedding::Dense(candle_nn::Embedding::new(
+        table.to_device(&Device::Cpu).unwrap(),
+        table.dim(1).unwrap(),
+    )));
+    assert!(model.token_table_at_home());
+    let at_home = steps(&mut model);
+    assert_eq!(
+        at_home, on_card,
+        "a step read differently with its table at home"
+    );
+}
+
 /// A tree WIDER than the per-row kernel's rows, read on the card in one
 /// forward — a worker's check of a flow's levels — comes out row by row as
 /// each row's own path read fresh, and was read by the TILED kernel

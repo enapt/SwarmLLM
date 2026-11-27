@@ -61,6 +61,8 @@ pub use self::entry::{trim_split_model_cache, SplitModelEntry, SplitModelKey};
 pub use self::executor::{Capture, SkipBridge};
 #[cfg(any(feature = "candle-cuda", test))]
 pub(crate) use self::gguf_meta::holds_weights_the_card_cannot_read;
+#[cfg(test)]
+pub(crate) use self::gguf_meta::table_home_is_the_machine;
 pub(crate) use self::gguf_meta::tensor_byte_size;
 pub use self::gguf_meta::{
     ensure_gguf_header, explain_gguf_parse_error, gguf_arch_str, read_gguf_header,
@@ -70,7 +72,8 @@ pub use self::gguf_meta::{
 };
 pub(crate) use self::gguf_meta::{
     host_resident, kv_layers, kv_sources, layer_is_recurrent, query_scale, routed_expert_bytes,
-    segment_tensor, SegmentTensor, SlidingWindow, PER_LAYER_TOKEN_TABLE,
+    segment_tensor, token_table_in_system_memory, SegmentTensor, SlidingWindow,
+    PER_LAYER_TOKEN_TABLE,
 };
 pub use self::kv_cache::{KvCacheStore, KvHome, KvOccupancy};
 pub(crate) use self::loader::{card_free_for_a_load, card_pool_reusable_for_a_load};

@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #507**; #505 is reserved for the carry ask, memory `next_up.md` item 5b). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #508**; #505 is reserved for the carry ask, memory `next_up.md` item 5b). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -1014,6 +1014,38 @@ refused on memory whatever the tree's width (11-27 27j/27k/27l: 259 MB in use pl
 state pairs a recurrent layer against a 200-441 MB budget) — the claim is an upper bound
 (`SsmState::bytes_a_flowing_forward_may_add`: `previous` and the last rollback copy are let go as
 the forward begins), and a card run sized to the card leaves no flow room; both are #228's residual.
+
+#### #507 — A split's first segment kept its token table on the card: hundreds of megabytes read a few rows a forward
+
+**Was**: the first segment of a split loaded `token_embd.weight` onto its card — the 27B's 682 MB (Q4_K,
+248,320 × 5,120): two of its layers, or the 0.8B guessing model beside them. 11-27 27l: here [0, 18)
+was estimated 5,685 MB of a 6,507 MB budget and the 0.8B drafter fell to the processor; the US card at
+[18, 64) then had 441 MB for a flow claiming ~483 (#506 residual (5)).
+
+**Prior art**: llama.cpp keeps its input layer on the processor always — "there is very little benefit
+to offloading the input layer, so always keep it on the CPU" (`llama_model::load_tensors`,
+`dev_input = cpu`; `~/llama.cpp-ref/src/llama-model.cpp:1600`). We take it for a split's first segment
+only: a whole model's drafter feeds its card-side picks back in, and reading each back would put a wait
+in every step.
+
+**Built (11-27)**: `split::token_table_in_system_memory(is_first, is_last, tied)` — a first segment not
+finishing the model, of an untied model — is the one answer for the loader (the table loaded on the
+processor), its card count (`segment_weight_bytes`) and the pool's (`ModelWeights::segment`: the table
+moves from `head` to `host_resident`). `SplitModel::embed_tokens` reads such a table where it is and
+copies the rows up; a captured decode step is handed them made before the capture (`Prepared::Embedded`
+— copied inside it, they would replay from a host address no longer holding the step's rows). A tied
+table stays where the segment runs (a last segment's head; a block drafter's guesses read through it).
+A/B `SWARMLLM_TOKEN_TABLE=card`. Tests `a_first_segments_token_table_is_counted_in_the_machines_memory`,
+`a_first_segment_with_its_table_at_home_answers_as_with_it_on_the_card` (card, bit for bit, every step
+after the recording captured).
+
+**Residual**: (1) a coordinator prices a PEER's first segment by the same rule, so an older peer leading
+a split is offered one table's room too many on its card — its refusal re-plans, and it is gone once
+peers run this release; (2) on the real link (11-27 27m/27n, here [0, 21) → US [21, 64), 8 replies)
+the table read at home served every reply (n-gram loop 3.07-3.12 tok/s, against 2.9-3.0 at [0, 18) with
+it on the card in 27l) — three more layers here, where the card had held 18 — but the 0.8B guessing
+model still does not fit beside 21 of the 27B's layers (room for 19 beside its Q8_0, 20 beside its
+Q4_K_M); at [0, 18) it does, and the flow then waits on the far card's memory (#506 (5)).
 
 #### #484 — For up to a minute after a peer's last reply of one model, the next model's plan prices that peer's room as still held
 `P2` · routing · **OPEN** — 2026-11-20 · history: #447, #479, #481 (5), #482 (whose measured case this is)
