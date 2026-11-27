@@ -195,6 +195,10 @@ fn contribution_name(contribution: &swarmllm_types::ContributionMode) -> &'stati
 pub struct StorageBudget {
     pub bytes: u64,
     pub limited_by: StorageLimit,
+    /// Bytes the disk stands below the share this node always leaves free on
+    /// it — read off the disk whatever limit bound `bytes`
+    /// (`short_of_the_reserve_bytes`).
+    pub short_of_the_reserve: u64,
 }
 
 impl StorageBudget {
@@ -204,18 +208,14 @@ impl StorageBudget {
     }
 
     /// Bytes the disk stands below the share this node always leaves free on
-    /// it (`FREE_DISK_RESERVE_PCT`). Under it the budget is exactly what is
+    /// it (`FREE_DISK_RESERVE_PCT`). Under it the budget is at most what is
     /// held, and a copy given back lowers the budget with it (gotcha #1143).
+    /// Read off the disk, never off `limited_by`: a node over its own
+    /// configured limit as well is labelled by that limit, and its disk still
+    /// takes nothing until the shortfall is paid (the pre-release review,
+    /// 2026-11-27).
     pub fn short_of_the_reserve_bytes(&self) -> u64 {
-        match self.limited_by {
-            StorageLimit::FreeDisk {
-                free_mb,
-                reserve_mb,
-            } => reserve_mb
-                .saturating_sub(free_mb)
-                .saturating_mul(1024 * 1024),
-            _ => 0,
-        }
+        self.short_of_the_reserve
     }
 
     /// The room giving back `bytes` makes: what is left of them once the
@@ -293,7 +293,9 @@ pub fn storage_budget(
         bytes = mib(max_disk_mb);
         limited_by = StorageLimit::MaxDisk { max_disk_mb };
     }
+    let mut short_of_the_reserve = 0;
     if let Some(disk) = disk {
+        short_of_the_reserve = disk.reserve_bytes().saturating_sub(disk.free_bytes);
         let by_disk =
             held_bytes.saturating_add(disk.free_bytes.saturating_sub(disk.reserve_bytes()));
         if by_disk < bytes {
@@ -304,7 +306,11 @@ pub fn storage_budget(
             };
         }
     }
-    StorageBudget { bytes, limited_by }
+    StorageBudget {
+        bytes,
+        limited_by,
+        short_of_the_reserve,
+    }
 }
 
 /// Everything the storage budget is computed from, read ONCE.
@@ -857,6 +863,23 @@ mod tests {
             "spare copies pay the shortfall"
         );
         assert_eq!(short.room_a_give_back_makes(mib(89_500)), mib(500));
+        // Over its own configured limit too: the budget names that limit, and
+        // the disk's shortfall still stands before any room.
+        let over = storage_budget(
+            50_000,
+            1_000_000,
+            &level,
+            disk(11_000, 1_000_000),
+            mib(60_000),
+        );
+        assert_eq!(
+            over.limited_by,
+            StorageLimit::Explicit {
+                max_storage_mb: 50_000
+            }
+        );
+        assert_eq!(over.short_of_the_reserve_bytes(), mib(89_000));
+        assert_eq!(over.room_a_give_back_makes(mib(2_000)), 0);
         // Above the reserve, all of it is room.
         let roomy = storage_budget(
             500_000,

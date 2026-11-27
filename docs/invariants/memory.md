@@ -3613,7 +3613,9 @@ disk was still 91 GB under. The rule predates the ranges (#371 holes and scarce 
 full disk under its reserve could give copies away for nothing; the ranges made a full card ask for its run.
 
 **What a change must keep**: a new reader of "how much room would this computer make" asks
-`room_a_give_back_makes`; never `StorageRoom::room_mb` built from an unadjusted spare. Prior art: Ceph's
+`room_a_give_back_makes`; never `StorageRoom::room_mb` built from an unadjusted spare. The shortfall
+(`StorageBudget::short_of_the_reserve`) is read off the disk whatever limit bound the budget — a first cut read
+it off `StorageLimit::FreeDisk` and missed a node over its own configured limit too (pre-release review). Prior art: Ceph's
 `backfillfull_ratio` refuses recovery onto an OSD that cannot take the data.
 
 ### A spawn leaves the card the room the plan's other ranges here will be grown into (2026-11-19, #481 (5))

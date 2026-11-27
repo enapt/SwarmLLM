@@ -8826,7 +8826,9 @@ grep `^| N |`).
   a chain's segment); the ranges made a full card ask it for its run. Fix: **`StorageBudget::room_a_give_back_makes`**
   — what a give-back frees pays the disk's shortfall under its reserve (`short_of_the_reserve_bytes`) before any
   of it is room — the ONE answer for the spare a computer advertises (`storage_room`, so the planners here and
-  on peers see no room) and for prune's all-or-nothing room check and its stop. Test
+  on peers see no room) and for prune's all-or-nothing room check and its stop. The shortfall is read off the disk,
+  not off the limit that bound the budget: a node over its own configured limit as well is labelled by that limit
+  (the pre-release review, same evening). Test
   `a_give_back_on_a_disk_under_its_reserve_pays_the_shortfall_first` (red with the shortfall ignored). Prior art:
   Ceph refuses backfill onto an OSD past `backfillfull_ratio`, so recovery never moves data toward a device that
   cannot take it.
