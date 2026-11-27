@@ -1472,11 +1472,13 @@ struct FlowRun<'a, 'r> {
     /// held their places could save (#369).
     dead_here: u32,
     dead_rows_here: u32,
-    /// This tree's own rows in the answers taken in turn (`next_in_turn`),
-    /// and of them the rows the walk had already left by then
-    /// (`rows_off_the_walk`): read in turn, before its own draws, the walk
-    /// holds every draw the far end had made as it began serving the forward,
-    /// so these are rows it computed that no draw could use (#510 step 0).
+    /// This tree's own rows in the answers read (`take_answer`), and of them
+    /// the rows the walk had already left by then (`rows_off_the_walk`):
+    /// read before its own draws, the walk holds every draw of the forwards
+    /// before it — all the far end knew as it served this one where it walks
+    /// — so these are rows it computed that no draw could use (#510 step 0).
+    /// Low, never high, for a forward joined behind another
+    /// (`take_together`), weighed after the one ahead of it moved the walk.
     rows_answered: u32,
     rows_dead_at_service: u32,
     /// Answers held back because the walk can reach none of their rows
@@ -2421,22 +2423,6 @@ impl FlowRun<'_, '_> {
         }
     }
 
-    /// The next answer in turn, its own rows counted against the walk as it
-    /// stands (`rows_dead_at_service`, #510 step 0). Only this epoch's own
-    /// rows. Two counts run low, never high: an answer joined behind another
-    /// (`tail_join_on`, a shape finishing here) is weighed before the one
-    /// ahead of it moves the walk, and after a miss the walk waits for the
-    /// bonus row (`bonus_waiting`) before it moves.
-    fn next_in_turn(&mut self) -> Option<Answer> {
-        let answer = self.in_turn.next_due()?;
-        let sent = &answer.0;
-        if sent.epoch == self.epoch && sent.lead == 0 {
-            self.rows_answered += sent.rows as u32;
-            self.rows_dead_at_service += rows_off_the_walk(&self.flow, sent.first_row, sent.rows);
-        }
-        Some(answer)
-    }
-
     /// Count an answer about to be read here whose rows the walk can no
     /// longer reach (`dead_here`). Only this epoch's own rows: an older
     /// answer's rows are remapped, and a rebase's lead is the walk's path.
@@ -2513,7 +2499,7 @@ impl FlowRun<'_, '_> {
                 if self.reaches_the_walk(next) || !self.reads_on_from_the_dead(next) {
                     break;
                 }
-                let answer = self.next_in_turn().expect("peeked");
+                let answer = self.in_turn.next_due().expect("peeked");
                 self.dead_waited += 1;
                 self.waiting_dead.push(answer);
             }
@@ -2538,7 +2524,7 @@ impl FlowRun<'_, '_> {
             return Vec::new();
         }
         let mut due = std::mem::take(&mut self.waiting_dead);
-        due.push(self.next_in_turn().expect("peeked"));
+        due.push(self.in_turn.next_due().expect("peeked"));
         let mut rows: usize = due.iter().map(|a| a.0.rows).sum();
         if !tail_join_on() {
             return due;
@@ -2558,7 +2544,7 @@ impl FlowRun<'_, '_> {
                 break;
             }
             rows += next.0.rows;
-            due.push(self.next_in_turn().expect("peeked"));
+            due.push(self.in_turn.next_due().expect("peeked"));
         }
         due
     }
@@ -2772,6 +2758,13 @@ impl FlowRun<'_, '_> {
             });
         }
         let mut result = result.expect("an error answer returned above");
+        // #510 step 0: this answer's own rows the walk had already left as it
+        // is read, before its own draws — in any shape, the turn order's or
+        // the far end's walk (`take` hands those straight here).
+        if current && sent.lead == 0 {
+            self.rows_answered += sent.rows as u32;
+            self.rows_dead_at_service += rows_off_the_walk(&self.flow, sent.first_row, sent.rows);
+        }
         // The peer's own time with the answer (#388), before this node's
         // layers after the peers' replace the result.
         let served_us = result.served_us;
