@@ -1037,8 +1037,19 @@ mod manager_tests {
     }
 
     /// [`fleet`], the whole holder ranked above this node for the model or
-    /// below it.
+    /// below it. This node's identity is random, and over EIGHT parts by both
+    /// ranks one near the top (or bottom) has no id of the million above (or
+    /// below) it in a few percent of runs (the suite met one, 2026-11-27): it
+    /// is drawn again, as `coverage`'s fixtures do (gotcha #1103).
     fn fleet_with(whole_ranked_above: bool) -> Fleet {
+        loop {
+            if let Some(fleet) = fleet_drawn(whole_ranked_above) {
+                return fleet;
+            }
+        }
+    }
+
+    fn fleet_drawn(whole_ranked_above: bool) -> Option<Fleet> {
         let mut config = Config::default();
         config.auto_manage.min_replicas = 1;
         let (state, manager) = make_test_manager_with_config(config);
@@ -1074,7 +1085,7 @@ mod manager_tests {
             .collect();
         let local = state.identity.node_id().clone();
         let whole_id = if whole_ranked_above {
-            ids_ranked_above(&local, &parts, 1).expect("an id ranked above")[0].clone()
+            ids_ranked_above(&local, &parts, 1)?[0].clone()
         } else {
             (0u32..1_000_000)
                 .map(|i| NodeId(*blake3::hash(&i.to_le_bytes()).as_bytes()))
@@ -1084,8 +1095,7 @@ mod manager_tests {
                             p, &local, id,
                         )
                     })
-                })
-                .expect("an id ranked below")
+                })?
         };
         let whole = peer_with_id(&state, whole_id, Some(ceiling_for(32)), 100_000);
         let other = peer_with_disk(&state, 2, Some(ceiling_for(32)), 100_000);
@@ -1107,12 +1117,12 @@ mod manager_tests {
         let mut trust = crate::types::ModelTrustInfo::new_discovered();
         trust.trust_level = crate::types::ModelTrustLevel::DemandVerified;
         state.models.model_trust.insert(mid.clone(), trust);
-        Fleet {
+        Some(Fleet {
             state,
             manager,
             mid,
             whole,
-        }
+        })
     }
 
     /// #506: this node's card is planned ONE run of three whole parts, where
