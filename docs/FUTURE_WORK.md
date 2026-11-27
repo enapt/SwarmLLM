@@ -6995,7 +6995,7 @@ reverse — and its post-verify keeps drafting while the target verifies (up to 
 between the two; here they would.
 
 #### #504 — A split whose guesses flow is priced as the sum of its stages, but runs at its slowest stage's pace
-`P2` · perf-split · **OPEN — measure first** — 2026-11-26 · evidence: `docs/plans/faster_than_local.md` § 15, `docs/plans/small_slices.md` § 2 and step 6, `docs/invariants/scheduling.md` § "A tree that flows"
+`P2` · perf-split · **OPEN — MEASURED, build it** (2026-11-27) — 2026-11-26 · evidence: `docs/plans/faster_than_local.md` § 15, `docs/plans/small_slices.md` § 2 and step 6, `docs/invariants/scheduling.md` § "A tree that flows"
 
 **Seen** (arithmetic on measured stage times, nothing run): the planner prices a chain as the SUM of its segments'
 costs (`scheduler::parallax::chain_cost_terms`, every `VertexCost` field added up). That is a reply's time when one
@@ -7012,6 +7012,15 @@ real link, `ARM_GAP_S=130` past #503's hold, Australia's range checked all on it
 (`real_link_bal292`) read 0.94x and 0.85x for 3 and 6 layers moved, but every arm after the first measured the far
 computer's slow processor copy (#461, fixed in v0.3.312), so it decides nothing. Build only if a moved split point
 wins ≥ 5% on prose AND code; otherwise close this and the balance half of #411 "Also".
+
+**Measured 2026-11-27 — it wins** (`~/swarmllm-gate/deep/fr/real_link_bal313/`, released v0.3.313 both ends, live node
+stopped, ABBA flowhalf/flow23/flow23/flowhalf, 160 tokens a request, `SWARMLLM_FLOW_COPY_STORE=0`, Australia's range
+wholly on its card every arm by `bal313_au_poll.txt`: [26,48) 22 layers, then [23,48) 25; no request error). 3 layers
+moved off this node: prose 16.99 / 18.48 → 20.27 / 22.53 tok/s (mean 17.7 → 21.4, **+21%**), code 44.42 / 42.55 →
+46.53 / 47.06 (43.5 → 46.8, **+8%**) — both runs of the moved split above both runs of today's, on both kinds. Prose
+gained more than the stage-time ceiling (+8-9%) predicted, so the drafting side costs this node more than ~14 ms a
+forward on prose; flow20 (6 moved) was dropped from this sitting for time — the min-max search, not a fixed
+offset, should find the point. One request per kind per arm: the DP is built and A/B'd in ONE binary.
 
 **Design if it wins**: price a flow-capable plan by its bottleneck — the slowest stage's forward, this node's drafting
 counted on the stage that drafts — and break ties by the sum, so rounds and a single segment price as today. The
