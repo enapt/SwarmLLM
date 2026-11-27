@@ -6995,6 +6995,11 @@ moved off this node: prose 16.99 / 18.48 → 20.27 / 22.53 tok/s (mean 17.7 → 
 gained more than the stage-time ceiling (+8-9%) predicted, so the drafting side costs this node more than ~14 ms a
 forward on prose; flow20 (6 moved) was dropped from this sitting for time — the min-max search, not a fixed
 offset, should find the point. One request per kind per arm: the DP is built and A/B'd in ONE binary.
+Per forward, from the `DSD: a tree that flowed is complete` lines (`forwards`, `drafting_ms`, `near_ms`,
+`here_ms_a_forward`, `far_said_ms_median`): drafting a steady **12.5-14.6 ms** both ways; this node's layers 21.7-24.2
+(26) → 19.4-20.2 (23), ~0.88 ms a layer; this node's stage 34.3-38.8 → 31.9-34.4; the far end said 31-45 → 30-49
+median (least 21-28) — its forward barely rose with 3 more layers. So the bottleneck WAS this node's stage, and the
+drafting it carries is the missing planner input (~35-40% of the stage).
 
 **Design if it wins**: price a flow-capable plan by its bottleneck — the slowest stage's forward, this node's drafting
 counted on the stage that drafts — and break ties by the sum, so rounds and a single segment price as today. The
