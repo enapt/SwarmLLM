@@ -6902,32 +6902,6 @@ StarCoder2, inert while refused).
 
 ### Memory and admission
 
-#### #503 — A far computer that just served one split shape refuses the next shape for two minutes, then serves it slow
-`P1` · memory · **PARTIAL — the cause fixed on main; the real-link check waits for a release Australia runs** — 2026-11-26 · history: rig `~/swarmllm-gate/deep/fr/real_link_n312r/` (`run_n312r.sh`, the n311r arms on .313)
-
-On the real link to Australia (aa3d1e66, on v0.3.313), five arms of the 14B, each on a fresh node here:
-"start and finish" (dsdwfit: here [0,12) + [38,48), AU [12,38)), the flow (flowq: AU [16,48) + the head),
-dsdwfit, flowq, dsdwfit. Arms 1, 2 and 4 ran (dsdwfit prose 8.8 / code 25.7; flowq 15.9-16.3 / 34.2-38.7 tok/s).
-**Arm 3 failed every request.** Its first two asks, 44 s and 63 s after arm 2's last request ended and was
-released on AU (`Told the peers … told=1`, 13:52:32.816Z), were refused up front: "Layers 12..38 … do not fit
-beside the copy this node is running for a conversation now … try again in about 2 minutes. Of layers 12..38,
-14 would load here" (`ModelProcessPool::peer_load_refusal` → `busy_beside` → `WorkerHandle::in_use_beside`).
-So AU counted its [16,48) copy in use by ANOTHER request, though the flow's request had been released: the
-.312 step-aside (`charge_segment_as_split`'s `partly_overlaps_a_charged_range`) is skipped for a worker in use.
-The third ask (78 s after) loaded [12,38) BESIDE [16,48) (AU advertised both, 46 of their 58 layers on its card),
-wrote 31 tokens at 0.79 tok/s, then every forward timed out (52, 36, 40 s) until AU was ejected from the model's
-plans. Arm 5 found [12,38) held and ran at ~0.7x arm 1 (prose 6.3, code 18.7).
-
-**Cause (2026-11-26, CAUSED on the evidence that can be had from here):** straggling forwards. The flow's last request completed at 13:52:32.813Z and was released at .816, and Australia went on answering four more of its forwards (results at .845-.910 reached "No pending channel"); each stamped the released hold again. `run_n313g.sh` asked the same second shape ~130 s after the flow (past the window): Australia stepped aside, held [12,38) alone with all 26 layers on its card, and the shape ran prose 10.4 / code 32.1 tok/s. **Fixed**: a released id is remembered for the window and only a pass from the first position holds the worker again (`HoldStamp`, `WorkerHandle::released`; test `a_released_requests_straggling_forward_does_not_hold_the_worker`, red with the check off); the refusal now says what holds the copy. Prior art: HTTP/2 ignores frames in flight on a reset stream (RFC 9113 § 5.1); vLLM V1 skips output for an aborted request. Still to do: n312r's five arms again once Australia runs the release carrying it (arm 3 must step aside, not refuse); and the beside-copy's 0.79 tok/s and timeouts, a slow placement in its own right. The original hypotheses, kept for the record: (a) a flow leaves a hold on the far worker that
-the end-of-request release does not clear (`forget_conversation` clears `kv_holders` by the request id only; a
-response slot left in `responses` would also read as use); (b) any request's hold lasts the 120 s window
-whatever the release (then it is not flow-specific); (c) another requester used AU's [16,48) copy in that
-window. Runs: arm 3 again ≥ 130 s after arm 2 (past `CONVERSATION_GAP_SECS`): stepping aside → the hold is the
-cause; and a dsdw (non-flow) arm before it at the same 45 s gap → flow vs any request. ⚠ AU's own log is out
-of reach: an up-front "in use" refusal should name what holds the copy (a reply in flight or a conversation,
-how long ago), or the next report from a far computer is as blind as this one. The 0.79 tok/s and the timeouts
-of the beside-copy are their own question: the copy put 12 layers on AU's processor.
-
 #### #462 — A flowing split drafts, then runs this node's layers, one after the other: overlap them
 `P3` · perf-split · **OPEN** (measured: worth ~2-3 ms a forward on one card, behind #411's balance) — 2026-11-15 · evidence: `docs/invariants/scheduling.md` § "A tree that flows" (*Rows and levels, a third time*), `examples/two_device_overlap_bench.rs`
 
@@ -8672,6 +8646,49 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-11-27** (#503)
+- #503 — `P1` — **A far computer that just served one split shape refused the next shape for two minutes, then
+  served it slow.** On the real link to Australia (v0.3.313), a "start and finish here" split asked 44 s after a
+  flowing one was refused up front ("do not fit beside the copy this node is running for a conversation now"), and the
+  third ask loaded [12,38) BESIDE the flow's [16,48) (12 layers on Australia's processor), wrote 31 tokens at 0.79 tok/s
+  and timed out. Cause: the flow's straggling forwards — steps already on the wire when the reply ended — reached the
+  far worker after the release and re-stamped its conversation hold (`WorkerHandle::note_conversation`), so the copy read
+  as in use for `CONVERSATION_GAP_SECS` and the .312 step-aside was skipped. Fixed in v0.3.314 (`62080bdbd`, review
+  `10b314bd0`, sweep `d1c19e2d9`): a released request is remembered for the window (`WorkerHandle::released`, pruned at
+  every stamp and every release) and only a pass from the first position (`HoldStamp::OpensAPass`) holds the worker
+  again; the refusal now says what holds the copy. **Real link, 2026-11-27 (`~/swarmllm-gate/deep/fr/real_link_n314r/`,
+  v0.3.314 both ends, ~1.5 min between arms)**: dsdwfit / flowq / dsdwfit / flowq / dsdwfit all served, 0 refusals, 0
+  errors — prose 11.04 / 16.60 / 10.49 / 17.93 / 10.94, code 30.93 / 34.01 / 31.51 / 41.68 / 30.64 tok/s; Australia
+  replaced its copy each arm, ONE range wholly on its card every poll ([12,38) 26 card layers, [16,48) 32 —
+  `n314r_au_poll.txt`). A copy loaded beside one genuinely in use still puts the new range's overflow on the processor:
+  that is #461's placement, not this. The entry as it stood:
+
+  #### #503 — A far computer that just served one split shape refuses the next shape for two minutes, then serves it slow
+  `P1` · memory · **PARTIAL — the cause fixed on main; the real-link check waits for a release Australia runs** — 2026-11-26 · history: rig `~/swarmllm-gate/deep/fr/real_link_n312r/` (`run_n312r.sh`, the n311r arms on .313)
+
+  On the real link to Australia (aa3d1e66, on v0.3.313), five arms of the 14B, each on a fresh node here:
+  "start and finish" (dsdwfit: here [0,12) + [38,48), AU [12,38)), the flow (flowq: AU [16,48) + the head),
+  dsdwfit, flowq, dsdwfit. Arms 1, 2 and 4 ran (dsdwfit prose 8.8 / code 25.7; flowq 15.9-16.3 / 34.2-38.7 tok/s).
+  **Arm 3 failed every request.** Its first two asks, 44 s and 63 s after arm 2's last request ended and was
+  released on AU (`Told the peers … told=1`, 13:52:32.816Z), were refused up front: "Layers 12..38 … do not fit
+  beside the copy this node is running for a conversation now … try again in about 2 minutes. Of layers 12..38,
+  14 would load here" (`ModelProcessPool::peer_load_refusal` → `busy_beside` → `WorkerHandle::in_use_beside`).
+  So AU counted its [16,48) copy in use by ANOTHER request, though the flow's request had been released: the
+  .312 step-aside (`charge_segment_as_split`'s `partly_overlaps_a_charged_range`) is skipped for a worker in use.
+  The third ask (78 s after) loaded [12,38) BESIDE [16,48) (AU advertised both, 46 of their 58 layers on its card),
+  wrote 31 tokens at 0.79 tok/s, then every forward timed out (52, 36, 40 s) until AU was ejected from the model's
+  plans. Arm 5 found [12,38) held and ran at ~0.7x arm 1 (prose 6.3, code 18.7).
+
+  **Cause (2026-11-26, CAUSED on the evidence that can be had from here):** straggling forwards. The flow's last request completed at 13:52:32.813Z and was released at .816, and Australia went on answering four more of its forwards (results at .845-.910 reached "No pending channel"); each stamped the released hold again. `run_n313g.sh` asked the same second shape ~130 s after the flow (past the window): Australia stepped aside, held [12,38) alone with all 26 layers on its card, and the shape ran prose 10.4 / code 32.1 tok/s. **Fixed**: a released id is remembered for the window and only a pass from the first position holds the worker again (`HoldStamp`, `WorkerHandle::released`; test `a_released_requests_straggling_forward_does_not_hold_the_worker`, red with the check off); the refusal now says what holds the copy. Prior art: HTTP/2 ignores frames in flight on a reset stream (RFC 9113 § 5.1); vLLM V1 skips output for an aborted request. Still to do: n312r's five arms again once Australia runs the release carrying it (arm 3 must step aside, not refuse); and the beside-copy's 0.79 tok/s and timeouts, a slow placement in its own right. The original hypotheses, kept for the record: (a) a flow leaves a hold on the far worker that
+  the end-of-request release does not clear (`forget_conversation` clears `kv_holders` by the request id only; a
+  response slot left in `responses` would also read as use); (b) any request's hold lasts the 120 s window
+  whatever the release (then it is not flow-specific); (c) another requester used AU's [16,48) copy in that
+  window. Runs: arm 3 again ≥ 130 s after arm 2 (past `CONVERSATION_GAP_SECS`): stepping aside → the hold is the
+  cause; and a dsdw (non-flow) arm before it at the same 45 s gap → flow vs any request. ⚠ AU's own log is out
+  of reach: an up-front "in use" refusal should name what holds the copy (a reply in flight or a conversation,
+  how long ago), or the next report from a far computer is as blind as this one. The 0.79 tok/s and the timeouts
+  of the beside-copy are their own question: the copy put 12 layers on AU's processor.
 
 **Closed 2026-11-26** (#502)
 - #502 — `P2` — **A coder model drew the coder drafter at a size tie, though the general one agrees with it more.**
