@@ -670,7 +670,12 @@ impl AutoShardManager {
         // `copies` holders by the rank every holder computes alike keep
         // theirs whatever either view says (`coverage::kept_by_rank`,
         // `AutoShardManager::rank_by`: by the model only where every holder
-        // follows the ranges, else by the part as older releases rank).
+        // follows the ranges, else by the part as older releases rank). A
+        // holder whose advertisement this node has not seen reads as one that
+        // does not follow them, so two nodes knowing different things of the
+        // same holders can still rank apart — here that costs at most an
+        // off-run copy: every give-back first needs `copies` OTHER cards
+        // holding the part inside their runs (the line below).
         if held_in_runs >= plan.copies as usize
             && !super::kept_by_rank(
                 shard_id,

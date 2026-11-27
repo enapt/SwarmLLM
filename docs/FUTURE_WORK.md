@@ -1083,7 +1083,11 @@ curve (`ModelProcessPool::segment_cost_curve` → `footprint_inputs(model, None)
 the card, as a whole model does), so a head is offered the layers it was before — the 14B A/B below read
 `room_for=Some(19)` beside the 1.5B drafter in both arms. The curve charges every segment the token
 table and the output head alike (a middle segment loads neither); a curve per position (first / middle /
-last, as `RangeWeights::excess_layers` weighs a peer) would offer the room. **Measured on the 14B**
+last, as `RangeWeights::excess_layers` weighs a peer) would offer the room. ⚠ Not a walk UP from the
+line in `local_layers_leaving`'s guest pass (#376 walks only down): its `first_range_mb` prices `[0, n)`,
+and a split starting AND finishing here also loads the output head at its last range (~640 MB on the
+14B) — an over-offer there is #376's failure (the drafter to the processor, no flow, half speed); the
+planner fixes the positions only after this bound. **Measured on the 14B**
 (t507, 2026-11-27 16:59-17:18Z, this card + AU's 3060, the 1.5B Q8_0 drafter flowing, the planner's cut
 `[0, 16)` both ways, the copy store off, ABBA, 8 replies an arm): table at home prose 22.2-26.1 (median
 24.1) and code 49.0-51.9 tok/s; on the card (two arms) prose 19.6-26.2 (22.2 / 23.4) and code 43.7-49.1

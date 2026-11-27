@@ -7458,9 +7458,11 @@ impl ModelProcessPool {
     /// flowed: on the 14B to Australia (t507, 2026-11-27) a reply planned
     /// `[0, 26)` spawned 21 of its 26 layers on the card, the next eight were
     /// planned `[0, 16)` — the card's — and ran streamed checks at 13-18 prose
-    /// and 35-36 code tok/s against the flow's 20-26 and 48-49. Processor
-    /// placements, experts kept in system memory over the range, and a range
-    /// it does not hold: no. llama.cpp places by the layer (`dev_layer`).
+    /// and 35-36 code tok/s against the flow's 20-26 and 48-49. A processor
+    /// placement, a range reaching the layers whose experts stay in system
+    /// memory (`CardSplit::ExpertsInRam`, the held range's first ones, as
+    /// `processor_layers_of` reads them), and a range it does not hold: no.
+    /// llama.cpp places by the layer (`dev_layer`).
     fn worker_runs_ranges_on_the_card(
         &self,
         model_id: &ModelId,
@@ -22029,6 +22031,59 @@ mod tests {
         assert!(
             !p.runs_whole_on_the_card(&m),
             "the worker as a whole is still short of the card"
+        );
+        p.workers.remove(&m);
+
+        // A held range that does not start the model puts its processor run
+        // at its START where this build does (`RunPlace::Start`, #461 (4)):
+        // the card's slice is the range's END.
+        let far = CardSplit::Layers {
+            on_card: 6,
+            total: 14,
+        };
+        let worker = fake_worker_handle_split(false, None, false, now, Some(far)).await;
+        p.workers.insert(m.clone(), Arc::clone(&worker));
+        worker.record_segment_placed_as_spawned((14, 28));
+        let (run_start, run_end) = p.processor_layers_of(&m, (14, 28), Some(far));
+        assert_eq!(run_end - run_start, 8, "fixture: 8 layers on the processor");
+        if crate::inference::split::hybrid::processor_run_first() {
+            assert_eq!(run_start, 14, "fixture: the run is the range's start");
+        }
+        let on_card: (u32, u32) = if run_start > 14 {
+            (14, run_start)
+        } else {
+            (run_end, 28)
+        };
+        assert!(
+            p.runs_whole_on_the_card_for_a_plan(&m, &[on_card], Requester::Swarm),
+            "the slice {on_card:?} the card runs, beside the processor run [{run_start}, {run_end})"
+        );
+        assert!(
+            !p.runs_whole_on_the_card_for_a_plan(&m, &[(14, 28)], Requester::Swarm),
+            "the whole held range reaches its processor run"
+        );
+        assert!(
+            !p.runs_whole_on_the_card_for_a_plan(&m, &[(0, 14)], Requester::Swarm),
+            "a range the worker does not hold"
+        );
+        p.workers.remove(&m);
+
+        // Experts kept in system memory: the held range's first `in_ram`
+        // layers run their experts on the processor, the rest wholly on the card.
+        let moe = CardSplit::ExpertsInRam {
+            in_ram: 4,
+            total: 28,
+        };
+        let worker = fake_worker_handle_split(false, None, false, now, Some(moe)).await;
+        p.workers.insert(m.clone(), Arc::clone(&worker));
+        worker.record_segment_placed_as_spawned((0, 28));
+        assert!(
+            p.runs_whole_on_the_card_for_a_plan(&m, &[(4, 16)], Requester::Swarm),
+            "a slice past the layers whose experts stay in system memory"
+        );
+        assert!(
+            !p.runs_whole_on_the_card_for_a_plan(&m, &[(3, 16)], Requester::Swarm),
+            "a slice reaching one of them"
         );
         p.workers.remove(&m);
 
