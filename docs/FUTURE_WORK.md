@@ -3776,7 +3776,7 @@ TAG=fresh303, 02:26-02:29Z, the thread sampler beside it in `threads_fresh303.tx
 the owner is #146 (4).
 
 #### #510 — A split's far card computes every row of a guess tree, the ones the walk has already left too
-`P2` · perf-split · **OPEN** (step 0's first half MEASURED: 86-90% of the far's rows dead at service; its second half next) — 2026-11-27 · evidence: memory `archive/fable_flow_law_1127.md`
+`P2` · perf-split · **OPEN** (step 0 MEASURED and PASSED: 86-90% of the far's rows dead at service; 24 rows +24-29% over 8 on a card) — 2026-11-27 · evidence: memory `archive/fable_flow_law_1127.md`
 
 In a flow whose far end draws (`peer-last`), the far learns the walk ~62 ms before this node, yet serves every row it is
 sent: the head counts dead rows only for a shape it finishes itself (`dsd_flow::note_dead_here`, `sent.here`), and
@@ -3799,8 +3799,20 @@ under 35% of rows are dead at service or 8 against 24 rows differ by under 15%. 
 2026-11-27 (t511d, 20:56Z, `463c07b0f`'s code in a CUDA build, the 14B to AU's 3060, the 1.5B helper, the copy
 store off, one reply each, 160 tokens): 85.8-89.5% of rows dead at service** — prose 2,474 / 2,848, 2,971 / 3,319,
 2,525 / 2,825, 2,706 / 3,026; code 1,125 / 1,311 — the shape's own arithmetic (one row of a level's 8 on the walk,
-so ~7/8 of the next level hangs off rows it left). Far past the kill line; the second half (the far card's forward
-at 8 against 24 rows) decides whether it pays. Then
+so ~7/8 of the next level hangs off rows it left). Far past the kill line. **The second half MEASURED the same
+evening** (`~/swarmllm-gate/deep/rows510/`, `prefill_bench` SPEC sweep as a tree, the 14B's layers 0-22 on this
+3070 Laptop — a far range cannot be fed token ids, and a layer's row cost is the same wherever it sits — ~520
+positions, min of 7 pairs, two rounds, live node stopped, under the kit): 1 row 12.2 ms, 8 rows 14.4-14.9, 16 rows
+16.6-17.3, 24 rows 18.1-18.6 — **24 against 8 rows +24-29%, past the 15% line** (3 rows read 16.1-18.6, above 8: a
+shape the bench did not record ahead, not the card's cost). So a far forward cut from ~24 rows to the ~3 alive
+would spend about a third less on its layers; the output head (all rows' logits) is not in this figure. Both
+halves pass: build it, for the release after v0.3.316 (the far end must run it). **Correction (implementation
+plan, Fable, read from the code the same night — `memory/issue510_plan_1127.md`): the far has NO walk today** — it
+is sent no row tokens and draws one token a row, the head walks; the count above is what it COULD skip once told
+its rows' tokens and the head's walk row (both trailers exist: `draft_tokens`, `flow_walk`). Its cache appends, so
+the far keeps its LIVE rows compacted (a row-to-slot map per request) and answers a skipped row `u32::MAX`; a dense
+far captures at most 8 rows, so live rows pad to 8. Gated on a new bit (`FLOW_LIVE_ROWS`) and a flag the head sets.
+Then
 build behind `SWARMLLM_FLOW_LIVE_ROWS=0` (read at the far), rig it with this card as the far over a delayed link
 (§ 13), and the real link once the far runs the release. Prior art: PipeInfer (2407.11798 § IV-D) cancels invalid
 queued runs, a node polling a flag mid-run; FlowSpec (2507.02620) and SpecPipe (2504.04104) prune rows after a verify,
