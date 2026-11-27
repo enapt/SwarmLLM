@@ -2023,6 +2023,13 @@ Rules that follow:
    `fetch` has no intermediate bytes, so it cannot have an inactivity timeout.
    The chat tab streams, which is why its 30 s `authFetch` default bounds only
    time-to-headers and is harmless there.
+   Compare streams too, and its backstop (`COMPARE_BACKSTOP_MS`) was still a
+   TOTAL: 600 s, "derived" from a first-token cap the daemon had since raised to
+   an hour for a measured or still-moving read (`MEASURED_FIRST_TOKEN_MAX`,
+   #430), and timing the whole reply, so a long answer still arriving from a slow
+   processor was cut off at 10 minutes. Since 2026-11-27 it is a SILENCE limit,
+   re-armed by every event, set past that hour (the v0.3.314 sweep). A derived
+   number goes stale when what it was derived from moves: cite the constant.
 
 ## "At this machine" is decided once, from the socket AND the headers (2026-09-23)
 

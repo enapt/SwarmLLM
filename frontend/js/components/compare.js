@@ -8,10 +8,12 @@
 (function() {
   var U = App.utils;
 
-  // Last-resort backstop for a compare request, in ms. Deliberately as long as
-  // the longest single wait the daemon permits for a generation, so it can only
-  // fire after the node has itself given up — see the comment at its use.
-  var COMPARE_BACKSTOP_MS = 600000;
+  // Last-resort backstop for a compare request, in ms of SILENCE: re-armed by
+  // every event the stream sends, so a long reply that keeps arriving is never
+  // cut off. Longer than the longest wait the daemon permits for a first word
+  // (`remote_generate::MEASURED_FIRST_TOKEN_MAX`, an hour), so it can only fire
+  // after the node has itself given up — see the comment at its use.
+  var COMPARE_BACKSTOP_MS = 3660000;
 
   // Live elapsed seconds on each pending card, so a slow processor node looks
   // like it is working rather than frozen. Report #009: "The user has no way to
@@ -205,10 +207,19 @@
         // tightest ceiling was in another file nobody grepped.
         //
         // What remains is a last-resort backstop, not a judgement about how
-        // long an answer may take: it matches the longest single wait the
-        // daemon itself permits (`remote_generate`'s 600 s first-token
-        // deadline), so it can only fire once the node has already given up.
-        var timeoutId = setTimeout(function() { controller.abort(); }, COMPARE_BACKSTOP_MS);
+        // long an answer may take: it measures SILENCE, not the whole reply
+        // (a flat 10 minutes cut off long answers still arriving from a slow
+        // processor), and is longer than the longest wait the daemon itself
+        // permits for a first word (`remote_generate::MEASURED_FIRST_TOKEN_MAX`,
+        // an hour, for a far computer's measured or still-moving prompt read),
+        // so it can only fire once the node has already given up. Fetch has no
+        // idle timeout of its own (whatwg/fetch#1870): re-arm on each event.
+        var timeoutId = null;
+        var armBackstop = function() {
+          clearTimeout(timeoutId);
+          timeoutId = setTimeout(function() { controller.abort(); }, COMPARE_BACKSTOP_MS);
+        };
+        armBackstop();
 
         // The stream is re-assembled into the same non-streaming shape the
         // card renderer and the history entry already read — which is what the
@@ -224,6 +235,7 @@
         var streamError = null;
         var streamBody = null;
         var onEvent = function(evt) {
+          armBackstop();
           if (!evt || !evt.type) return;
           if (evt.type === 'content_block_delta') {
             var d = evt.delta || {};

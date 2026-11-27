@@ -14,6 +14,8 @@ copy again. A refusal for a copy in use now also says how long ago that copy's l
 asked can read why. The change runs on the computer serving the far part, so it takes effect once that computer
 has this release.
 
+**The Compare page no longer gives up on a long answer after ten minutes.** It stopped any comparison at ten minutes, even while the words were still arriving from a slow computer, and even though a far computer reading a long prompt is allowed up to an hour before its first word. It now gives up only after an hour with nothing arriving at all.
+
 **Also:** a computer's record of released requests is trimmed at every release too, so it stays small on a model that gets no new work (found by the pre-release review, no visible change); and the README's Llama 3.3 70B row is out until it is measured again: its three-computer route needs the US
 computer, which has been offline, and the table shows only figures from the last seven days.
 
