@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #509**; #505 is reserved for the carry ask, memory `next_up.md` item 5b). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #510**; #505 is reserved for the carry ask, memory `next_up.md` item 5b). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -8783,6 +8783,21 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
+**Closed 2026-11-27** (#509)
+- #509 — `P1` — **A split's first computer evicted the small model guessing for its replies when the flow
+  balance widened its layers by one, and every reply after it ran 3-4x slower.** Found measuring the README's
+  14B row (t316rd, 2026-11-27, this card + AU's 3060, the 1.5B drafter flowing): the flow balance (#504)
+  moved this node's `[0, 16)` to `[0, 17)`; growing the worker books the range whole (the base it drops counts
+  nothing, #461), so the growth's reclaim took the idle 1.5B guessing for that very reply (2,139 MB), which came
+  back as a guest to 272 MB free and ran on the processor: prose 5.5-6.8 and code 11.5 tok/s against 21-24 and
+  48-52, for the rest of the session (both arms). #461's step-aside stood only at the split rung, after the
+  reclaims. Fixed: `grow_worker` replaces an idle worker FIRST where `step_aside_for` (now the one answer both
+  ask) would place the range afresh and the replacement fits the card standing free once the worker's own
+  charge is back (`replacement_fits_the_card_as_it_stands`) and the machine. Test
+  `an_idle_worker_whose_new_range_takes_in_its_own_is_replaced_before_another_model_gives_way` (red with the
+  new rung switched off; A/B `SWARMLLM_GROWTH_RETIRE_FIRST=0`). Prior art: Ollama unloads a runner that `needsReload` rather than
+  another (`server/sched.go`); llama.cpp's server keeps a draft model loaded with its target.
+
 **Closed 2026-11-27** (#508)
 - #508 — `P1` — **A split's head whose worker held a wider range across card and processor never let its tree
   flow, though the slice it served ran wholly on the card.** The flow needs every segment on a card
@@ -8800,8 +8815,13 @@ grep `^| N |`).
   where the loader put it (`processor_layers_of`); a processor placement, a range it does not hold, or one
   reaching the run, no. Test: `a_plans_layers_with_no_worker_yet_run_on_the_card_where_the_planner_gave_the_card_room`
   (a live `[0, 28)` split with 13 on the card: the card's slice flows, one reaching the run does not, red with
-  the worker asked whole). Prior art: llama.cpp places by the layer (`dev_layer(il)`), so whether a step runs on
-  the card is a fact about the layers it reads.
+  the worker asked whole; since extended to a held range whose processor run is its START and to experts kept in
+  system memory, red with that reading removed). Prior art: llama.cpp places by the layer (`dev_layer(il)`), so
+  whether a step runs on the card is a fact about the layers it reads. ⚠ **Not reproduced on the real link on
+  demand**: two sittings forcing a `[0, 26)` warm-up (t508, t508b, 2026-11-27 18:00-18:26Z, one pretending this node
+  held only `[0, 16)` for the replies) planned every reply `[0, 26)` — the planner counts the warm worker's resident
+  range whatever the pretended holdings — and the 1.5B never fitted beside 26 layers; the shape arose by itself in
+  t507 from a far range left by an earlier sitting.
 
 **Closed 2026-11-27** (#500)
 - #500 — `P3` — **A CUDA build's unit tests read this machine's graphics card: six failed together that each pass

@@ -625,6 +625,20 @@ enum SplitRung {
     SteppedAside,
 }
 
+/// Why a range asked of an idle worker is placed afresh rather than beside
+/// what it holds ([`WorkerHandle::step_aside_for`], #461) — asked by the split
+/// rung and, before any other model's card memory is taken, by the growth
+/// (#509).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StepAside {
+    /// The range takes in one charged in the worker's base, which the worker
+    /// drops as it loads the range — memory `subsumed_charge` counts as nothing.
+    TakesInItsBase,
+    /// The range shares layers with a held one while neither holds the other:
+    /// the worker would keep both, a copy of the shared layers beside the new.
+    OverlapsAHeldRange,
+}
+
 /// How long a GPU-resident model must have gone unused before another model
 /// may take the card from it.
 ///
@@ -3056,6 +3070,34 @@ impl WorkerHandle {
                     .any(|c| strictly_subsumes(incoming, c.range) && c.cost == RangeCost::default())
             })
             .unwrap_or(false)
+    }
+
+    /// Is `segment` better placed afresh than beside what this worker holds —
+    /// and the worker idle, so it can be replaced ([`StepAside`], #461)? `None`
+    /// where it is not, the worker is in use, or the A/B switch keeps the
+    /// split (`SWARMLLM_GROWTH_OVER_BASE_RANGE=split`,
+    /// `SWARMLLM_GROWTH_ACROSS_HELD_RANGE=split`).
+    fn step_aside_for(
+        &self,
+        segment: (u32, u32),
+        shape: RunShape,
+        window: std::time::Duration,
+    ) -> Option<StepAside> {
+        if self.in_use(window) {
+            return None;
+        }
+        if self.takes_in_a_range_charged_in_its_base(segment)
+            && std::env::var("SWARMLLM_GROWTH_OVER_BASE_RANGE").as_deref() != Ok("split")
+        {
+            return Some(StepAside::TakesInItsBase);
+        }
+        if shape == RunShape::Plain
+            && self.partly_overlaps_a_charged_range(segment)
+            && std::env::var("SWARMLLM_GROWTH_ACROSS_HELD_RANGE").as_deref() != Ok("split")
+        {
+            return Some(StepAside::OverlapsAHeldRange);
+        }
+        None
     }
 
     /// Does `incoming` share layers with a charged range while neither holds
@@ -9697,19 +9739,7 @@ impl ModelProcessPool {
         // cannot fit in place falls back to recreating the pod (VPA's
         // eviction), never to running it starved.
         // A/B `SWARMLLM_GROWTH_OVER_BASE_RANGE=split` keeps the old split.
-        if may_step_aside
-            && handle.takes_in_a_range_charged_in_its_base(segment)
-            && !handle.in_use(self.conversation_window())
-            && std::env::var("SWARMLLM_GROWTH_OVER_BASE_RANGE").as_deref() != Ok("split")
-        {
-            tracing::info!(
-                model = %model_id,
-                layers = format!("[{}..{})", segment.0, segment.1),
-                "This range takes in the one this model's worker was started with — placing it \
-                 afresh rather than beside it, so the memory that range frees counts"
-            );
-            return Ok(SplitRung::SteppedAside);
-        }
+        //
         // Likewise a range that shares layers with one the worker holds, where
         // neither holds the other: the worker keeps both, so the split rung
         // put the new range's layers on the processor beside a card copy of
@@ -9724,19 +9754,26 @@ impl ModelProcessPool {
         // place of the old (`block_selection.py`, `should_choose_other_blocks`),
         // never a second span beside it. A/B
         // `SWARMLLM_GROWTH_ACROSS_HELD_RANGE=split` keeps the old split.
-        if may_step_aside
-            && shape == RunShape::Plain
-            && handle.partly_overlaps_a_charged_range(segment)
-            && !handle.in_use(self.conversation_window())
-            && std::env::var("SWARMLLM_GROWTH_ACROSS_HELD_RANGE").as_deref() != Ok("split")
-        {
-            tracing::info!(
-                model = %model_id,
-                layers = format!("[{}..{})", segment.0, segment.1),
-                "This range shares layers with one this model's worker holds — placing it \
-                 afresh rather than beside a copy of the layers they share"
-            );
-            return Ok(SplitRung::SteppedAside);
+        if may_step_aside {
+            if let Some(why) = handle.step_aside_for(segment, shape, self.conversation_window()) {
+                let layers = format!("[{}..{})", segment.0, segment.1);
+                match why {
+                    StepAside::TakesInItsBase => tracing::info!(
+                        model = %model_id,
+                        layers,
+                        "This range takes in the one this model's worker was started with — \
+                         placing it afresh rather than beside it, so the memory that range frees \
+                         counts"
+                    ),
+                    StepAside::OverlapsAHeldRange => tracing::info!(
+                        model = %model_id,
+                        layers,
+                        "This range shares layers with one this model's worker holds — placing \
+                         it afresh rather than beside a copy of the layers they share"
+                    ),
+                }
+                return Ok(SplitRung::SteppedAside);
+            }
         }
         let Some((split, room_mb)) = self.growth_split(model_id, segment, handle, 0) else {
             return Ok(SplitRung::Declined);
@@ -9875,7 +9912,41 @@ impl ModelProcessPool {
         // Whether the split rung stood aside for the retirement below: where
         // that retirement then cannot happen, the split serves after all.
         let mut stepped_aside = false;
-        if refused.on_gpu {
+        // An idle worker whose range it would place afresh anyway (#461) is
+        // replaced BEFORE any other model gives the card back, where the
+        // replacement fits the card standing free once the worker's own charge
+        // is back (#509). The reclaim below weighs the range as charged: a
+        // range taking in the worker's base is booked whole though the worker
+        // drops the base as it loads it, so it took other models' memory the
+        // base was about to give back. On the 14B to Australia (t316rd,
+        // 2026-11-27) the flow balance moved this node's `[0..16)` to
+        // `[0..17)`: 2,977 MB "needed" against a 6,601 MB budget, the idle
+        // 1.5B guessing for that very reply (2,139 MB) was reclaimed, came back
+        // to 272 MB free and guessed from the processor — that reply 6.4 tok/s
+        // against 20.7-23.2, no flow. Retired, `[0..17)` fits beside it. Prior
+        // art: Ollama's scheduler unloads a runner that `needsReload` and
+        // loads it afresh rather than evicting another runner for it
+        // (`server/sched.go`); llama.cpp's server keeps a draft model loaded
+        // with its target. A/B `SWARMLLM_GROWTH_RETIRE_FIRST=0`.
+        let retire_first = refused.on_gpu
+            && std::env::var("SWARMLLM_GROWTH_RETIRE_FIRST").as_deref() != Ok("0")
+            && handle
+                .step_aside_for(segment, shape, self.conversation_window())
+                .is_some()
+            && crate::inference::executor::without_starving_the_runtime(|| {
+                self.replacement_fits_the_card_as_it_stands(model_id, segment)
+                    && self.a_fresh_spawn_fits_in_place_of_the_worker(model_id, segment, requester)
+            });
+        if retire_first {
+            tracing::info!(
+                model = %model_id,
+                layers = format!("[{}..{})", segment.0, segment.1),
+                "This model's worker is idle and the range it is asked for would be placed \
+                 afresh — replacing it before any other model gives the card back, as the \
+                 range fits where the worker stands"
+            );
+            stepped_aside = true;
+        } else if refused.on_gpu {
             // Outside `spawn_lock` — the charge above took and released it —
             // because a reclaim unloads workers and waits for their processes to
             // exit.
@@ -10046,6 +10117,32 @@ impl ModelProcessPool {
             requester,
             held_mb,
         )
+    }
+
+    /// Would a fresh spawn of `segment` load WHOLLY on the card where
+    /// `model_id`'s worker stands — that worker's own charge given back,
+    /// nothing else reclaimed, the room the plan's other ranges here are left
+    /// (`room_for_the_plans_other_ranges`) — as the spawn's admission weighs it
+    /// (`admit_to_gpu_as`, a tenant's estimate)? False with no reading of the
+    /// card or the model's header. The growth asks it before taking any other
+    /// model's card memory (#509). Synchronous header reads: call it off the
+    /// runtime's workers.
+    fn replacement_fits_the_card_as_it_stands(
+        &self,
+        model_id: &ModelId,
+        segment: (u32, u32),
+    ) -> bool {
+        let budget = self.vram_budget_now();
+        let estimated =
+            self.estimate_gpu_footprint_mb(model_id, Some(segment), Tenancy::Tenant.kv_charge());
+        if budget == 0 || estimated == 0 {
+            return false;
+        }
+        self.vram_committed_mb()
+            .saturating_sub(self.vram_committed_by(model_id))
+            .saturating_add(estimated)
+            .saturating_add(self.room_for_the_plans_other_ranges(model_id, segment))
+            <= budget
     }
 
     /// Is `h` in use — by anyone, or (`beside`) by any request but that one?
@@ -18173,6 +18270,80 @@ mod tests {
         );
         assert!(h.segment_is_charged((0, 32)));
         assert_eq!(pool.vram_committed_mb(), 500 + 5440);
+    }
+
+    /// **An idle worker whose new range takes in its own is replaced before
+    /// another model gives the card back** (#509). The flow balance moved a
+    /// split's `[0..16)` here to `[0..17)` beside the idle model guessing for
+    /// it; the growth books the range whole (the base it drops counts as
+    /// nothing), so the reclaim took the idle model — though the range fits
+    /// beside it once the worker's own charge is back. The worker is replaced
+    /// and the idle model keeps the card; red with the new rung switched off
+    /// (the old ladder reclaims it and grows the worker). Its control is
+    /// `a_worker_that_cannot_grow_takes_the_card_back_from_an_idle_model`,
+    /// whose fresh spawn would need the idle model's room too.
+    #[tokio::test]
+    async fn an_idle_worker_whose_new_range_takes_in_its_own_is_replaced_before_another_model_gives_way(
+    ) {
+        let pool =
+            ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-grow-retire-first"));
+        pool.set_gpu_layers(-1);
+        let wanted = ModelId("wanted-14b".into());
+        let idle = ModelId("guesser-1.5b".into());
+        let mut inputs = seventy_b_inputs();
+        inputs.segment_layers = 48;
+        inputs.quantized_weight_bytes = 48 * 170 * 1024 * 1024;
+        inputs.kv = crate::inference::split::kv_budget::KvPrice::uniform(
+            48,
+            8,
+            64,
+            128,
+            crate::inference::layers::KvAttention::Standard,
+        );
+        pool.test_footprint_inputs.insert(wanted.clone(), inputs);
+        let base = pool.estimate_gpu_footprint_mb(&wanted, Some((0, 16)), KvCharge::Typical);
+        let wider = pool.estimate_gpu_footprint_mb(&wanted, Some((0, 17)), KvCharge::Typical);
+        assert!(
+            base > 0 && wider > base,
+            "fixture: priced ({base}, {wider})"
+        );
+        let idle_mb = 1_000;
+        // Room for everything first, to admit the fixture's workers.
+        pool.set_vram_budget_mb(base + idle_mb + 2 * wider);
+        admit_and_insert_gpu_worker(&pool, &idle, idle_mb, std::time::Duration::from_secs(3600))
+            .await;
+        let h = admit_and_insert_gpu_worker(&pool, &wanted, base, std::time::Duration::ZERO).await;
+        h.record_charged_segment((0, 16), 0);
+        // What the growth books for `[0..17)`, read off its refusal.
+        pool.set_vram_budget_mb(base + idle_mb);
+        let needed = pool
+            .charge_additional_segment(&wanted, (0, 17), &h, Requester::Swarm, RunShape::Plain)
+            .await
+            .expect_err("fixture: no room for the range as booked")
+            .needed_mb;
+        // The card: the booked growth fits once the idle model is gone (the
+        // old ladder's reclaim), and the replacement fits beside it.
+        let budget = (base + needed).max(idle_mb + wider);
+        assert!(
+            base + idle_mb + needed > budget,
+            "fixture: refused as it stands"
+        );
+        pool.set_vram_budget_mb(budget);
+        assert!(
+            pool.replacement_fits_the_card_as_it_stands(&wanted, (0, 17)),
+            "fixture: the replacement fits where the worker stands"
+        );
+
+        let outcome = pool
+            .grow_worker(&wanted, (0, 17), h, Requester::Swarm, RunShape::Plain)
+            .await
+            .expect("the idle worker is replaced");
+        assert!(matches!(outcome, Growth::Respawn), "replaced, not grown");
+        assert!(
+            pool.workers.get(&idle).is_some(),
+            "the idle model keeps the card"
+        );
+        assert!(pool.workers.get(&wanted).is_none(), "the worker retired");
     }
 
     /// **The guessing model never takes the card from another model** — not

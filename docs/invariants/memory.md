@@ -3571,6 +3571,31 @@ for them, and the guard has nothing to refuse there (`a_far_range_widened_at_its
 It still refuses a range widened at its END (`[2..5)` asked as `[2..8)`: the processor-first run is the held
 layers) and a card too short for the held layers beside a split's own costs — the guard test's fixture now.
 
+### An idle worker whose range would be placed afresh is replaced before another model gives way (2026-11-27, #509)
+
+The step-aside of #461 stood only at the SPLIT rung; the two reclaim rungs before it still ran. They
+weigh the range as BOOKED: a range taking in the worker's base is charged whole, the base it drops
+counting nothing (`subsumed_charge`), so the reclaim took other models' card memory the base was about
+to give back. Measured on the real link (t316rd, 2026-11-27, Qwen2.5-14B here `[0..16)` + AU's 3060
+`[16..48)`, the 1.5B Q8_0 guessing on this card, the flow): the flow balance (#504) moved this node's
+cut to `[0..17)`; the growth booked 2,977 MB against a 6,601 MB budget with 5,250 committed, reclaimed
+the idle 1.5B (2,139 MB, "Freeing graphics memory from an idle model"), which came back as a guest to
+272 MB free beside its conversation room and loaded on the processor. That reply ran streamed checks at
+6.4 tok/s against 20.7-23.2; in the second arm every reply after the move did (prose 5.5-6.8, code 11.5
+against 21-24 / 48-52), for the rest of the session. Now `grow_worker` asks first: an idle worker whose
+range `WorkerHandle::step_aside_for` would place afresh (`StepAside::TakesInItsBase` /
+`OverlapsAHeldRange`, the split rung's own answer) is retired before any reclaim where the replacement
+fits the card standing free once the worker's own charge is back
+(`replacement_fits_the_card_as_it_stands`: committed − its charge + the spawn's tenant estimate + the
+plan's other ranges' room ≤ the budget now) and the machine (`a_fresh_spawn_fits_in_place_of_the_worker`).
+Test `an_idle_worker_whose_new_range_takes_in_its_own_is_replaced_before_another_model_gives_way` (red
+with the rung off: the old ladder reclaims the idle model and grows). *Must keep*: a replacement that
+needs another model's room goes down the old ladder (control:
+`a_worker_that_cannot_grow_takes_the_card_back_from_an_idle_model`); a worker in use is never retired.
+Prior art: Ollama's scheduler unloads a runner that `needsReload` rather than another runner
+(`server/sched.go`); a Petals server loads a moved span in place of the old. A/B
+`SWARMLLM_GROWTH_RETIRE_FIRST=0`.
+
 ### A spawn leaves the card the room the plan's other ranges here will be grown into (2026-11-19, #481 (5))
 
 A split that starts and finishes here gives this node two ranges, and they arrive one by one: the first range's
