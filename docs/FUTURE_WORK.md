@@ -7001,6 +7001,17 @@ Per forward, from the `DSD: a tree that flowed is complete` lines (`forwards`, `
 median (least 21-28) — its forward barely rose with 3 more layers. So the bottleneck WAS this node's stage, and the
 drafting it carries is the missing planner input (~35-40% of the stage).
 
+**And 6 layers moved is WORSE — the far card has a cliff** (2026-11-27 04:18-04:31Z, `real_link_bal314/`, v0.3.314
+both ends, ABBA flow23/flow20/flow20/flow23, AU one range wholly on its card every poll): flow23 prose 19.90 / 17.77,
+code 45.11 / 39.81; **flow20 prose 13.58 / 14.29, code 33.33 / 40.51** (−26% / −13%). The far end's forward was flat
+from 22 to 25 layers (far said 27-35 ms median, longest queue 7-21 ms) and collapsed at 28 (24-70 ms median, longest
+queue 27-541 ms) while this node's stage fell to 25-30. So a far stage priced LINEARLY from the planner's per-layer
+figures would move ~8 layers on this link — past the cliff, slower than today. **Revised design**: balance on MEASURED
+stage times, not priced ones — move a layer off the drafting node only while the far end's flow figures stay unqueued
+(`far_queue_ms_most`, `far_said_ms_median` against `here_ms_a_forward`), and back when its queue grows (PipeLive's
+re-partitioning as the bottleneck drifts, arXiv 2604.12171; a closed loop, Petals' `MOVE_AT_MOST`-style one step at a
+time). The open-loop min-max over priced stages (PipeDream) is the wrong first build here.
+
 **Design if it wins**: price a flow-capable plan by its bottleneck — the slowest stage's forward, this node's drafting
 counted on the stage that drafts — and break ties by the sum, so rounds and a single segment price as today. The
 layer search is a shortest path over a layer graph today; a bottleneck objective is the classic min-max partition
