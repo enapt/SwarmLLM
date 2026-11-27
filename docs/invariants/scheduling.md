@@ -7296,7 +7296,7 @@ the candidates give this node, so in the plan that leaves the drafter room (#275
 evidence is that layers grown past it left every reply unguessed.
 
 **What a change must keep.** The cap never decides the tail (the tail is chosen without it). A cap measured with
-another far node or drafter is not applied. Every step is one layer, waits for four flows, and is kept only if its forwards ran no slower like for like. A/B in one binary:
+another far node or drafter is not applied. Every step is one layer, waits for four flows, and is kept only if its forwards ran no slower like for like. A step the plans did not take — the next four flows still at the cut it left — is not asked for again while `TRUSTED_FOR`, so no step is logged that moved nothing (the v0.3.315 pre-release review: it was asked again every four flows; `a_step_the_plans_cannot_take_is_not_asked_for_again_while_trusted`). A/B in one binary:
 `SWARMLLM_FLOW_BALANCE=0` (the balance still records). Tests: `flow_balance::tests::*` (the sittings' own figures),
 `parallax::tests::a_flowing_split_is_cut_where_its_flows_balanced_and_only_there`.
 

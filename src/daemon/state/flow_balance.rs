@@ -150,6 +150,12 @@ struct Balance {
     from: Option<u32>,
     /// Each cut's pace as last measured, while [`TRUSTED_FOR`].
     measured: HashMap<u32, Settled>,
+    /// Cuts a step asked for that the plans did not take — the flows after it
+    /// still ran at the cut it left (no room here for the drafter beside more
+    /// layers, none on the far end: `parallax::cut_for_the_flow`) — and when,
+    /// while [`TRUSTED_FOR`]. Not asked for again meanwhile, so no step is
+    /// logged that moved nothing (the v0.3.315 pre-release review).
+    out_of_reach: HashMap<u32, Instant>,
     /// The cut the flows below ran at.
     cut: u32,
     /// The latest flows at [`Self::cut`], [`FLOWS_A_STEP`] at most.
@@ -165,6 +171,7 @@ impl Balance {
             cap: None,
             from: None,
             measured: HashMap::new(),
+            out_of_reach: HashMap::new(),
             cut: 0,
             at_the_cut: VecDeque::new(),
             last_flow: now,
@@ -253,6 +260,9 @@ impl FlowBalances {
         balance
             .measured
             .retain(|_, settled| now.saturating_duration_since(settled.at) <= TRUSTED_FOR);
+        balance
+            .out_of_reach
+            .retain(|_, at| now.saturating_duration_since(*at) <= TRUSTED_FOR);
         let k = sample.layers_here;
         if balance.cut != k {
             balance.cut = k;
@@ -275,16 +285,26 @@ impl FlowBalances {
         };
         balance.measured.insert(k, settled);
         // A move is judged once, against the cut it left.
-        if let Some(left) = balance.from.take().filter(|&left| left != k) {
-            let slower = balance
-                .measured
-                .get(&left)
-                .and_then(|there| slower_than(&balance.at_the_cut, &there.pace));
-            if slower.is_some_and(|s| s > 1.0 + SLOWER_BY) {
-                balance.cap = Some(left);
-                balance.at_the_cut.clear();
-                return FlowBalanceStep::Undone;
+        match balance.from.take() {
+            Some(left) if left != k => {
+                let slower = balance
+                    .measured
+                    .get(&left)
+                    .and_then(|there| slower_than(&balance.at_the_cut, &there.pace));
+                if slower.is_some_and(|s| s > 1.0 + SLOWER_BY) {
+                    balance.cap = Some(left);
+                    balance.at_the_cut.clear();
+                    return FlowBalanceStep::Undone;
+                }
             }
+            // The flows after the step still ran where it left: the plans
+            // could not take the cut it asked for (still the cap).
+            Some(_) => {
+                if let Some(asked) = balance.cap {
+                    balance.out_of_reach.insert(asked, now);
+                }
+            }
+            None => {}
         }
         balance.cap = Some(k);
         let ratio = median(balance.at_the_cut.iter().map(|f| f.ratio).collect());
@@ -295,6 +315,9 @@ impl FlowBalances {
         } else {
             return FlowBalanceStep::Holds;
         };
+        if balance.out_of_reach.contains_key(&want) {
+            return FlowBalanceStep::Holds;
+        }
         // A cut measured lately is gone to only where it ran faster.
         if let Some(there) = balance.measured.get(&want) {
             let faster_there =
@@ -418,6 +441,38 @@ mod tests {
             FlowBalanceStep::Back
         );
         assert_eq!(layers(&b, later), Some(22));
+    }
+
+    /// A step the plans cannot take — no room here for the drafter beside one
+    /// more layer — leaves the flows at the cut it left. It is not asked for
+    /// again while trusted, so no line says a layer moved when none did (the
+    /// v0.3.315 pre-release review: it was asked again every four flows).
+    #[test]
+    fn a_step_the_plans_cannot_take_is_not_asked_for_again_while_trusted() {
+        let b = FlowBalances::default();
+        let t = Instant::now();
+        let at = |k, when| {
+            let mut last = FlowBalanceStep::Waiting;
+            for _ in 0..FLOWS_A_STEP {
+                last = b.record(M, &far(), D, flow(k, Prose, 32.0, 30.0, 40.0), when);
+            }
+            last
+        };
+        // The far end the slower: a layer back here is asked for.
+        assert_eq!(at(20, t), FlowBalanceStep::Back);
+        assert_eq!(layers(&b, t), Some(21));
+        // The plans keep 20: it holds there and asks for nothing.
+        assert_eq!(at(20, t), FlowBalanceStep::Holds);
+        assert_eq!(layers(&b, t), Some(20));
+        assert_eq!(at(20, t), FlowBalanceStep::Holds);
+        // Once that ages it is asked for again — at the next flow, the four
+        // at 20 being measured already: the room may have changed.
+        let later = t + TRUSTED_FOR + Duration::from_secs(1);
+        assert_eq!(
+            b.record(M, &far(), D, flow(20, Prose, 32.0, 30.0, 40.0), later),
+            FlowBalanceStep::Back
+        );
+        assert_eq!(layers(&b, later), Some(21));
     }
 
     /// `real_link_bal313/` (2026-11-27): at 26 layers here this node is the
