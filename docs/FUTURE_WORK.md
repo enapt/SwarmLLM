@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #511**; #505 is reserved for the carry ask, memory `next_up.md` item 5b). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #512**; #505 is reserved for the carry ask, memory `next_up.md` item 5b). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -8810,6 +8810,23 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-11-27** (#511)
+- #511 — `P1` — **A computer whose disk was under its reserve gave back copies of other models to make room it
+  could never use.** Found running main's build (with #506's card ranges) as the live node on the swarm's real
+  holdings, 2026-11-27 19:20-19:45Z: this node's disk had 11 GB free of 1,031 GB, 92 GB under the 10% it always
+  leaves free, where nothing is fetched (gotcha #1143). Below the reserve the storage budget is exactly what is
+  held, so `StorageRoom::room_mb` read the spare copies as room; the card-range planner planned this card a run
+  needing 1.2 GB it lacked, and prune gave back two of gemma-2-2b's four parts (720 MB, a model held whole here)
+  to make room for one, which the next pass no longer planned and the disk could not have taken anyway (each copy
+  given back lowers the budget with it). The room rule predates the card ranges (#371/#452: holes, scarce parts,
+  a chain's segment); the ranges made a full card ask it for its run. Fix: **`StorageBudget::room_a_give_back_makes`**
+  — what a give-back frees pays the disk's shortfall under its reserve (`short_of_the_reserve_bytes`) before any
+  of it is room — the ONE answer for the spare a computer advertises (`storage_room`, so the planners here and
+  on peers see no room) and for prune's all-or-nothing room check and its stop. Test
+  `a_give_back_on_a_disk_under_its_reserve_pays_the_shortfall_first` (red with the shortfall ignored). Prior art:
+  Ceph refuses backfill onto an OSD past `backfillfull_ratio`, so recovery never moves data toward a device that
+  cannot take it.
 
 **Closed 2026-11-27** (#509)
 - #509 — `P1` — **A split's first computer evicted the small model guessing for its replies when the flow

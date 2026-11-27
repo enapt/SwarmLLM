@@ -1137,13 +1137,20 @@ impl AutoShardManager {
         let floor_for_room = room_wanted.as_ref().map_or(usize::MAX, |room| room.floor);
         // All or nothing (#452): no copy goes for a room this pass cannot
         // complete (`room_this_pass_could_make`).
-        let room_could_make =
-            room_this_pass_could_make(&prune_candidates, max_per_model, floor_for_room);
+        // On a disk under its reserve, what goes pays that shortfall first
+        // (`StorageBudget::room_a_give_back_makes`, #511).
+        let (storage_budget, _, _) = super::storage_budget_now(&self.shared_state);
+        let room_could_make = storage_budget.room_a_give_back_makes(room_this_pass_could_make(
+            &prune_candidates,
+            max_per_model,
+            floor_for_room,
+        ));
         let room_completes = room_could_make >= room_bytes;
         if !room_completes && prune_candidates.iter().any(|c| c.to_make_room) {
             tracing::info!(
                 room_mb = room_bytes / (1024 * 1024),
                 could_make_mb = room_could_make / (1024 * 1024),
+                short_of_the_reserve_mb = storage_budget.short_of_the_reserve_bytes() / (1024 * 1024),
                 for_model = %room_wanted.as_ref().map_or("", |room| room.model.0.as_str()),
                 "DIAG: no copy given back for room — the copies that may go for it would not make \
                  all of it, and a room half made fetches nothing (#452)"
@@ -1160,7 +1167,10 @@ impl AutoShardManager {
             if count >= max_per_model && !candidate.nobody_runs && candidate.cooled.is_none() {
                 continue;
             }
-            if candidate.to_make_room && (!room_completes || room_made >= room_bytes) {
+            if candidate.to_make_room
+                && (!room_completes
+                    || storage_budget.room_a_give_back_makes(room_made) >= room_bytes)
+            {
                 continue;
             }
 

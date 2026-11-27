@@ -176,7 +176,7 @@ pub fn storage_room(
     swarmllm_types::StorageRoom {
         limit_mb: budget.bytes / MB,
         held_mb: reading.held_bytes.div_ceil(MB),
-        spare_mb: spare_bytes / MB,
+        spare_mb: budget.room_a_give_back_makes(spare_bytes) / MB,
         limited_by: budget.limited_by.kind(),
     }
 }
@@ -201,6 +201,31 @@ impl StorageBudget {
     /// Bytes still available for downloads given what is already held.
     pub fn remaining(&self, held_bytes: u64) -> u64 {
         self.bytes.saturating_sub(held_bytes)
+    }
+
+    /// Bytes the disk stands below the share this node always leaves free on
+    /// it (`FREE_DISK_RESERVE_PCT`). Under it the budget is exactly what is
+    /// held, and a copy given back lowers the budget with it (gotcha #1143).
+    pub fn short_of_the_reserve_bytes(&self) -> u64 {
+        match self.limited_by {
+            StorageLimit::FreeDisk {
+                free_mb,
+                reserve_mb,
+            } => reserve_mb
+                .saturating_sub(free_mb)
+                .saturating_mul(1024 * 1024),
+            _ => 0,
+        }
+    }
+
+    /// The room giving back `bytes` makes: what is left of them once the
+    /// disk's shortfall under its reserve is paid. The ONE answer for what
+    /// this node advertises it would give back (`storage_room`) and for
+    /// whether prune can complete a room (#511: a node 89 GB under its reserve
+    /// gave back a small model it held whole for a part it then could not
+    /// fetch, 2026-11-27).
+    pub fn room_a_give_back_makes(&self, bytes: u64) -> u64 {
+        bytes.saturating_sub(self.short_of_the_reserve_bytes())
     }
 }
 
@@ -805,6 +830,43 @@ mod tests {
             free_bytes: mib(free_mb),
             total_bytes: mib(total_mb),
         })
+    }
+
+    /// A disk under its reserve: the budget is what is held, and what a
+    /// give-back frees pays the shortfall before any of it is room (#511).
+    #[test]
+    fn a_give_back_on_a_disk_under_its_reserve_pays_the_shortfall_first() {
+        let level = ContributionMode::Maximum;
+        // 1,000 GB, a 100 GB reserve, 11 GB free: 89 GB short of it.
+        let short = storage_budget(
+            500_000,
+            1_000_000,
+            &level,
+            disk(11_000, 1_000_000),
+            mib(60_000),
+        );
+        assert_eq!(
+            short.bytes,
+            mib(60_000),
+            "under the reserve the budget is what is held"
+        );
+        assert_eq!(short.short_of_the_reserve_bytes(), mib(89_000));
+        assert_eq!(
+            short.room_a_give_back_makes(mib(2_000)),
+            0,
+            "spare copies pay the shortfall"
+        );
+        assert_eq!(short.room_a_give_back_makes(mib(89_500)), mib(500));
+        // Above the reserve, all of it is room.
+        let roomy = storage_budget(
+            500_000,
+            1_000_000,
+            &level,
+            disk(300_000, 1_000_000),
+            mib(60_000),
+        );
+        assert_eq!(roomy.short_of_the_reserve_bytes(), 0);
+        assert_eq!(roomy.room_a_give_back_makes(mib(2_000)), mib(2_000));
     }
 
     /// The reported case (gotcha #448): `max_storage_mb = 50000`, contribution

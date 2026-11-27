@@ -3596,6 +3596,26 @@ Prior art: Ollama's scheduler unloads a runner that `needsReload` rather than an
 (`server/sched.go`); a Petals server loads a moved span in place of the old. A/B
 `SWARMLLM_GROWTH_RETIRE_FIRST=0`.
 
+### A give-back on a disk under its reserve pays the shortfall before it is room (2026-11-27, #511)
+
+**Rule**: `StorageBudget::room_a_give_back_makes(bytes)` — `bytes` less `short_of_the_reserve_bytes()` — is what
+giving copies back makes room for. `auto_manage::storage_room` advertises its spare through it, and prune's room
+check (`room_this_pass_could_make` → `room_completes`) and stop (`room_made`) read it.
+
+**Why**: under `FREE_DISK_RESERVE_PCT` the budget is `held + max(0, free − reserve)` = exactly what is held, so
+`StorageRoom` carried no trace of the shortfall: `room_mb = (limit − held) + spare` read the spare copies as room,
+and every copy given back lowered the limit with it. Measured on this node's real holdings with main's build as the
+live node (2026-11-27 19:20-19:45Z, 11 GB free of 1,031 GB, 92 GB under the reserve): the card-range planner (#506)
+planned this card a run of the 14B needing 1,274 MB it lacked (`lacking_bytes ≤ disk_bytes`, read from that room);
+the download pass asked room for part 14 (499 MB); prune gave back gemma-2-2b's parts 1 and 3 (720 MB, holders 4),
+leaving a small model held whole here in pieces; the next pass planned only part 15, and nothing was fetched — the
+disk was still 91 GB under. The rule predates the ranges (#371 holes and scarce parts, #452's all-or-nothing): any
+full disk under its reserve could give copies away for nothing; the ranges made a full card ask for its run.
+
+**What a change must keep**: a new reader of "how much room would this computer make" asks
+`room_a_give_back_makes`; never `StorageRoom::room_mb` built from an unadjusted spare. Prior art: Ceph's
+`backfillfull_ratio` refuses recovery onto an OSD that cannot take the data.
+
 ### A spawn leaves the card the room the plan's other ranges here will be grown into (2026-11-19, #481 (5))
 
 A split that starts and finishes here gives this node two ranges, and they arrive one by one: the first range's
