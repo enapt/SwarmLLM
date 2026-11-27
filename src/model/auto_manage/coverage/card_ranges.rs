@@ -90,6 +90,10 @@ pub(in crate::model::auto_manage) struct CardRanges {
     runs: Vec<(NodeId, (u32, u32))>,
     /// Every machine with a card the plan weighed, planned or not.
     weighed: HashSet<NodeId>,
+    /// Those of them that place their parts by the ranges
+    /// (`features::CARD_RANGES`): only their runs are counted as keeping a
+    /// part, since only they keep theirs by the plan.
+    follow: HashSet<NodeId>,
     /// The copies on cards it aims each layer at — the replica target.
     copies: u32,
     /// The fewest cards any layer is planned on.
@@ -136,14 +140,22 @@ struct Card {
     layers: u32,
     /// By part position (`parts_in_order`): held, or being fetched.
     has: Vec<bool>,
-    /// Layers it holds, fetches not counted — what its lease renews on.
-    held_layers: u32,
-    /// Fetching a part of the model now.
-    fetching: bool,
+    /// By part position: held, fetches not counted — what its lease renews on.
+    held: Vec<bool>,
+    /// By part position: being fetched now.
+    fetching: Vec<bool>,
     /// What it may be handed to fetch (`room_to_fetch_bytes`).
     disk_bytes: u64,
     /// Its rendezvous weight for the model.
     rank: [u8; 32],
+    /// The run the last plan gave it, where this node planned one: kept while
+    /// it fetches into it (Petals' incumbency — a card part-way through its
+    /// run is never re-windowed because another card settled meanwhile).
+    before: Option<(u32, u32)>,
+    /// Places its parts by the ranges (`features::CARD_RANGES`). A machine
+    /// that does not is weighed only for a run it already holds whole — its
+    /// copies are real, but it is never planned one to fetch.
+    follows: bool,
 }
 
 /// The layers of `[x, e)` the parts marked in `has` cover.
@@ -233,13 +245,43 @@ fn plan_card_ranges(
     let mut runs = vec![None; cards.len()];
     let run_of = |c: &Card| longest_held_run(parts, &c.has, layers);
     let settled = |c: &Card| 2 * run_of(c) >= c.layers.min(layers);
-    // Settled first, the shortest held runs first; then the rest. Each in
-    // rendezvous order, highest first.
+    // A machine that does not place by the ranges is weighed only for the
+    // run it holds, so its windows are no wider than that run.
+    let windows_of = |c: &Card| {
+        let width = if c.follows {
+            c.layers.min(layers)
+        } else {
+            c.layers.min(layers).min(run_of(c))
+        };
+        windows(parts, layers, width)
+            .into_iter()
+            .filter(|&(x, e)| lacking_bytes(parts, &c.has, x, e, layers) <= c.disk_bytes)
+            .collect::<Vec<_>>()
+    };
+    // The run the last plan gave a card it is fetching into, where that
+    // window is still one it may take: kept (`Card::before`).
+    let committed = |c: &Card| {
+        c.before.filter(|&(x, e)| {
+            layers_held(parts, &c.has, x, e) > 0 && windows_of(c).contains(&(x, e))
+        })
+    };
+    // Settled first, the shortest held runs first; then the cards part-way
+    // through the run they were planned; then the rest. Each in rendezvous
+    // order, highest first.
+    let tier = |c: &Card| {
+        if settled(c) {
+            0
+        } else if committed(c).is_some() {
+            1
+        } else {
+            2
+        }
+    };
     let mut order: Vec<usize> = (0..cards.len()).filter(|&i| cards[i].layers > 0).collect();
     order.sort_by(|&a, &b| {
         let (ca, cb) = (&cards[a], &cards[b]);
-        settled(cb)
-            .cmp(&settled(ca))
+        tier(ca)
+            .cmp(&tier(cb))
             .then_with(|| {
                 if settled(ca) {
                     run_of(ca).cmp(&run_of(cb))
@@ -252,17 +294,27 @@ fn plan_card_ranges(
     for i in order {
         let card = &cards[i];
         let is_settled = settled(card);
-        let best = windows(parts, layers, card.layers.min(layers))
+        let kept = (!is_settled).then(|| committed(card)).flatten();
+        // A machine that does not place by the ranges is weighed only where
+        // it already holds a run whole.
+        if !card.follows && !is_settled {
+            continue;
+        }
+        let best = windows_of(card)
             .into_iter()
-            .filter(|&(x, e)| lacking_bytes(parts, &card.has, x, e, layers) <= card.disk_bytes)
+            .filter(|&w| kept.is_none_or(|k| k == w))
+            .filter(|&(x, e)| card.follows || lacking_bytes(parts, &card.has, x, e, layers) == 0)
             .map(|(x, e)| {
                 let short = shortfall(&coverage, x, e, copies);
                 let held = layers_held(parts, &card.has, x, e);
-                ((x, e), short, held)
+                let again = card.before == Some((x, e));
+                ((x, e), short, held, again)
             })
-            .max_by(|(wa, sa, ha), (wb, sb, hb)| {
+            .max_by(|(wa, sa, ha, ra), (wb, sb, hb, rb)| {
+                // A settled card stays where it holds most, and among equals
+                // where it was planned before; any other takes the weakest.
                 let first = if is_settled {
-                    ha.cmp(hb).then_with(|| sa.cmp(sb))
+                    ha.cmp(hb).then_with(|| ra.cmp(rb)).then_with(|| sa.cmp(sb))
                 } else {
                     sa.cmp(sb).then_with(|| ha.cmp(hb))
                 };
@@ -270,10 +322,13 @@ fn plan_card_ranges(
                     .then_with(|| (wa.1 - wa.0).cmp(&(wb.1 - wb.0)))
                     .then_with(|| wb.0.cmp(&wa.0))
             });
-        let Some(((x, e), short, _)) = best else {
+        let Some(((x, e), short, _, _)) = best else {
             continue;
         };
-        if short.iter().all(|&n| n == 0) {
+        // A window lifting no layer below the target is not planned — unless
+        // it is the run this card is part-way through or holds: those copies
+        // are real, and leaving them unplanned would give them back.
+        if short.iter().all(|&n| n == 0) && kept.is_none() && !is_settled {
             continue;
         }
         for c in &mut coverage[x as usize..e as usize] {
@@ -292,6 +347,12 @@ fn card_ranges_switched_off() -> bool {
             .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
             .unwrap_or(false)
     })
+}
+
+/// Does this node place its parts by the card ranges? What it advertises
+/// (`features::CARD_RANGES`, `health::monitor::advertised_features`).
+pub(crate) fn card_ranges_on() -> bool {
+    !card_ranges_switched_off()
 }
 
 impl AutoShardManager {
@@ -375,6 +436,13 @@ impl AutoShardManager {
                 nodes
             })
             .collect();
+        // The runs this node's last plan gave, kept for a card part-way
+        // through its own (`Card::before`).
+        let before: Option<Arc<CardRanges>> = self
+            .card_range_book
+            .plans
+            .get(&manifest.id)
+            .and_then(|p| p.1.clone());
         let mut cards = Vec::new();
         for node in self.machines_in_scope() {
             if self.passed_over_for_card_range(&manifest.id, &node) {
@@ -395,16 +463,26 @@ impl AutoShardManager {
                 continue;
             }
             let held: Vec<bool> = holders.iter().map(|h| h.contains(&node)).collect();
+            let fetching_here: Vec<bool> = fetching.iter().map(|f| f.contains(&node)).collect();
             let has: Vec<bool> = held
                 .iter()
-                .zip(&fetching)
-                .map(|(&h, f)| h || f.contains(&node))
+                .zip(&fetching_here)
+                .map(|(&h, &f)| h || f)
                 .collect();
+            let follows = node == local
+                || state
+                    .peer_advertises_feature(&node, swarmllm_types::node::features::CARD_RANGES);
             cards.push(Card {
-                held_layers: layers_held(&parts, &held, 0, layers),
-                fetching: fetching.iter().any(|f| f.contains(&node)),
-                disk_bytes: self.room_to_fetch_bytes(&node),
+                held,
+                fetching: fetching_here,
+                disk_bytes: if follows {
+                    self.room_to_fetch_bytes(&node)
+                } else {
+                    0
+                },
                 rank: rendezvous(&manifest.id, &node),
+                before: before.as_ref().and_then(|p| p.run_of(&node)),
+                follows,
                 node,
                 layers: card_layers,
                 has,
@@ -430,7 +508,8 @@ impl AutoShardManager {
                     return None;
                 }
                 named.insert(card.node.clone());
-                (!self.planned_card_keeps_its_place(&manifest.id, card)).then_some(i)
+                (!self.planned_card_keeps_its_place(&manifest.id, card, &parts, (x, e), layers))
+                    .then_some(i)
             });
             if let Some(i) = stalled {
                 cards.remove(i);
@@ -452,6 +531,11 @@ impl AutoShardManager {
                     .filter_map(|(run, card)| run.map(|r| (card.node.clone(), r)))
                     .collect(),
                 weighed: cards.iter().map(|c| c.node.clone()).collect(),
+                follow: cards
+                    .iter()
+                    .filter(|c| c.follows)
+                    .map(|c| c.node.clone())
+                    .collect(),
                 copies,
                 least: coverage.iter().copied().min().unwrap_or(0),
             });
@@ -478,14 +562,27 @@ impl AutoShardManager {
     /// neither it is passed over for [`PASSED_OVER_FOR`] — a machine whose
     /// budget or disk refuses its run says nothing, and would hold its layers
     /// "covered" for ever.
-    fn planned_card_keeps_its_place(&self, model: &ModelId, card: &Card) -> bool {
+    fn planned_card_keeps_its_place(
+        &self,
+        model: &ModelId,
+        card: &Card,
+        parts: &[Part],
+        (x, e): (u32, u32),
+        layers: u32,
+    ) -> bool {
         let book = &self.card_range_book;
         let key = (model.clone(), card.node.clone());
         let now = Instant::now();
-        let renewed = (now + CARRIER_PATIENCE, card.held_layers);
+        // Progress INSIDE the run renews it: a machine fetching other parts
+        // of the model by older rules is not fetching its run.
+        let held_layers = layers_held(parts, &card.held, x, e);
+        let fetching = parts.iter().zip(&card.fetching).any(|(p, &f)| {
+            f && crate::inference::split::part_serves_layers((p.start, p.end), x, e, layers)
+        });
+        let renewed = (now + CARRIER_PATIENCE, held_layers);
         let lease = book.leases.get(&key).map(|l| *l);
         let lapsed = match lease {
-            Some((_, held)) if card.held_layers > held || card.fetching => {
+            Some((_, held)) if held_layers > held || fetching => {
                 book.leases.insert(key.clone(), renewed);
                 false
             }
@@ -508,25 +605,21 @@ impl AutoShardManager {
         !lapsed
     }
 
-    /// The parts of this node's run of `manifest`'s card ranges — empty where
-    /// it is weighed and not planned. `None`: no plan, or this node is not a
-    /// card it weighed; the model's parts are then today's rules' to place.
-    /// The download pass fetches what of it this node lacks, past the replica
-    /// target and the ring, and nothing else of the model.
+    /// The parts of this node's run of `manifest`'s card ranges. `None`: no
+    /// plan, or this node is planned no run; the model's parts are then
+    /// today's rules' to place (and prune still gives back a copy the
+    /// target's worth of other cards hold in their runs). The download pass
+    /// fetches what of it this node lacks, past the replica target and the
+    /// ring, and nothing else of the model but a hole or a part below the
+    /// replica floor.
     pub(in crate::model::auto_manage) fn this_nodes_card_run(
         &self,
         manifest: &ModelManifest,
     ) -> Option<HashSet<u32>> {
         let plan = self.card_ranges(manifest)?;
         let local = self.shared_state.identity.node_id();
-        if !plan.weighed.contains(local) {
-            return None;
-        }
-        Some(
-            plan.run_of(local)
-                .map(|run| parts_touching(manifest, run).into_iter().collect())
-                .unwrap_or_default(),
-        )
+        let run = plan.run_of(local)?;
+        Some(parts_touching(manifest, run).into_iter().collect())
     }
 
     /// What this node's copy of `shard_id` is to its model's card ranges —
@@ -559,12 +652,26 @@ impl AutoShardManager {
             return CardRangeCopy::InThisRun;
         }
         let holders = self.shared_state.model_registry.shard_holders(shard_id);
+        // Only a machine placing its parts by the ranges keeps a part for
+        // being in its run.
         let held_in_runs = plan
             .runs
             .iter()
-            .filter(|(node, run)| node != local && holders.contains(node) && touches(*run))
+            .filter(|(node, run)| {
+                node != local
+                    && plan.follow.contains(node)
+                    && holders.contains(node)
+                    && touches(*run)
+            })
             .count();
-        if held_in_runs >= plan.copies as usize {
+        // Two holders whose views of each other's runs differ (gossip lags)
+        // could each count the other as the keeper and both give theirs
+        // back: the copies go back lowest-ranked first, so the first
+        // `copies` holders by the model's rank keep theirs whatever either
+        // view says (`coverage::kept_by_rank`).
+        if held_in_runs >= plan.copies as usize
+            && !super::kept_by_rank(shard_id, &holders, local, plan.copies as usize)
+        {
             CardRangeCopy::Surplus
         } else {
             CardRangeCopy::OutsideTheRun
@@ -596,11 +703,13 @@ mod tests {
         Card {
             node: NodeId([byte; 32]),
             layers,
-            held_layers: has.iter().filter(|&&h| h).count() as u32 * 4,
+            held: has.clone(),
+            fetching: vec![false; has.len()],
             has,
-            fetching: false,
             disk_bytes: 100 * GB,
             rank: [byte; 32],
+            before: None,
+            follows: true,
         }
     }
 
@@ -736,11 +845,13 @@ mod tests {
             Card {
                 node: NodeId([byte; 32]),
                 layers,
-                held_layers: 0,
+                held: has.clone(),
+                fetching: vec![false; 32],
                 has,
-                fetching: false,
                 disk_bytes: 100 * GB,
                 rank: [byte; 32],
+                before: None,
+                follows: true,
             }
         };
         let here = card(1, 22, &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 30, 31]);
@@ -781,6 +892,67 @@ mod tests {
         assert_eq!(plan(with_disk(2 * GB, &[])), vec![Some((24, 32))]);
         assert_eq!(plan(with_disk(2 * GB, &[6, 7])), vec![Some((16, 32))]);
     }
+
+    /// A card part-way through the run it was planned keeps it when another
+    /// card settles meanwhile (pre-release review, 2026-11-27): without the
+    /// last plan's runs the first card re-windowed onto the layers the
+    /// settling card left weakest, and the second onto a run its one part
+    /// starts — gigabytes fetched for runs nobody then ran.
+    #[test]
+    fn a_card_part_way_through_its_run_keeps_it_when_another_settles() {
+        let cards = |has: [&[u32]; 3]| {
+            [
+                card(3, 16, has[0]),
+                card(2, 16, has[1]),
+                card(1, 16, has[2]),
+            ]
+        };
+        let first = plan_card_ranges(32, &parts(), &cards([&[], &[], &[]]), 2);
+        assert_eq!(first, vec![Some((0, 16)), Some((16, 32)), Some((0, 16))]);
+        // Each fetched the first part of its run; the third two, so it is
+        // settled and planned first.
+        let mut later = cards([&[0], &[4], &[0, 1]]);
+        let without = plan_card_ranges(32, &parts(), &later, 2);
+        assert_ne!(
+            without, first,
+            "the case: forgetting the last plan moves runs"
+        );
+        for (c, run) in later.iter_mut().zip(&first) {
+            c.before = *run;
+        }
+        assert_eq!(plan_card_ranges(32, &parts(), &later, 2), first);
+    }
+
+    /// A machine that does not place by the ranges is weighed only for the
+    /// run it HOLDS — as cover, never planned a part to fetch: scattered
+    /// parts or none, it is planned nothing.
+    #[test]
+    fn a_machine_that_does_not_follow_is_weighed_only_for_the_run_it_holds() {
+        let old = |byte, has: &[u32]| {
+            let mut c = card(byte, 16, has);
+            c.follows = false;
+            c
+        };
+        let runs = plan_card_ranges(
+            32,
+            &parts(),
+            &[
+                old(5, &[0, 1]),
+                old(4, &[2, 5]),
+                old(3, &[]),
+                card(1, 16, &[]),
+            ],
+            1,
+        );
+        assert_eq!(runs[0], Some((0, 8)), "the run it holds, and no wider");
+        assert_eq!(runs[1], None, "scattered parts are no run");
+        assert_eq!(runs[2], None, "nothing held, nothing planned");
+        assert_eq!(
+            runs[3],
+            Some((8, 24)),
+            "the follower takes what is left weakest"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -789,8 +961,8 @@ mod manager_tests {
     use std::sync::Arc;
 
     use super::super::super::test_support::{
-        capability, holds, make_test_manager_with_config, offered, peer_with_disk,
-        register_manifest_with_sized_shards,
+        capability, holds, ids_ranked_above, make_test_manager_with_config, offered,
+        peer_with_disk, peer_with_id, register_manifest_with_sized_shards,
     };
     use super::super::super::AutoShardManager;
     use super::CardRangeCopy;
@@ -848,6 +1020,12 @@ mod manager_tests {
     /// so no chain is planned — the 27B's US 5080), this node and another hold
     /// nothing. Nothing is near.
     fn fleet() -> Fleet {
+        fleet_with(true)
+    }
+
+    /// [`fleet`], the whole holder ranked above this node for the model or
+    /// below it.
+    fn fleet_with(whole_ranked_above: bool) -> Fleet {
         let mut config = Config::default();
         config.auto_manage.min_replicas = 1;
         let (state, manager) = make_test_manager_with_config(config);
@@ -868,11 +1046,34 @@ mod manager_tests {
             });
             c.est_tokens_per_sec_7b = 56.0;
             c.processor_tokens_per_sec_7b = Some(20.0);
+            c.features |= swarmllm_types::node::features::CARD_RANGES;
         };
         let mut own = capability(Some(ceiling_for(32)), 100_000);
         with_card(&mut own);
         state.local_capability.store(Some(Arc::new(own)));
-        let whole = peer_with_disk(&state, 3, Some(ceiling_for(32)), 100_000);
+        // Ranked above this node for the model, so a copy both hold that the
+        // whole holder runs is this node's to give back (`kept_by_rank`).
+        let parts: Vec<ShardId> = (0..8)
+            .map(|index| ShardId {
+                model_id: mid.clone(),
+                index,
+            })
+            .collect();
+        let local = state.identity.node_id().clone();
+        let whole_id = if whole_ranked_above {
+            ids_ranked_above(&local, &parts, 1).expect("an id ranked above")[0].clone()
+        } else {
+            (0u32..1_000_000)
+                .map(|i| NodeId(*blake3::hash(&i.to_le_bytes()).as_bytes()))
+                .find(|id| {
+                    parts.iter().all(|p| {
+                        super::super::part_rank_weight(p, id)
+                            < super::super::part_rank_weight(p, &local)
+                    })
+                })
+                .expect("an id ranked below")
+        };
+        let whole = peer_with_id(&state, whole_id, Some(ceiling_for(32)), 100_000);
         let other = peer_with_disk(&state, 2, Some(ceiling_for(32)), 100_000);
         for peer in [&whole, &other] {
             with_card(
@@ -948,7 +1149,14 @@ mod manager_tests {
             "part 0 is in the whole copy's run, and held there"
         );
         assert!(
-            f.sheds(0, &[f.local(), f.whole.clone()]),
+            !f.sheds(0, &[f.local(), f.whole.clone()]),
+            "...but never the last copy near this node (no region known: two \
+             other holders under 200 ms)"
+        );
+        let near = peer_with_disk(&f.state, 9, Some(ceiling_for(32)), 100_000);
+        holds(&f.state, &f.mid, &near, &[0]);
+        assert!(
+            f.sheds(0, &[f.local(), f.whole.clone(), near]),
             "a copy no card here runs, that another card runs, goes"
         );
         // A part in no run of a card holding it — the other card's, which it
@@ -968,6 +1176,73 @@ mod manager_tests {
                 "part {index}: {plan:?}"
             );
         }
+    }
+
+    /// A peer on an older release (no `features::CARD_RANGES`) fetches by its
+    /// own rules: its whole copy still counts as a run where it lies, but no
+    /// copy is given back for being in its run — it keeps none for that.
+    #[test]
+    fn a_peer_that_does_not_place_by_the_ranges_keeps_nothing_for_them() {
+        let f = fleet();
+        for peer in f.state.peer_registry.iter_mut() {
+            let mut entry = peer;
+            if let Some(c) = entry.value_mut().capability.as_mut() {
+                c.features &= !swarmllm_types::node::features::CARD_RANGES;
+            }
+        }
+        let run = f.run().expect("this card is still planned");
+        let mut held = run.clone();
+        held.push(0);
+        holds(&f.state, &f.mid, &f.local(), &held);
+        f.manager.forget_card_ranges();
+        assert_eq!(
+            f.manager.card_range_copy(&f.part(0)),
+            CardRangeCopy::OutsideTheRun,
+            "the whole copy's run is not kept by the ranges there"
+        );
+        assert!(
+            !f.manager
+                .card_range_copy(&f.part(0))
+                .eq(&CardRangeCopy::Surplus),
+            "nothing given back on an older peer's account"
+        );
+        let manifest = f.state.model_registry.get_manifest(&f.mid).unwrap();
+        f.manager.forget_card_ranges();
+        let plan = f.manager.card_ranges(&manifest).expect("a plan");
+        assert!(
+            plan.run_of(&f.whole).is_some(),
+            "a run it holds whole is weighed where it lies: {plan:?}"
+        );
+    }
+
+    /// The copy two holders both hold outside their runs goes back from the
+    /// lower-ranked one only: the higher keeps it whatever its view of the
+    /// runs says (two views counting each other as the keeper gave both back).
+    #[test]
+    fn a_surplus_copy_is_never_given_back_by_the_holder_ranked_to_keep_it() {
+        let f = fleet();
+        let run = f.run().expect("this card is weighed");
+        let mut held = run.clone();
+        held.push(0);
+        holds(&f.state, &f.mid, &f.local(), &held);
+        f.manager.forget_card_ranges();
+        assert_eq!(
+            f.manager.card_range_copy(&f.part(0)),
+            CardRangeCopy::Surplus
+        );
+        // The same copy, the whole holder ranked BELOW this node for the
+        // model: this node is the first of part 0's holders, and keeps it.
+        let g = fleet_with(false);
+        let run = g.run().expect("this card is weighed");
+        let mut held = run.clone();
+        held.push(0);
+        holds(&g.state, &g.mid, &g.local(), &held);
+        g.manager.forget_card_ranges();
+        assert_eq!(
+            g.manager.card_range_copy(&g.part(0)),
+            CardRangeCopy::OutsideTheRun,
+            "this node is ranked first among part 0's holders: it keeps it"
+        );
     }
 
     /// A machine whose models run on its processor is weighed by no plan: its

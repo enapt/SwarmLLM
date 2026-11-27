@@ -49,6 +49,7 @@ use super::AutoShardManager;
 mod card_ranges;
 mod drafter;
 mod near_chain;
+pub(crate) use card_ranges::card_ranges_on;
 pub(super) use card_ranges::{CardRangeBook, CardRangeCopy};
 pub(super) use drafter::DrafterBook;
 pub(super) use near_chain::{ChainPart, NearChainBook, Reach};

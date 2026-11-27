@@ -22,6 +22,7 @@ pub mod wishlist;
 pub mod manager;
 pub mod scan;
 
+pub(crate) use coverage::card_ranges_on;
 pub use manager::AutoShardManager;
 #[cfg(test)]
 pub(crate) use prune::pressure_adjusted_target;

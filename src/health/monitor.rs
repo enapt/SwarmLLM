@@ -440,6 +440,9 @@ fn advertised_features(shared: &SharedState) -> u64 {
     if crate::inference::split::hybrid::processor_run_first() {
         bits |= features::PROCESSOR_RUN_FIRST;
     }
+    if crate::model::auto_manage::card_ranges_on() {
+        bits |= features::CARD_RANGES;
+    }
     bits
 }
 

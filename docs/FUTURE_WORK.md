@@ -979,7 +979,18 @@ and ring and nothing else of the model on a weighed card (a hole excepted); prun
 urgent and gives back an off-run copy the target's worth of other cards hold inside theirs, never
 from a model held whole here; a planned card fetching nothing for 20 min is passed over 2 h. Room is
 now given back by the MODEL's rank (`coverage::part_rank_weight`), so a holder keeps or gives back
-its run together. A/B `SWARMLLM_CARD_RANGES=0`. Tests `coverage::card_ranges::*` (the 27B's own
+its run together. A/B `SWARMLLM_CARD_RANGES=0`.
+
+**Pre-release review, same day** (Fable, read-only; each claim checked in the code before it was
+acted on): a run is planned only for a computer advertising `features::CARD_RANGES` (bit 48, not in
+`ALL`) — an older one is weighed only for a run it already holds, never planned one to fetch, and no
+copy is given back on its account; a card part-way through the run the last plan gave it keeps it
+(`Card::before`, Petals' incumbency — without it a card re-windowed as soon as another settled); an
+off-run copy goes back lowest-ranked holder first (`kept_by_rank`, so two holders whose views of each
+other's runs differ never both give theirs back), never the last copy in this region, and is asked
+again as itself when prune runs (`PruneCandidate::card_surplus` — the count re-check kept every one
+below relaxed pressure); a lease renews only on progress inside the run; a part below the replica
+FLOOR is fetched off-run; a card planned no run places by today's rules. Tests `coverage::card_ranges::*` (the 27B's own
 parts and holdings: AU is planned one 38-layer run, every layer on a card).
 
 Prior art: Petals `block_selection.py` (`_choose_best_start`: the lexicographically weakest window
@@ -994,7 +1005,15 @@ start) stays until a run is given back — Petals' rebalance with its 0.75 hyste
 is the next step; (2) the plan stands down while a chain is planned (the chain places its segments);
 (3) peers act on it only once they run the release that carries it — verify on the real swarm after
 the release: AU/BE fetch one run each of the 27B (`DIAG: card ranges planned` on this node names the
-plan), then a here → AU card chain is routable.
+plan), then a here → AU card chain is routable; (4) the review's PLAUSIBLE findings, not acted on:
+a card with a large processor share is planned only its card's run (by design: cards across nodes);
+ranking by model concentrates room-making on a node's lowest-ranked models (`not_spare_for_room`); a
+run part of which cannot be fetched lapses its lease and returns after `PASSED_OVER_FOR`; the
+advertised room counts a copy kept in a run as spare; (5) a 27B flow over a peer's FULL card is
+refused on memory whatever the tree's width (11-27 27j/27k/27l: 259 MB in use plus a claim of two
+state pairs a recurrent layer against a 200-441 MB budget) — the claim is an upper bound
+(`SsmState::bytes_a_flowing_forward_may_add`: `previous` and the last rollback copy are let go as
+the forward begins), and a card run sized to the card leaves no flow room; both are #228's residual.
 
 #### #484 — For up to a minute after a peer's last reply of one model, the next model's plan prices that peer's room as still held
 `P2` · routing · **OPEN** — 2026-11-20 · history: #447, #479, #481 (5), #482 (whose measured case this is)

@@ -1005,6 +1005,8 @@ impl AutoShardManager {
                         &shard_pins_cached,
                     ),
                     cooled: cooled_copy,
+                    card_surplus: self.card_range_copy(&shard_id)
+                        == super::coverage::CardRangeCopy::Surplus,
                 });
             }
 
@@ -1063,6 +1065,7 @@ impl AutoShardManager {
                                 nobody_runs: given_back,
                                 to_make_room: false,
                                 cooled: None,
+                                card_surplus: false,
                             });
                         }
                     }
@@ -1234,6 +1237,16 @@ impl AutoShardManager {
                         )
                 }
                 None if candidate.to_make_room => current_holders > floor_for_room,
+                // A copy outside this card's run that other cards hold in
+                // theirs (#506) is asked again as it stands: the count above
+                // the target was never why it went.
+                None if candidate.card_surplus => {
+                    self.card_range_copy(&ShardId {
+                        model_id: candidate.model_id.clone(),
+                        index: candidate.shard_index,
+                    }) == super::coverage::CardRangeCopy::Surplus
+                        || current_holders > effective_target as usize
+                }
                 None => current_holders > effective_target as usize,
             };
             if !still_spare && !candidate.nobody_runs {
@@ -2234,8 +2247,10 @@ impl AutoShardManager {
             super::coverage::CardRangeCopy::InThisRun if pressure < PRESSURE_URGENT => {
                 return Some(KEPT_IN_CARD_RUN);
             }
+            // Never the last copy in this region, whatever the cards hold.
             super::coverage::CardRangeCopy::Surplus
-                if !self.completes_model_here_counting(shard_id) =>
+                if !self.completes_model_here_counting(shard_id)
+                    && !self.would_eliminate_region(shard_id, local_node_id, holders) =>
             {
                 return None;
             }
@@ -3579,6 +3594,7 @@ mod room_all_or_nothing_tests {
             nobody_runs: false,
             to_make_room: true,
             cooled: None,
+            card_surplus: false,
         }
     }
 

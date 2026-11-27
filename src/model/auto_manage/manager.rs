@@ -360,6 +360,10 @@ pub(super) struct PruneCandidate {
     /// A copy of a model that has cooled (`unused::Verdict::Cooled`): which
     /// of its copies this is.
     pub cooled: Option<CooledCopy>,
+    /// A copy outside this card's run that the target's worth of other cards
+    /// hold inside theirs (#506, `CardRangeCopy::Surplus`): re-checked as
+    /// that, never by the count above the target, which never sent it.
+    pub card_surplus: bool,
 }
 
 /// A copy of a model nobody ran in the quiet window (`unused::Verdict::Cooled`,
@@ -1914,6 +1918,7 @@ mod tests {
             nobody_runs: false,
             to_make_room: false,
             cooled: None,
+            card_surplus: false,
         };
         let warm_less_redundant = PruneCandidate {
             model_id: crate::types::ModelId("m2".into()),
@@ -1926,6 +1931,7 @@ mod tests {
             nobody_runs: false,
             to_make_room: false,
             cooled: None,
+            card_surplus: false,
         };
         assert!(cold_redundant.score > warm_less_redundant.score);
     }

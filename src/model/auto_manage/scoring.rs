@@ -360,8 +360,8 @@ impl AutoShardManager {
             // so each layer is on the target's cards (`coverage::card_ranges`).
             // What of it this node lacks skips the replica target and the ring,
             // as a chain's segment does; nothing else of the model is fetched on
-            // this card (a hole excepted), so parts no longer land one at a time
-            // where no card can run them.
+            // this card (a hole, or a part below the replica floor, excepted),
+            // so parts no longer land one at a time where no card can run them.
             let card_run = self.this_nodes_card_run(&manifest);
             // A split driven from here ran with nothing to guess for it, or
             // with a smaller drafter than the swarm has: this model is the one
@@ -511,9 +511,13 @@ impl AutoShardManager {
                 let card_run_part = card_run
                     .as_ref()
                     .is_some_and(|run| run.contains(&shard.index));
+                // ...but a part below the replica FLOOR is fetched wherever
+                // there is room, run or not: one departure from a hole.
+                let below_the_floor = holder_count < min_replicas;
                 if card_run.is_some()
                     && !card_run_part
                     && !fills_a_hole
+                    && !below_the_floor
                     && !in_configured_range
                     && !carried_part
                     && !completing_part

@@ -507,10 +507,20 @@ pub mod features {
     /// tree on those layers.
     pub const RECURRENT_FLOW: u64 = 1 << 47;
 
+    /// Places its parts by the card ranges (#506): for an asked-for model it
+    /// fetches the one contiguous run of layers its card is planned and gives
+    /// back a copy outside it that other cards hold inside theirs. A node
+    /// planning the ranges plans a run only for a computer advertising it —
+    /// an older one fetches by its own rules, and planning it a run it never
+    /// fetches would leave those layers "covered" by nobody. NOT in [`ALL`]:
+    /// advertised only while the node's setting places parts so
+    /// (`SWARMLLM_CARD_RANGES`, on by default).
+    pub const CARD_RANGES: u64 = 1 << 48;
+
     /// The full feature set THIS build implements. Advertised by every node,
     /// with [`KV_HALF_ON_CARD`], [`KV_WINDOW_SLIDES`], [`REQUESTER_GUESSES`],
-    /// [`SERVES_SLICES`] and [`PROCESSOR_RUN_FIRST`] beside it where they
-    /// apply.
+    /// [`SERVES_SLICES`], [`PROCESSOR_RUN_FIRST`] and [`CARD_RANGES`] beside
+    /// it where they apply.
     pub const ALL: u64 = RELAY
         | TENSOR_RELAY
         | PIPELINE_CHAIN
