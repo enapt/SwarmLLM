@@ -1522,7 +1522,7 @@ parts. it needs to be smart".
    **2 days** below, `QUIET_WINDOW_SECS`), but not for the week (`unused::cools`, which asks the
    week only of a quiet copy held here). Every copy of each part goes but TWO
    (`coverage::COOLED_COPIES`): the part's live holders ranked first for the MODEL
-   (`coverage::keeps_a_cooled_copy`, rendezvous by the model, not the part's `part_rank_weight` —
+   (`coverage::keeps_a_cooled_copy`, rendezvous by the model, not by the part (`coverage::RankBy`) —
    a model three computers hold whole keeps two whole copies on two of them, never its parts
    scattered over three; a holder gives back only once two holders it ranks above itself hold the
    part, so the first two, which see fewer above them, never do). The download pass asks the same

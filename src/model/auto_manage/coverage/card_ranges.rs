@@ -667,10 +667,18 @@ impl AutoShardManager {
         // Two holders whose views of each other's runs differ (gossip lags)
         // could each count the other as the keeper and both give theirs
         // back: the copies go back lowest-ranked first, so the first
-        // `copies` holders by the model's rank keep theirs whatever either
-        // view says (`coverage::kept_by_rank`).
+        // `copies` holders by the rank every holder computes alike keep
+        // theirs whatever either view says (`coverage::kept_by_rank`,
+        // `AutoShardManager::rank_by`: by the model only where every holder
+        // follows the ranges, else by the part as older releases rank).
         if held_in_runs >= plan.copies as usize
-            && !super::kept_by_rank(shard_id, &holders, local, plan.copies as usize)
+            && !super::kept_by_rank(
+                shard_id,
+                &holders,
+                local,
+                plan.copies as usize,
+                self.rank_by(&holders),
+            )
         {
             CardRangeCopy::Surplus
         } else {
@@ -1067,8 +1075,9 @@ mod manager_tests {
                 .map(|i| NodeId(*blake3::hash(&i.to_le_bytes()).as_bytes()))
                 .find(|id| {
                     parts.iter().all(|p| {
-                        super::super::part_rank_weight(p, id)
-                            < super::super::part_rank_weight(p, &local)
+                        crate::model::auto_manage::test_support::ranked_above_both_ways(
+                            p, &local, id,
+                        )
                     })
                 })
                 .expect("an id ranked below")

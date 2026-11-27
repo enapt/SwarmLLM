@@ -94,6 +94,22 @@ pub(super) struct CarrierLease {
 }
 
 impl AutoShardManager {
+    /// How `holders` rank one another when a copy may be given back
+    /// ([`RankBy::of_holders`]): this computer by its own switch
+    /// (`card_ranges_on`, what it advertises), a peer by its advertised
+    /// `features::CARD_RANGES`.
+    pub(in crate::model::auto_manage) fn rank_by(&self, holders: &[NodeId]) -> RankBy {
+        let local = self.shared_state.identity.node_id();
+        RankBy::of_holders(holders, |node| {
+            if node == local {
+                crate::model::auto_manage::card_ranges_on()
+            } else {
+                self.shared_state
+                    .peer_advertises_feature(node, swarmllm_types::node::features::CARD_RANGES)
+            }
+        })
+    }
+
     /// The model's processor admission curve, `(fixed_mb, per_layer_mb)`, the
     /// same one every node's admission computes from the header (#230).
     fn carry_curve(&self, model_id: &ModelId) -> Option<(u64, u64)> {
@@ -714,30 +730,82 @@ fn rendezvous(model: &ModelId, node: &NodeId) -> [u8; 32] {
     *h.finalize().as_bytes()
 }
 
-/// `node`'s rank among a part's holders: its rendezvous weight for the part's
-/// MODEL ([`rendezvous`]), the same for every part of it (#506). Ranked per
-/// part (`blake3(model ‖ 0 ‖ index ‖ node)` until 2026-11-27), the holders that
-/// keep their copies when room is made differed part by part, so a run one
-/// card held was given back with holes in it — part 3 kept, 4 and 5 not — and
-/// a card can serve only a run: the 27B the Australian 3060 held as layers
-/// 21-64 of a chain on 11-23 was five scattered parts on 11-27. By the model, a
-/// holder keeps or gives back its run together, as cooled copies are ranked
-/// ([`keeps_a_cooled_copy`]).
-pub(super) fn part_rank_weight(part: &ShardId, node: &NodeId) -> [u8; 32] {
-    rendezvous(&part.model_id, node)
+/// How a part's holders are ranked when one may give its copy back
+/// ([`kept_by_rank`]): by the MODEL only where EVERY holder ranks that way —
+/// advertises `features::CARD_RANGES` (#506) — else by the PART, as
+/// v0.3.315 and older rank. The guarantee is that holders deciding at once
+/// rank alike; a release ranking by the model beside one ranking by the part
+/// broke it (pre-release review, 2026-11-27): of holders {A by the part, B by
+/// the model}, each could rank the other first and both give theirs back.
+/// Kafka turns on a behaviour its brokers must compute alike only once every
+/// broker advertises it (`inter.broker.protocol.version`, KIP-584).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::model::auto_manage) enum RankBy {
+    /// [`rendezvous`] of the part's MODEL, the same for every part of it
+    /// (#506). Ranked per part, the holders that keep their copies when room
+    /// is made differed part by part, so a run one card held was given back
+    /// with holes in it — part 3 kept, 4 and 5 not — and a card can serve only
+    /// a run: the 27B the Australian 3060 held as layers 21-64 of a chain on
+    /// 11-23 was five scattered parts on 11-27. By the model, a holder keeps or
+    /// gives back its run together, as cooled copies are ranked
+    /// ([`keeps_a_cooled_copy`]).
+    Model,
+    /// `blake3(model ‖ 0 ‖ index ‖ node)`, each part its own order.
+    Part,
+}
+
+impl RankBy {
+    /// By the model where every one of `holders` ranks by it
+    /// (`ranks_by_model`), else by the part.
+    pub(in crate::model::auto_manage) fn of_holders(
+        holders: &[NodeId],
+        ranks_by_model: impl Fn(&NodeId) -> bool,
+    ) -> Self {
+        if holders.iter().all(ranks_by_model) {
+            Self::Model
+        } else {
+            Self::Part
+        }
+    }
+}
+
+/// `node`'s weight in `by`'s order of `part`'s holders.
+pub(in crate::model::auto_manage) fn rank_weight(
+    part: &ShardId,
+    node: &NodeId,
+    by: RankBy,
+) -> [u8; 32] {
+    match by {
+        RankBy::Model => rendezvous(&part.model_id, node),
+        RankBy::Part => {
+            let mut h = blake3::Hasher::new();
+            h.update(part.model_id.0.as_bytes());
+            h.update(&[0]);
+            h.update(&part.index.to_le_bytes());
+            h.update(&node.0);
+            *h.finalize().as_bytes()
+        }
+    }
 }
 
 /// Is `node` among the first `keep` of `part`'s `holders` in rendezvous order
-/// ([`part_rank_weight`])? Every computer reading the same holders ranks them
+/// ([`rank_weight`], `by` — [`RankBy::of_holders`], never chosen by one
+/// holder alone)? Every computer reading the same holders ranks them
 /// alike, so when copies are given back to make room (`prune::spare_for_room`)
 /// the first `keep` never give theirs back, and the part keeps them however
 /// many holders decide in the same minute. Without it, each of three full
 /// holders could count three copies, one to spare, and give its own back at
 /// once. Rendezvous (highest-random-weight) hashing is how CRUSH-style
 /// placement agrees on replicas with no coordinator.
-pub(super) fn kept_by_rank(part: &ShardId, holders: &[NodeId], node: &NodeId, keep: usize) -> bool {
+pub(super) fn kept_by_rank(
+    part: &ShardId,
+    holders: &[NodeId],
+    node: &NodeId,
+    keep: usize,
+    by: RankBy,
+) -> bool {
     let mut ranked: Vec<&NodeId> = holders.iter().collect();
-    ranked.sort_by_key(|n| std::cmp::Reverse(part_rank_weight(part, n)));
+    ranked.sort_by_key(|n| std::cmp::Reverse(rank_weight(part, n, by)));
     ranked.dedup();
     ranked.into_iter().take(keep).any(|n| n == node)
 }
@@ -757,7 +825,7 @@ pub(super) const COOLED_COPIES: usize = 2;
 /// Does `node` keep its copy of a part of a model that has cooled
 /// (`unused::Verdict::Cooled`, 2026-11-15) — is it, of the part's live
 /// `holders`, among the [`COOLED_COPIES`] ranked first for the MODEL
-/// ([`rendezvous`])? Ranked by the model, not the part ([`part_rank_weight`]):
+/// ([`rendezvous`])? Ranked by the model, not the part ([`RankBy`]):
 /// a model held whole by several computers keeps whole copies on the same
 /// two, never its parts scattered over all of them — a split where one
 /// computer answered. A part whose holders differ keeps the first of its own
@@ -838,6 +906,50 @@ mod tests {
         peer_with_disk(state, byte, ceiling_mb, 100_000)
     }
 
+    /// **Holders of releases one apart rank alike** (#506, pre-release review
+    /// 2026-11-27): one holder ranking by the part (v0.3.315) beside others
+    /// ranking by the model let each count another as the keeper, and a part
+    /// kept fewer copies than `keep` once they all decided. With any holder
+    /// not following the ranges, every holder ranks by the part.
+    #[test]
+    fn holders_rank_by_the_model_only_where_every_one_does() {
+        use super::{kept_by_rank, rank_weight, RankBy};
+        let model = ModelId("mixed-releases-27b".into());
+        let holders: Vec<NodeId> = (0u8..6).map(|b| NodeId([b; 32])).collect();
+        let part = |index| ShardId {
+            model_id: model.clone(),
+            index,
+        };
+        // The older holder is one the model's rank keeps: ranked by the
+        // model, the newer holders count it as a keeper of every part.
+        let older = holders
+            .iter()
+            .max_by_key(|n| rank_weight(&part(0), n, RankBy::Model))
+            .expect("holders")
+            .clone();
+        let follows = |n: &NodeId| *n != older;
+        assert_eq!(RankBy::of_holders(&holders, follows), RankBy::Part);
+        assert_eq!(RankBy::of_holders(&holders, |_| true), RankBy::Model);
+        let keepers = |index: u32, newer: RankBy| {
+            holders
+                .iter()
+                .filter(|n| {
+                    let by = if **n == older { RankBy::Part } else { newer };
+                    kept_by_rank(&part(index), &holders, n, 2, by)
+                })
+                .count()
+        };
+        let by = RankBy::of_holders(&holders, follows);
+        for index in 0..24 {
+            assert_eq!(keepers(index, by), 2, "part {index} keeps two copies");
+        }
+        // Control: the newer ranking by the model whatever the older does.
+        assert!(
+            (0..24).any(|index| keepers(index, RankBy::Model) < 2),
+            "control: by the model beside one by the part, some part keeps fewer than two"
+        );
+    }
+
     /// A model that has cooled keeps TWO copies of each part (2026-11-15:
     /// "we need to ensure the pruning doesnt just, remove all parts"):
     /// exactly two of a part's holders keep, whatever order they are listed
@@ -868,7 +980,7 @@ mod tests {
                 };
                 holders
                     .iter()
-                    .filter(|n| super::kept_by_rank(&part, &holders, n, 2))
+                    .filter(|n| super::kept_by_rank(&part, &holders, n, 2, super::RankBy::Model))
                     .cloned()
                     .collect::<Vec<_>>()
             })

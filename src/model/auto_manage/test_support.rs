@@ -219,7 +219,7 @@ pub(super) fn peer_with_id(
 }
 
 /// `n` machine ids ranked above `local` on every one of `parts` in rendezvous
-/// order ([`super::coverage::part_rank_weight`]), drawn from a fixed sequence.
+/// order, by the part and by the model ([`ranked_above_both_ways`]), drawn from a fixed sequence.
 /// This node's own id is random (`Identity::generate`): the 253 one-byte ids a
 /// test searched found two only ~96% of the time — a node ranked near the top
 /// of both parts has few above it — and a full test run failed on it
@@ -230,17 +230,23 @@ pub(super) fn peer_with_id(
 /// asks again (proptest's `prop_assume!` discards an unusable input the same
 /// way), which bounds the search where widening it never could.
 pub(super) fn ids_ranked_above(local: &NodeId, parts: &[ShardId], n: usize) -> Option<Vec<NodeId>> {
-    use super::coverage::part_rank_weight;
     let found: Vec<NodeId> = (0u32..1_000_000)
         .map(|i| NodeId(*blake3::hash(&i.to_le_bytes()).as_bytes()))
-        .filter(|id| {
-            parts
-                .iter()
-                .all(|p| part_rank_weight(p, id) > part_rank_weight(p, local))
-        })
+        .filter(|id| parts.iter().all(|p| ranked_above_both_ways(p, id, local)))
         .take(n)
         .collect();
     (found.len() == n).then_some(found)
+}
+
+/// Is `a` ranked above `b` among `part`'s holders by the part AND by the
+/// model — above it whichever way the holders rank
+/// (`coverage::RankBy::of_holders`: a fixture's peers advertise no
+/// `CARD_RANGES` unless it says so)?
+pub(super) fn ranked_above_both_ways(part: &ShardId, a: &NodeId, b: &NodeId) -> bool {
+    use super::coverage::{rank_weight, RankBy};
+    [RankBy::Model, RankBy::Part]
+        .into_iter()
+        .all(|by| rank_weight(part, a, by) > rank_weight(part, b, by))
 }
 
 /// Record `node` as a holder of `parts` of `mid`.

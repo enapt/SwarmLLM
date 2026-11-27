@@ -978,8 +978,15 @@ no layer below the target is not planned. The download pass fetches this node's 
 and ring and nothing else of the model on a weighed card (a hole excepted); prune keeps the run below
 urgent and gives back an off-run copy the target's worth of other cards hold inside theirs, never
 from a model held whole here; a planned card fetching nothing for 20 min is passed over 2 h. Room is
-now given back by the MODEL's rank (`coverage::part_rank_weight`), so a holder keeps or gives back
-its run together. A/B `SWARMLLM_CARD_RANGES=0`.
+now given back by the MODEL's rank (`coverage::RankBy::Model`), so a holder keeps or gives back
+its run together — **only where every holder of the part advertises `CARD_RANGES`; else every holder
+ranks by the part, as v0.3.315 and older do** (`AutoShardManager::rank_by`, the one reading, for
+`spare_for_room` and the off-run surplus; second pre-release review, 2026-11-27): the guarantee that
+holders deciding at once never all give theirs back needs them to rank ALIKE, and a holder ranking by
+the part beside others ranking by the model let each count another as the keeper (test
+`holders_rank_by_the_model_only_where_every_one_does`, whose control keeps fewer than two copies of
+some part). Prior art: Kafka turns on what its brokers must compute alike only once every broker
+advertises it (`inter.broker.protocol.version`, KIP-584). A/B `SWARMLLM_CARD_RANGES=0`.
 
 **Pre-release review, same day** (Fable, read-only; each claim checked in the code before it was
 acted on): a run is planned only for a computer advertising `features::CARD_RANGES` (bit 48, not in

@@ -2021,6 +2021,7 @@ impl AutoShardManager {
             holders,
             self.shared_state.identity.node_id(),
             room.floor,
+            self.rank_by(holders),
         ) {
             return Some("this computer is among the holders that keep theirs");
         }

@@ -2207,23 +2207,18 @@ mod room_wanted {
     /// scenario needs a node that does not, so the callers draw a fresh node, as
     /// proptest's `prop_assume!` discards an input rather than failing on it.
     fn far_computers(local: &NodeId, copies: &ModelId, want: &Far) -> Option<Vec<NodeId>> {
-        use super::super::coverage::part_rank_weight;
+        use super::super::test_support::ranked_above_both_ways;
         let part = |index| ShardId {
             model_id: copies.clone(),
             index,
         };
         let candidates =
             (0u32..1_000_000).map(|i| NodeId(*blake3::hash(&i.to_le_bytes()).as_bytes()));
-        let above_here = |n: &NodeId| {
-            (0..2).all(|i| part_rank_weight(&part(i), n) > part_rank_weight(&part(i), local))
-        };
+        let above_here = |n: &NodeId| (0..2).all(|i| ranked_above_both_ways(&part(i), n, local));
         let picked: Vec<NodeId> = match want {
             Far::AboveHereOnPartsZeroAndOne => candidates.filter(above_here).take(2).collect(),
             Far::BelowHereOnEveryPart => candidates
-                .filter(|n| {
-                    (0..2)
-                        .all(|i| part_rank_weight(&part(i), n) < part_rank_weight(&part(i), local))
-                })
+                .filter(|n| (0..2).all(|i| ranked_above_both_ways(&part(i), local, n)))
                 .take(2)
                 .collect(),
             Far::One => candidates.take(1).collect(),
@@ -2491,7 +2486,7 @@ mod room_wanted {
     /// which have only two holders each.
     #[tokio::test]
     async fn a_copy_of_the_wanted_parts_own_model_is_never_given_back() {
-        use super::super::coverage::part_rank_weight;
+        use super::super::test_support::ranked_above_both_ways;
         let shape = full_node_beside_parts_held_once(Far::One);
         let state = &shape.state;
         let local = state.identity.node_id().clone();
@@ -2501,7 +2496,7 @@ mod room_wanted {
         };
         let above: Vec<NodeId> = (1_000_000u32..2_000_000)
             .map(|i| NodeId(*blake3::hash(&i.to_le_bytes()).as_bytes()))
-            .filter(|n| part_rank_weight(&part_zero, n) > part_rank_weight(&part_zero, &local))
+            .filter(|n| ranked_above_both_ways(&part_zero, n, &local))
             .take(3)
             .collect();
         for id in above {
