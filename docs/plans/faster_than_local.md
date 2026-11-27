@@ -481,6 +481,17 @@ near-tie or treats structured output. **What it changes here**: the mode's first
 thinking-only one — near-ties kept inside a `<think>` span (Qwen 3/3.5, the reasoning families), the
 answer checked exactly — before any whole-reply form; tool calls and `response_format` stay exact.
 
+**Reach, checked 2026-11-27 — NOT built.** The rule changes only a GREEDY reply, and a greedy reply inside
+`<think>` is the setting the reasoning families' own cards rule out: Qwen3's thinking mode is "Temperature=0.6,
+TopP=0.95, TopK=20" with "DO NOT use greedy decoding, as it can lead to performance degradation and endless
+repetitions" (Qwen quickstart; the Qwen3-8B card). Our own defaults sample too: an OpenAI request without a
+temperature runs at 0.7 (`api/openai/types.rs` `default_temperature`), an Anthropic one at 1.0, the dashboard's
+chat and Compare at 0.7. So the thinking-only form would fire for no default reply and for no request a reasoning
+model's card recommends; the gain measured above belongs to temperature-0 requests only. Still open, each needing
+its own measurement before code: (a) the whole-reply greedy form, opt-in and labelled, for temperature-0 clients;
+(b) a SAMPLED near-tie — the rule on the shared-noise scores the coupled draw already compares — which no primary
+source measures (Medusa's typical acceptance is the nearest, and vLLM's v1 engine dropped it). Neither is queued.
+
 **7.4 Fewer bytes a row without losing anything: ~8% is all there is.** For a large model on a
 home uplink the rows, not the round trip, set the tree's width: a 70B row is 8,192 values, ~8.7 KB
 at Q8_0, so 64 guesses a round at ~6.5 rounds a second is ~29 Mbit/s a hop, past most home uploads,
