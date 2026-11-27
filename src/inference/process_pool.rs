@@ -7411,12 +7411,12 @@ impl ModelProcessPool {
                 .is_some_and(|h| !h.short_of_the_card())
     }
 
-    /// Would `layers` of `model_id` a plan gives this node run whole on the
-    /// card — asked before the reply loads anything
+    /// Would the `ranges` of `model_id` a plan gives this node run whole on
+    /// the card — asked before the reply loads anything
     /// (`pipeline::every_segment_runs_on_a_card`, read by
     /// `dsd_flow::recurrent_flow_may_start` before a Qwen 3.5 reply's first
-    /// token). A live worker answers for itself
-    /// ([`Self::runs_whole_on_the_card`]). With none, the spawn the plan leads
+    /// token). A live worker answers for itself, for those RANGES
+    /// ([`Self::worker_runs_ranges_on_the_card`]). With none, the spawn the plan leads
     /// to is weighed as the planner weighed this node: on the card
     /// ([`Self::planning_on_card`]) and no wider than the layers it has room
     /// for there ([`Self::max_hostable_layers_for_planning`]) — wider, the
@@ -7432,16 +7432,64 @@ impl ModelProcessPool {
     pub fn runs_whole_on_the_card_for_a_plan(
         &self,
         model_id: &ModelId,
-        layers: u32,
+        ranges: &[(u32, u32)],
         requester: Requester,
     ) -> bool {
-        if self.live_worker(model_id).is_some() {
-            return self.runs_whole_on_the_card(model_id);
+        if let Some(handle) = self.live_worker(model_id) {
+            return self.worker_runs_ranges_on_the_card(model_id, &handle, ranges);
         }
+        let layers: u32 = ranges
+            .iter()
+            .map(|&(start, end)| end.saturating_sub(start))
+            .sum();
         self.planning_on_card(model_id, requester)
             && self
                 .max_hostable_layers_for_planning(model_id, requester)
                 .is_some_and(|room| layers > 0 && layers <= room)
+    }
+
+    /// Does `handle`, `model_id`'s live worker, run every layer of `ranges` on
+    /// the card? Wholly on the card, yes ([`Self::runs_whole_on_the_card`]).
+    /// Short of it, yes only for ranges that each lie inside a range it holds
+    /// and clear of that range's processor run, where the loader put it
+    /// ([`Self::processor_layers_of`]): a worker serves a slice of what it
+    /// holds as it stands (#449), so a slice of a card/processor split can run
+    /// wholly on the card. Asked of the whole worker, a split head never
+    /// flowed: on the 14B to Australia (t507, 2026-11-27) a reply planned
+    /// `[0, 26)` spawned 21 of its 26 layers on the card, the next eight were
+    /// planned `[0, 16)` — the card's — and ran streamed checks at 13-18 prose
+    /// and 35-36 code tok/s against the flow's 20-26 and 48-49. Processor
+    /// placements, experts kept in system memory over the range, and a range
+    /// it does not hold: no. llama.cpp places by the layer (`dev_layer`).
+    fn worker_runs_ranges_on_the_card(
+        &self,
+        model_id: &ModelId,
+        handle: &WorkerHandle,
+        ranges: &[(u32, u32)],
+    ) -> bool {
+        if !self.card_in_play() {
+            return false;
+        }
+        if !handle.short_of_the_card() {
+            return true;
+        }
+        if handle.placed_on_cpu_because.is_some() || ranges.is_empty() {
+            return false;
+        }
+        let charged: Vec<((u32, u32), Option<CardSplit>)> = handle
+            .charged_segments
+            .lock()
+            .map(|v| v.iter().map(|c| (c.range, c.split)).collect())
+            .unwrap_or_default();
+        ranges.iter().all(|&(start, end)| {
+            start < end
+                && charged.iter().any(|&(held, split)| {
+                    let (run_start, run_end) = self.processor_layers_of(model_id, held, split);
+                    held.0 <= start
+                        && end <= held.1
+                        && (run_end <= run_start || end <= run_start || run_end <= start)
+                })
+        })
     }
 
     /// Can any model use this node's graphics card at all: one detected, one
@@ -21926,40 +21974,67 @@ mod tests {
             "fixture: no worker, so the live reading says no"
         );
         assert!(
-            p.runs_whole_on_the_card_for_a_plan(&m, room, Requester::Swarm),
+            p.runs_whole_on_the_card_for_a_plan(&m, &[(0, room)], Requester::Swarm),
             "the layers the planner gave the card run on it"
         );
         assert!(
-            !p.runs_whole_on_the_card_for_a_plan(&m, room + 1, Requester::Swarm),
+            !p.runs_whole_on_the_card_for_a_plan(&m, &[(0, room + 1)], Requester::Swarm),
             "one more and the spawn puts some on the processor"
         );
-        assert!(!p.runs_whole_on_the_card_for_a_plan(&m, 0, Requester::Swarm));
+        assert!(!p.runs_whole_on_the_card_for_a_plan(&m, &[], Requester::Swarm));
 
-        // A live worker answers for itself, whatever the plan's width.
+        // A live worker answers for itself, for the ranges the plan gives it.
         let now = std::time::Instant::now();
-        p.workers.insert(
-            m.clone(),
-            fake_worker_handle_split(
-                false,
-                None,
-                false,
-                now,
-                Some(CardSplit::Layers {
-                    on_card: 13,
-                    total: 28,
-                }),
-            )
-            .await,
+        let split = CardSplit::Layers {
+            on_card: 13,
+            total: 28,
+        };
+        let worker = fake_worker_handle_split(false, None, false, now, Some(split)).await;
+        p.workers.insert(m.clone(), Arc::clone(&worker));
+        assert!(
+            !p.runs_whole_on_the_card_for_a_plan(&m, &[(0, 1)], Requester::Swarm),
+            "a live card/processor split holding no range the plan names"
+        );
+        // Holding [0, 28) with 13 layers on the card, a slice clear of its
+        // processor run runs wholly on the card; one reaching into it does
+        // not (t507, 2026-11-27: the head's [0, 16) of a [0, 26) split).
+        worker.record_segment_placed_as_spawned((0, 28));
+        let (run_start, run_end) = p.processor_layers_of(&m, (0, 28), Some(split));
+        assert_eq!(
+            run_end - run_start,
+            15,
+            "fixture: 15 layers on the processor"
+        );
+        let on_card: (u32, u32) = if run_start > 0 {
+            (0, run_start)
+        } else {
+            (run_end, 28)
+        };
+        assert!(
+            p.runs_whole_on_the_card_for_a_plan(&m, &[on_card], Requester::Swarm),
+            "the slice {on_card:?} the card runs, beside the processor run [{run_start}, {run_end})"
         );
         assert!(
-            !p.runs_whole_on_the_card_for_a_plan(&m, 1, Requester::Swarm),
-            "a live card/processor split"
+            !p.runs_whole_on_the_card_for_a_plan(
+                &m,
+                &[(run_start, run_start + 1)],
+                Requester::Swarm
+            ),
+            "a slice reaching into the processor run"
+        );
+        assert!(
+            !p.runs_whole_on_the_card_for_a_plan(&m, &[on_card, (0, 28)], Requester::Swarm),
+            "every range, not any"
+        );
+        assert!(
+            !p.runs_whole_on_the_card(&m),
+            "the worker as a whole is still short of the card"
         );
         p.workers.remove(&m);
 
         p.test_card_in_play.store(false, Ordering::Relaxed);
         assert!(
-            !p.runs_whole_on_the_card_for_a_plan(&m, room, Requester::Swarm),
+            !p.runs_whole_on_the_card_for_a_plan(&m, &[(0, room)], Requester::Swarm),
             "no card in play"
         );
     }

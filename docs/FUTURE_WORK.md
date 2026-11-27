@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #508**; #505 is reserved for the carry ask, memory `next_up.md` item 5b). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #509**; #505 is reserved for the carry ask, memory `next_up.md` item 5b). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -1077,7 +1077,18 @@ peers run this release; (2) on the real link (11-27 27m/27n, here [0, 21) → US
 the table read at home served every reply (n-gram loop 3.07-3.12 tok/s, against 2.9-3.0 at [0, 18) with
 it on the card in 27l) — three more layers here, where the card had held 18 — but the 0.8B guessing
 model still does not fit beside 21 of the 27B's layers (room for 19 beside its Q8_0, 20 beside its
-Q4_K_M); at [0, 18) it does, and the flow then waits on the far card's memory (#506 (5)).
+Q4_K_M); at [0, 18) it does, and the flow then waits on the far card's memory (#506 (5)); (3) **the
+planner does not hand the room out**: this node's room for a plan is read off the WHOLE model's cost
+curve (`ModelProcessPool::segment_cost_curve` → `footprint_inputs(model, None)`, which keeps the table on
+the card, as a whole model does), so a head is offered the layers it was before — the 14B A/B below read
+`room_for=Some(19)` beside the 1.5B drafter in both arms. The curve charges every segment the token
+table and the output head alike (a middle segment loads neither); a curve per position (first / middle /
+last, as `RangeWeights::excess_layers` weighs a peer) would offer the room. **Measured on the 14B**
+(t507, 2026-11-27 16:59-17:18Z, this card + AU's 3060, the 1.5B Q8_0 drafter flowing, the planner's cut
+`[0, 16)` both ways, the copy store off, ABBA, 8 replies an arm): table at home prose 22.2-26.1 (median
+24.1) and code 49.0-51.9 tok/s; on the card (two arms) prose 19.6-26.2 (22.2 / 23.4) and code 43.7-49.1
+(46.0 / 48.5) — at the same cut a wash to slightly faster at home (no reply went wrong); arm 1 (home) is
+not counted: its head's worker was a `[0, 26)` card/processor split and refused the flow (#508).
 
 #### #484 — For up to a minute after a peer's last reply of one model, the next model's plan prices that peer's room as still held
 `P2` · routing · **OPEN** — 2026-11-20 · history: #447, #479, #481 (5), #482 (whose measured case this is)
@@ -8767,6 +8778,26 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-11-27** (#508)
+- #508 — `P1` — **A split's head whose worker held a wider range across card and processor never let its tree
+  flow, though the slice it served ran wholly on the card.** The flow needs every segment on a card
+  (`pipeline::every_segment_runs_on_a_card`), and this node's part was asked of the WORKER
+  (`runs_whole_on_the_card`: not short of the card). Found by the #507 A/B on the real link (t507, 14B, this
+  card + AU's 3060, the 1.5B drafter, 2026-11-27): arm 1's warm-up was planned `[0, 26)` (AU still held
+  `[26, 48)` from the sitting before), its worker placed 21 of 26 layers on the card, and the next eight
+  replies, planned `[0, 16)` — the card's layers, served as a slice (#449) — ran streamed checks
+  ("peer-last") at 13-18 prose and 35-36 code tok/s, against the flow's 20-26 and 48-49 in the arm whose
+  first plan was `[0, 16)`. A worker keeps what it holds while it serves a slice (`promotion_keeps_what_it_holds`),
+  so it stayed that way for the worker's life — and a flow balance (#504) or a drafter's room (#275) narrowing
+  a head's range meets the same worker. Fixed: `runs_whole_on_the_card_for_a_plan` takes the plan's RANGES, and a
+  live worker answers for them (`ModelProcessPool::worker_runs_ranges_on_the_card`): wholly on the card, yes;
+  short of it, yes only where each range lies inside a range it holds and clear of that range's processor run,
+  where the loader put it (`processor_layers_of`); a processor placement, a range it does not hold, or one
+  reaching the run, no. Test: `a_plans_layers_with_no_worker_yet_run_on_the_card_where_the_planner_gave_the_card_room`
+  (a live `[0, 28)` split with 13 on the card: the card's slice flows, one reaching the run does not, red with
+  the worker asked whole). Prior art: llama.cpp places by the layer (`dev_layer(il)`), so whether a step runs on
+  the card is a fact about the layers it reads.
 
 **Closed 2026-11-27** (#500)
 - #500 — `P3` — **A CUDA build's unit tests read this machine's graphics card: six failed together that each pass

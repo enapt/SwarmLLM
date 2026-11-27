@@ -4311,6 +4311,17 @@ refusal now logs which condition refused (`DSD: a recurrent model's tree may not
 Prior art: Ollama places by the layers that WOULD fit before its runner loads (`llm/memory.go`
 `EstimateGPULayers`).
 
+**A fourth time, for a SLICE of this node's worker (2026-11-27, #508).** A live worker answered for
+itself as a whole: short of the card, no flow. A head whose worker was spawned for `[0, 26)` across
+card and processor (21 on the card) and then planned `[0, 16)` — the card's layers, served as a slice
+(#449) — ran streamed checks for every reply after (t507 arm 1, 14B to AU: prose 13-18 and code 35-36
+tok/s against the flow's 20-26 and 48-49). The worker keeps what it holds while it serves a slice
+(`promotion_keeps_what_it_holds`), so nothing undid it. `runs_whole_on_the_card_for_a_plan` now takes
+the plan's RANGES and a live worker answers for those (`worker_runs_ranges_on_the_card`): each inside a
+range it holds and clear of that range's processor run where the loader put it (`processor_layers_of`).
+*Must keep*: a range reaching the processor run, a processor placement, experts in system memory over
+the range, or a range the worker does not hold answers no.
+
 **Measured** (real link, three arms alternating on/off/on, 160-token replies, the 3060 slower and
 noisier than that morning — its fixed-route flow read code 11.0-23.1): with it on the explored
 requests split, peer-first (`[0..24)` on the 3060's whole copy, served with no load, + `[24..48)`

@@ -991,18 +991,18 @@ pub(super) fn every_segment_runs_on_a_card(
     requester: crate::inference::process_pool::Requester,
 ) -> bool {
     let local = shared_state.identity.node_id();
-    let layers_here: u32 = segments
+    let ranges_here: Vec<(u32, u32)> = segments
         .iter()
         .filter(|s| s.node_id == *local)
-        .map(|s| s.layer_range.1.saturating_sub(s.layer_range.0))
-        .sum();
+        .map(|s| s.layer_range)
+        .collect();
     every_segment_on_a_card(
         segments,
         local,
         || {
             shared_state
                 .model_process_pool
-                .runs_whole_on_the_card_for_a_plan(model_id, layers_here, requester)
+                .runs_whole_on_the_card_for_a_plan(model_id, &ranges_here, requester)
         },
         |node| {
             shared_state.peer_registry.get(node).is_some_and(|p| {
