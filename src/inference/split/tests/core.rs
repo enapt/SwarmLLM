@@ -1311,6 +1311,7 @@ fn forward_batch_timing() {
     let hidden_dim = 1024;
     let num_layers = 22;
     // Try CUDA first (the batching win's home turf); fall back to CPU.
+    let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
     let (device, device_label) = match candle_core::Device::new_cuda(0) {
         Ok(d) => (d, "CUDA:0"),
         Err(_) => (candle_core::Device::Cpu, "CPU"),
@@ -1411,6 +1412,7 @@ fn forward_batch_timing() {
 fn forward_prefill_batch_timing() {
     let hidden_dim = 1024;
     let num_layers = 22;
+    let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
     let (device, device_label) = match candle_core::Device::new_cuda(0) {
         Ok(d) => (d, "CUDA:0"),
         Err(_) => (candle_core::Device::Cpu, "CPU"),
@@ -1870,6 +1872,7 @@ fn a_splits_kept_rows_are_on_the_models_device_whichever_device_ran_the_chunk() 
     use crate::inference::layers::{
         let_processor_layers_read_prompts_on, PROMPT_ON_CARD_MIN_TOKENS,
     };
+    let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
     let Ok(card) = Device::new_cuda(0) else {
         return;
     };

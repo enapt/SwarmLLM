@@ -7917,37 +7917,6 @@ nothing, the worker reads weights on `DaemonMsg::LoadRange`.
 
 ### Packaging, release and operations
 
-#### #500 — A CUDA build's unit tests read this machine's graphics card: six fail there that pass in the default build
-`P3` · tests · **PARTIAL** (nine fixed by `b37de5e36`, two by the cache-layout test input) — 2026-11-25 · history: rigs `~/swarmllm-gate/deep/dec1125/pool_tests{,_before}.log`, `m256/suite_on.log`, `lease1125/p500*`
-
-CI never runs a card build's lib tests, so nothing showed it. The card build's lib suite at `--test-threads=2`
-(2026-11-24 19:37Z) failed 15. `b37de5e36` starts a test's pool with no card detected (`gpu_detected` =
-`!cfg!(test)`; every reader also asks `cfg!(feature = "candle-cuda")`, so only a card build's tests had taken this
-machine's real card): process_pool 11 → 2 failing in one card test build of each, none newly failing; the default
-build's 251 pool tests unchanged.
-**The last two pool tests read no card: they read the CACHE LAYOUT** (2026-11-25; the hypothesis above, a card
-check or reading, was wrong). A card build is `--features cuda`, which brings `flash-attn`, and with it
-`layers::kv_storage` prices a card's cache as the half cache — f16, a third of the f32 cache plus its mirror. The two
-fixtures were sized on the default build's f32 cache: `a_fresh_segment_is_weighed_at_both_ends_of_the_model`'s
-1,500 MB card then held the whole model (`Some(8)` against `Some(3)`), and the control of
-`a_split_spawn_leaves_room_for_the_plans_other_ranges_here` left 600 MB for the 516 MB layer it is sized to refuse.
-Shown in the card binary itself: with `SWARMLLM_KV_F16=0` (f32 plus the mirror) the first fails at its own fixture
-check instead. Now each takes `layers::cache_kept_as_without_flash` (this thread's `kv_storage` keeps a card's cache as
-a build without the flash kernel, until the guard drops; prior art: tokio's `time::pause`, scoped to the test's own
-runtime). Card build (`lease1125/swarmllm-test-p500`): both pass, every pool test 251/251, the half cache's own test
-and `kv_budget::` 32/32 unchanged; the binary before it failed both; the default build's 251 unchanged. **The whole
-card-build lib suite at `--test-threads=1` now passes**: 4,898, 0 failed, 40 ignored (`lease1125/suite_p500.log`, live
-node stopped, the safety kit on, 0 driver events).
-Left (the only failures a card build's suite still shows):
-- Four pass ALONE in both binaries and fail together at `--test-threads=2`: `split::tests::draft_trees::`
-  `{a_first_segment_records_its_shapes_before_a_reply_needs_them,
-  a_recording_whose_last_graph_is_made_is_finished_though_a_message_came, a_reply_after_the_idle_recording_makes_no_graph}`
-  and `layers::copies_beside_tests::a_splits_prompt_copies_arrive_intact_and_hold_a_bounded_share_of_the_card` — two
-  card tests on one card at once (graph recording, the card's memory share). Next: one process-wide lock the card
-  tests take, or run the card suite at `--test-threads=1`.
-Prior art: hermetic tests never read the machine's hardware (Bazel's test sandbox); the `serial_test` crate
-serialises tests that share one resource.
-
 #### #474 — chrono is unmaintained (RUSTSEC-2026-0543), and every timestamp here is chrono's
 `P4` · build · **OPEN** — 2026-11-17 (the sweep's `cargo audit`: a warning, not a failure — informational, no patched version) · history: `SECURITY.md` row RUSTSEC-2026-0543
 
@@ -8678,6 +8647,25 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-11-27** (#500)
+- #500 — `P3` — **A CUDA build's unit tests read this machine's graphics card: six failed together that each pass
+  alone.** CI never runs a card build's lib tests. Earlier parts: `b37de5e36` (a test's pool detects no card) and
+  `layers::cache_kept_as_without_flash` (two fixtures sized on the f32 cache). Left after them: at
+  `--test-threads=2` the draft-tree graph recording tests and the card-memory share test
+  (`a_splits_prompt_copies_arrive_intact_and_hold_a_bounded_share_of_the_card`) failed 5-6 a run, each passed alone,
+  and four of them failed together (`~/swarmllm-gate/deep/suite1127/run_four.out`, main `9140b349c`; at one thread
+  4,911 passed). Each test's `CudaDevice` has its own stream (gotcha #1118) and a capture is thread-local, so what
+  they share is process-wide: the graph module's statics, and the card's memory pool, one a process. Fixed:
+  `cuda_graph::card_to_itself`, one process-wide lock every test that opens the card takes on the line before (61
+  sites: `Device::new_cuda(0)`, the one `Device::new_cuda_with_stream(0)`, and five loader tests opening it as a
+  worker's load does, `super::load_device(false)`); guard `every_card_test_has_the_card_to_itself` names a site
+  without it (red with one removed). With the first 55 locked the four passed together 3 runs of 3, and the memory
+  test still failed in the whole suite: it reads the PROCESS's pool, and its neighbour in the run's order,
+  `flash_vs_standard::flash_launches_on_the_devices_own_stream` (built by `new_cuda_with_stream`, which the guard's
+  pattern missed), ran unlocked beside it — the pair alone at two threads read 512-544 MB, 3 runs of 3; each group
+  of likely suspects beside it passed. After: the card suite at two threads passed 3 runs of 3 (4,912, 0 failed), the four together 3 of 3, the pair 3 of 3 (320 MB), one thread 4,912 (`~/swarmllm-gate/deep/suite1127/run_after500.out`, `run_pair500c.out`; 0 driver events). Prior art: the
+  `serial_test` crate serialises the tests sharing one resource; `rusty-fork` runs one in a subprocess (not needed).
 
 **Closed 2026-11-27** (#503)
 - #503 — `P1` — **A far computer that just served one split shape refused the next shape for two minutes, then

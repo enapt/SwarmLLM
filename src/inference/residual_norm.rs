@@ -553,6 +553,7 @@ mod tests {
     #[cfg(feature = "candle-cuda")]
     #[test]
     fn cuda_add_rms_norm_is_bit_identical_to_the_composed_path() {
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let dev = match Device::new_cuda(0) {
             Ok(d) => d,
             Err(e) => {
@@ -621,6 +622,7 @@ mod tests {
     #[cfg(feature = "candle-cuda")]
     #[test]
     fn a_narrow_row_normed_with_1024_threads_is_candles_norm() {
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let dev = match Device::new_cuda(0) {
             Ok(d) => d,
             Err(e) => {

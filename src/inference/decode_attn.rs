@@ -1690,6 +1690,7 @@ mod tests {
     #[cfg(feature = "candle-cuda")]
     #[test]
     fn cuda_decode_kernel_matches_the_matmul_path() {
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let card = match Device::new_cuda(0) {
             Ok(d) => d,
             Err(e) => {
@@ -1836,6 +1837,7 @@ mod tests {
     #[cfg(feature = "candle-cuda")]
     #[test]
     fn the_tensor_core_decode_kernel_matches_f32_attention() {
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let card = match Device::new_cuda(0) {
             Ok(d) => d,
             Err(e) => {
@@ -2039,6 +2041,7 @@ mod tests {
     #[cfg(feature = "candle-cuda")]
     #[test]
     fn cuda_decode_kernel_folds_in_attention_sinks_as_the_processor_does() {
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let card = match Device::new_cuda(0) {
             Ok(d) => d,
             Err(e) => {
@@ -2191,6 +2194,7 @@ mod tests {
     #[test]
     fn cuda_tree_kernel_matches_the_masked_matmul_path() {
         use crate::inference::draft_tree::{DraftTree, MAX_TREE_ROWS};
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let card = match Device::new_cuda(0) {
             Ok(d) => d,
             Err(e) => {
@@ -2510,6 +2514,7 @@ mod tests {
     #[test]
     fn a_tree_call_the_kernel_cannot_take_without_a_mask_fails() {
         use crate::inference::draft_tree::DraftTree;
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let card = match Device::new_cuda(0) {
             Ok(d) => d,
             Err(e) => {
@@ -2585,6 +2590,7 @@ mod tests {
     #[test]
     #[ignore]
     fn tree_attention_timing() {
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let card = Device::new_cuda(0).expect("a card");
         for (n_head, n_kv_head, d) in [(14usize, 2usize, 64usize), (28, 4, 128)] {
             for s_len in [300usize, 900] {
@@ -2699,6 +2705,7 @@ mod tests {
     #[test]
     #[ignore]
     fn tree_context_on_flash_timing() {
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let card = Device::new_cuda(0).expect("a card");
         let sms = card_sms(&card).expect("the card's multiprocessors");
         for (n_head, n_kv_head, d) in [(14usize, 2usize, 64usize), (28, 4, 128)] {
@@ -2796,6 +2803,7 @@ mod tests {
     #[test]
     fn the_staged_merge_is_the_serial_one_bit_for_bit() {
         use candle_core::DType;
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let card = match Device::new_cuda(0) {
             Ok(d) => d,
             Err(e) => {
@@ -2890,6 +2898,7 @@ mod tests {
     #[test]
     fn one_chunk_merged_is_bit_identical_to_the_direct_write() {
         use candle_core::DType;
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let card = match Device::new_cuda(0) {
             Ok(d) => d,
             Err(e) => {

@@ -1412,6 +1412,7 @@ mod copies_beside_tests {
     /// itself took fresh memory every time (768 MB for these 48).
     #[test]
     fn a_splits_prompt_copies_arrive_intact_and_hold_a_bounded_share_of_the_card() {
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let Ok(card) = Device::new_cuda(0) else {
             return;
         };
@@ -7888,6 +7889,7 @@ mod cuda_attention_memory_probe {
     #[test]
     #[ignore]
     fn attention_survives_a_prefill_that_would_otherwise_exhaust_the_card() {
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let dev = match Device::new_cuda(0) {
             Ok(d) => d,
             Err(e) => {
@@ -8162,6 +8164,7 @@ mod cuda_mlp_memory_probe {
     #[test]
     #[ignore]
     fn feed_forward_survives_a_prefill_that_would_otherwise_exhaust_the_card() {
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let dev = match Device::new_cuda(0) {
             Ok(d) => d,
             Err(e) => {
@@ -8443,6 +8446,7 @@ mod flash_vs_standard {
     /// misread, rows would come from the wrong head or position and this fails.
     #[test]
     fn flash_reads_the_half_cache_in_place_as_it_read_the_mirror() {
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let Ok(dev) = Device::new_cuda(0) else {
             eprintln!("no CUDA device — skipping");
             return;
@@ -8520,6 +8524,7 @@ mod flash_vs_standard {
     /// the wrong span and this fails loudly rather than shipping quiet garbage.
     #[test]
     fn flash_matches_standard_on_a_warm_prefix() {
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let Ok(dev) = Device::new_cuda(0) else {
             eprintln!("no CUDA device — skipping");
             return;
@@ -8621,6 +8626,7 @@ mod flash_vs_standard {
     /// has never been seen red proves nothing.
     #[test]
     fn flash_launches_on_the_devices_own_stream() {
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let dev = match Device::new_cuda_with_stream(0) {
             Ok(d) => d,
             Err(e) => {
@@ -8786,6 +8792,7 @@ mod flash_vs_standard {
     #[test]
     #[ignore]
     fn flash_vs_standard_attention_on_cuda() {
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let dev = match Device::new_cuda(0) {
             Ok(d) => d,
             Err(e) => {
@@ -9107,6 +9114,7 @@ mod card_quantized_products {
     #[test]
     fn a_product_that_finds_no_room_leaves_mmq_on() {
         let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let Ok(card) = Device::new_cuda(0) else {
             eprintln!("SKIPPED: no card");
             return;
@@ -9168,6 +9176,7 @@ mod card_quantized_products {
     #[test]
     fn many_rows_on_the_card_match_the_f32_product_of_the_same_weight() {
         let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let Ok(card) = Device::new_cuda(0) else {
             eprintln!("SKIPPED: no card");
             return;
@@ -9273,6 +9282,7 @@ mod card_quantized_products {
         use candle_core::cuda_backend::cudarc::driver::{result, sys};
         use candle_core::quantized::cuda::mmq_mma_products;
         let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let Ok(card) = Device::new_cuda(0) else {
             eprintln!("SKIPPED: no card");
             return;
@@ -9404,6 +9414,7 @@ mod card_quantized_products {
         use candle_core::cuda_backend::cudarc::driver::{result, sys};
         use candle_core::quantized::cuda::{rows_tc_products, rows_tc_takes};
         let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let Ok(card) = Device::new_cuda(0) else {
             eprintln!("SKIPPED: no card");
             return;
@@ -9588,6 +9599,7 @@ mod card_quantized_products {
         use candle_core::cuda_backend::cudarc::driver::{result, sys};
         use candle_core::quantized::cuda::{rows_tc_products, rows_tc_takes};
         let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let Ok(card) = Device::new_cuda(0) else {
             eprintln!("SKIPPED: no card");
             return;
@@ -10042,6 +10054,7 @@ mod attention_sink_tests {
     #[cfg(feature = "candle-cuda")]
     #[test]
     fn sinks_take_their_share_on_the_cards_matmul_path() {
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let card = match Device::new_cuda(0) {
             Ok(d) => d,
             Err(e) => {

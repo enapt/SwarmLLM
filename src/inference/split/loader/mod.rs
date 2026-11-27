@@ -3829,6 +3829,7 @@ mod expert_stack_tests {
     fn a_card_layer_with_its_experts_in_ram_answers_as_a_processor_layer_does() {
         use super::MoeFfn;
         // The card as a worker opens it (`load_device`, the one place).
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let card = super::load_device(false);
         if !card.is_cuda() {
             return;
@@ -3938,6 +3939,7 @@ mod expert_stack_tests {
         use super::MoeFfn;
         use crate::inference::layers::{ExpertFfn, QMatMul, MOE_CARD_ONE_ROW_MAX_TOKENS};
         use GgmlDType as G;
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let card = super::load_device(false);
         if !card.is_cuda() {
             return;
@@ -4141,6 +4143,7 @@ mod expert_stack_tests {
         use super::MoeFfn;
         use crate::inference::layers::{ExpertFfn, QMatMul, MOE_CARD_ONE_ROW_MAX_TOKENS};
         use GgmlDType as G;
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let card = super::load_device(false);
         if !card.is_cuda() {
             eprintln!("SKIPPED: no card");
@@ -4761,6 +4764,7 @@ mod weight_read_tests {
     #[cfg(feature = "candle-cuda")]
     #[test]
     fn a_weight_read_onto_the_card_holds_the_old_reads_bytes() {
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let device = super::load_device(false);
         if !device.is_cuda() {
             return;
@@ -4775,6 +4779,7 @@ mod weight_read_tests {
     #[cfg(feature = "candle-cuda")]
     #[test]
     fn a_weight_read_through_the_pinned_pair_holds_the_old_reads_bytes() {
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let device = super::load_device(false);
         if !device.is_cuda() {
             return;

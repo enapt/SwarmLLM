@@ -505,6 +505,7 @@ mod tests {
     /// a_flowing_trees_draws -- --nocapture` and look for no SKIPPED line.
     #[test]
     fn a_flowing_trees_draws_on_the_card_are_its_draws_from_whole_rows() {
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let dev = match Device::new_cuda(0) {
             Ok(d) => d,
             Err(e) => {
@@ -619,6 +620,7 @@ mod tests {
         let on_host = Tensor::from_vec(flat.clone(), (3, vocab), &Device::Cpu).unwrap();
         assert_eq!(greedy_picks(&on_host).unwrap(), Some(want.clone()));
 
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let dev = match Device::new_cuda(0) {
             Ok(d) => d,
             Err(e) => {

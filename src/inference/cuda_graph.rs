@@ -407,6 +407,27 @@ pub(crate) fn graph_memory_reserved_mb(device: &Device) -> Option<u64> {
     None
 }
 
+/// The graphics card to one test at a time (FUTURE_WORK #500): every test
+/// that opens the card takes this first, for its whole run. At two test
+/// threads six card tests failed together that each pass alone — the graph
+/// recording tests and one reading what the card's memory pool holds
+/// (`~/swarmllm-gate/deep/suite1127/`, 2026-11-27). Each test's `CudaDevice`
+/// has a stream of its own (gotcha #1118) and a capture is thread-local, so
+/// what they share is process-wide: this module's statics, and the card's
+/// memory pool — one a process, so the memory test read another card test's
+/// allocations as its own (512-544 MB beside one unlocked test, 3 runs of 3).
+/// The rest of the suite still runs in parallel. A test that panicked holding it hands it on
+/// (the poisoned lock is taken anyway): its failure is its own. Guard:
+/// `tests::every_card_test_has_the_card_to_itself`.
+/// Prior art: the `serial_test` crate serialises the tests sharing one
+/// resource; Bazel's test sandbox keeps tests off the machine's hardware.
+#[cfg(test)]
+pub(crate) fn card_to_itself() -> std::sync::MutexGuard<'static, ()> {
+    static CARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    CARD.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn device_says_no(device: &Device) -> Option<&'static str> {
     #[cfg(feature = "candle-cuda")]
     if let Device::Cuda(dev) = device {
@@ -2046,6 +2067,7 @@ mod cuda {
     #[test]
     #[ignore = "a card, run alone (--test-threads=1): a capture takes all the stream's work"]
     fn a_captured_copy_is_read_as_a_launch_naming_its_source_and_destination() {
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let Ok(device) = candle_core::Device::new_cuda(0) else {
             eprintln!("SKIPPED: no card");
             return;
@@ -2173,6 +2195,61 @@ pub(crate) mod relaunch_probe {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every test that opens the card — itself (`Device::new_cuda…`), or as a
+    /// worker's load picks it (`super::load_device(false)`) — takes
+    /// [`card_to_itself`] on the line
+    /// before (#500): one that does not is the next to break another's
+    /// recording or memory figures. Production code opens a card through
+    /// `daemon::gpu_support` and the loader, never `Device::new_cuda(0)`.
+    #[test]
+    fn every_card_test_has_the_card_to_itself() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("src is readable") {
+                let path = entry.expect("an entry").path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        walk(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
+        );
+        // A test opens the card itself, or as a worker's load picks it.
+        // `new_cuda(n)` and `new_cuda_with_stream(n)` alike: the one test
+        // built the second way was the one the memory test failed beside.
+        let opens = ["Device::new_cuda", "card_to_itself()"];
+        let as_a_load = "super::load_device(false)";
+        let mut checked = 0;
+        let mut missing = Vec::new();
+        for file in files {
+            let text = std::fs::read_to_string(&file).expect("a source file");
+            let lines: Vec<&str> = text.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                let code = line.trim_start();
+                // Its own literal names the call in quotes; a call does not.
+                let quoted = code.contains(&format!("\"{}", opens[0]));
+                let opens_the_card = code.contains(opens[0]) || code.contains(as_a_load);
+                if !opens_the_card || code.starts_with("//") || quoted {
+                    continue;
+                }
+                checked += 1;
+                let before = lines[..i].iter().rev().find(|l| !l.trim().is_empty());
+                if !before.is_some_and(|l| l.contains(opens[1])) {
+                    missing.push(format!("{}:{}", file.display(), i + 1));
+                }
+            }
+        }
+        assert!(checked > 0, "the guard found no card test to check");
+        assert!(
+            missing.is_empty(),
+            "a card test opens the card without `card_to_itself()` on the line before: {missing:?}"
+        );
+    }
 
     /// The idle recording names every chain width, widest first, then — where
     /// a tree's rows are captured — every tree row count up to

@@ -188,6 +188,7 @@ fn a_kept_path_read_again_continues_as_if_read_alone() {
 #[test]
 fn a_captured_tree_level_reads_as_the_ordinary_one() {
     use crate::inference::cuda_graph::DecodeGraphSlot;
+    let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
     let card = match Device::new_cuda(0) {
         Ok(d) => d,
         Err(e) => {
@@ -370,6 +371,7 @@ fn one_offs_in_a_reply_after_the_recording(
 #[test]
 fn a_reply_after_the_idle_recording_makes_no_graph() {
     use crate::inference::cuda_graph::MAX_POSITIONS;
+    let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
     let card = match Device::new_cuda(0) {
         Ok(d) => d,
         Err(e) => {
@@ -412,6 +414,7 @@ fn a_reply_after_the_idle_recording_makes_no_graph() {
 #[cfg(feature = "candle-cuda")]
 #[test]
 fn a_reply_before_the_idle_recording_makes_no_graph() {
+    let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
     let card = match Device::new_cuda(0) {
         Ok(d) => d,
         Err(e) => {
@@ -469,6 +472,7 @@ fn a_reply_before_the_idle_recording_makes_no_graph() {
 #[test]
 fn a_first_segment_records_its_shapes_before_a_reply_needs_them() {
     use crate::inference::cuda_graph::MAX_POSITIONS;
+    let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
     let card = match Device::new_cuda(0) {
         Ok(d) => d,
         Err(e) => {
@@ -507,6 +511,7 @@ fn a_first_segment_records_its_shapes_before_a_reply_needs_them() {
 #[cfg(feature = "candle-cuda")]
 #[test]
 fn a_wide_tree_on_the_card_reads_what_each_path_reads() {
+    let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
     let card = match Device::new_cuda(0) {
         Ok(d) => d,
         Err(e) => {
@@ -740,6 +745,7 @@ fn a_tree_that_does_not_fit_the_cache_is_refused_and_the_cache_kept() {
 #[cfg(feature = "candle-cuda")]
 #[test]
 fn a_recording_whose_last_graph_is_made_is_finished_though_a_message_came() {
+    let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
     let card = match Device::new_cuda(0) {
         Ok(d) => d,
         Err(e) => {

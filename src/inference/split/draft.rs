@@ -2006,6 +2006,7 @@ mod tests {
     fn the_card_ranks_a_level_as_the_host_does() {
         use crate::inference::tree_rank::{ranked_on_the_card, CardRanking};
         use candle_core::{Device, Tensor};
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let dev = match Device::new_cuda(0) {
             Ok(d) => d,
             Err(e) => {
@@ -2122,6 +2123,7 @@ mod tests {
         use crate::inference::tree_rank::{top_k_on_the_card, CardTopK, MOST_CANDIDATES};
         use crate::types::SamplingParams;
         use candle_core::{Device, Tensor};
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let dev = match Device::new_cuda(0) {
             Ok(d) => d,
             Err(e) => {

@@ -1426,6 +1426,7 @@ fn a_card_segment_keeping_its_experts_in_ram_works_on_the_processor_for_them() {
     use crate::inference::layers::{ExpertFfn, FfnVariant, LayerVariant};
     use crate::inference::prefill_pacer::PromptReader;
     use candle_core::quantized::GgmlDType as G;
+    let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
     let Ok(card) = Device::new_cuda(0) else {
         return;
     };

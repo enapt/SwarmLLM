@@ -331,6 +331,7 @@ mod tests {
     /// heads_first -- --nocapture` and look for no SKIPPED line.
     #[test]
     fn cuda_heads_first_is_bit_identical_to_the_composed_path() {
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let dev = match Device::new_cuda(0) {
             Ok(d) => d,
             Err(e) => {

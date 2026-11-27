@@ -4495,6 +4495,7 @@ mod tests {
     #[cfg(feature = "candle-cuda")]
     #[test]
     fn the_card_convolution_is_the_composed_one_bit_for_bit() {
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let Ok(device) = Device::new_cuda(0) else {
             eprintln!("SKIPPED: no card");
             return;
@@ -4624,6 +4625,7 @@ mod tests {
     #[cfg(feature = "candle-cuda")]
     #[test]
     fn the_card_gates_are_the_composed_ones() {
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let Ok(device) = Device::new_cuda(0) else {
             eprintln!("SKIPPED: no card");
             return;
@@ -4684,6 +4686,7 @@ mod tests {
     #[test]
     fn the_card_gates_after_quantized_projections_are_the_composed_ones_bit_for_bit() {
         use candle_core::quantized::GgmlDType;
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let Ok(device) = Device::new_cuda(0) else {
             eprintln!("SKIPPED: no card");
             return;
@@ -4732,6 +4735,7 @@ mod tests {
     #[test]
     fn the_card_gates_read_q8_0_weights_as_their_f32_dequantization_bit_for_bit() {
         use candle_core::quantized::GgmlDType;
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let Ok(device) = Device::new_cuda(0) else {
             eprintln!("SKIPPED: no card");
             return;
@@ -4795,6 +4799,7 @@ mod tests {
     #[cfg(feature = "candle-cuda")]
     #[test]
     fn the_card_l2_norm_is_the_composed_one() {
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let Ok(device) = Device::new_cuda(0) else {
             eprintln!("SKIPPED: no card");
             return;
@@ -4876,6 +4881,7 @@ mod tests {
     #[cfg(feature = "candle-cuda")]
     #[test]
     fn a_deltanet_layer_on_the_card_is_the_processors() {
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let Ok(device) = Device::new_cuda(0) else {
             eprintln!("SKIPPED: no card");
             return;
@@ -4948,6 +4954,7 @@ mod tests {
     #[cfg(feature = "candle-cuda")]
     #[test]
     fn a_replay_on_the_card_lands_where_the_composed_replay_does() {
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let Ok(device) = Device::new_cuda(0) else {
             eprintln!("SKIPPED: no card");
             return;
@@ -5842,6 +5849,7 @@ mod tests {
     #[cfg(feature = "candle-cuda")]
     #[test]
     fn a_flowing_tree_on_the_card_is_the_processors() {
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let Ok(device) = Device::new_cuda(0) else {
             eprintln!("SKIPPED: no card");
             return;
@@ -5899,6 +5907,7 @@ mod tests {
     #[test]
     fn a_tree_check_on_the_card_is_the_processors() {
         use crate::inference::draft_tree::DraftTree;
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let Ok(device) = Device::new_cuda(0) else {
             eprintln!("SKIPPED: no card");
             return;
@@ -6054,6 +6063,7 @@ mod tests {
     #[cfg(feature = "candle-cuda")]
     #[test]
     fn four_state_rows_a_warp_are_one_rows_bits() {
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let Ok(device) = Device::new_cuda(0) else {
             eprintln!("SKIPPED: no card");
             return;
@@ -6154,6 +6164,7 @@ mod tests {
     #[cfg(feature = "candle-cuda")]
     #[test]
     fn a_store_read_in_place_is_its_rows_gathered_bit_for_bit() {
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let Ok(device) = Device::new_cuda(0) else {
             eprintln!("SKIPPED: no card");
             return;

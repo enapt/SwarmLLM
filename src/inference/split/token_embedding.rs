@@ -380,6 +380,7 @@ mod tests {
     #[cfg(feature = "candle-cuda")]
     #[test]
     fn cuda_gathered_rows_match_dequantizing_the_whole_table() {
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let device = match Device::new_cuda(0) {
             Ok(d) => d,
             Err(_) => return, // no CUDA device present; nothing to assert

@@ -70,6 +70,8 @@ Judge a change by launch count (`SWARMLLM_COUNT_KERNELS=1`, never on in a benchm
 - **Fused kernels** (`kernels/*.cu`) are bit-identical to the candle ops they replace (except `decode_attn.cu`, `delta_rule.cu`: judged against llama.cpp); a layer-end residual is `Residual::Pending` → `Residual::add_norm`.
 - **`residual_norm::norm_block`** is a card norm's ONE block size: 1024 threads from 512 columns, else 32 — ⛔ only 32 or 1024. A/B `SWARMLLM_NORM_WIDE_FROM=1024`. → § "A narrow row is normed by 1024 threads on a card"
 
+- **A test that opens the card takes `cuda_graph::card_to_itself()` on the line before** — `Device::new_cuda…` or a load's `super::load_device(false)` (#500: card tests share the process's card memory pool and graph statics; guard `every_card_test_has_the_card_to_itself`).
+
 → technique in `docs/DIAGNOSTICS.md` § "Where a decode token actually goes"
 
 → `docs/invariants/inference.md` § "A decode token is bound by GPU submission COUNT, not bandwidth"

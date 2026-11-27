@@ -192,6 +192,7 @@ mod tests {
     #[cfg(feature = "candle-cuda")]
     #[test]
     fn the_cards_converting_write_matches_cast_then_slice_set() {
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
         let card = match Device::new_cuda(0) {
             Ok(d) => d,
             Err(e) => {
