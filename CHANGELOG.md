@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.3.314-alpha] — 2026-11-27
+
+**A computer that has just served part of a split takes the next, differently shaped split of the same model
+straight away, instead of refusing it for two minutes.** A split whose guesses flow sends its next steps ahead of
+the reply, and a few of them still reach the far computer after the reply has ended and the split was released
+there. Each of those late steps marked the far computer's copy as in use again, so for the next two minutes it
+refused any other layout of that model and then served it slowly beside the old copy. Seen on a Qwen2.5-14B split
+to a computer in Australia: a split asked 44 seconds after a flowing one was refused, then timed out; asked after
+the two minutes, the same computer replaced its copy and ran the new layout wholly on its card (prose 10.4, code
+32.1 tokens a second). A released request now stays released, and only a new pass from the first word holds the
+copy again. A refusal for a copy in use now also says how long ago that copy's last step came, so the computer that
+asked can read why. The change runs on the computer serving the far part, so it takes effect once that computer
+has this release.
+
+**Also:** a computer's record of released requests is trimmed at every release too, so it stays small on a model that gets no new work (found by the pre-release review, no visible change); and the README's Llama 3.3 70B row is out until it is measured again: its three-computer route needs the US
+computer, which has been offline, and the table shows only figures from the last seven days.
+
 ## [0.3.313-alpha] — 2026-11-26
 
 **A coding model guesses ahead with the general small model, which agrees with it more often.** A split of
