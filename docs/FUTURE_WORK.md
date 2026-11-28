@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #512**; #505 is reserved for the carry ask, memory `next_up.md` item 5b). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #513**; #505 is reserved for the carry ask, memory `next_up.md` item 5b). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -8214,6 +8214,20 @@ endpoints. `candle-*` stays on 0.10 deliberately (§ "Decided").
 Credits are DORMANT — they gate nothing, and `credits_stay_dormant` fails the build if one
 starts. Read `docs/CREDITS_DESIGN.md` before touching them; the credit items below are
 preconditions for ever switching enforcement on, not work for now.
+
+#### #512 — A far computer's cache for a request is keyed by the request id alone, not by who sent it
+`P3` · security · **OPEN (unverified)** — 2026-11-28 · from the security review of #510's rebase change
+
+The security review of #510's `rebased_to` (2026-11-28, nothing exploitable in that change) noted in
+passing, out of its scope: a far computer keys a conversation's cache by `(model_key, request_id)` off
+the wire, and the reviewer found no binding of a request id to the peer that sent its forwards in
+`daemon/dispatch/layer_forward.rs`. If so, a peer that LEARNS another conversation's request id — a
+segment of the same chain sees it — could send forwards that truncate or clear that conversation's
+cache on a computer serving another segment. Request ids are random UUIDs, so a stranger cannot guess
+one; the question is only what a peer inside a chain could do. **Unverified**: read the forward and
+`CancelInference` paths for a sender check (the release side, `release_request_on_peers`, names the
+peers it tells) before deciding. Prior art: WireGuard binds every session to the peer's key, and
+QUIC's connection ids are per connection, never a shared name another endpoint can address.
 
 #### #450 — A peer's gossiped demand is taken at its word, and now weighs whole copies too
 `P3` · security · **OPEN** — 2026-11-14 · history: #400 (the trade this widens), the security review of #400

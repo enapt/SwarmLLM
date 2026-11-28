@@ -498,12 +498,19 @@ impl LiveRows {
         if off > self.local.len() || self.local[..off].iter().any(Option::is_none) {
             return None;
         }
+        // Every slot past `off` is at least `shift` (slots count the rows run
+        // in order, and every row before `off` was run); checked anyway, so a
+        // map that ever breaks that is refused, never wrapped (security
+        // review, 2026-11-28).
         self.local = self
             .local
             .split_off(off)
             .into_iter()
-            .map(|slot| slot.map(|s| s - shift))
-            .collect();
+            .map(|slot| match slot {
+                None => Some(None),
+                Some(s) => s.checked_sub(shift).map(Some),
+            })
+            .collect::<Option<Vec<_>>>()?;
         self.sound = self.sound.split_off(off);
         self.draws = self.draws.split_off(off);
         self.from = base;
@@ -1431,6 +1438,15 @@ mod tests {
         assert_eq!(later.draws, vec![None, Some(6)]);
         assert_eq!(later.local_position(303), held.local_position(303));
         assert_eq!(held.clone().rebased_to(300), Some(held));
+        // A map whose slots break the count (none this far builds) is refused,
+        // never wrapped round (security review, 2026-11-28).
+        let broken = LiveRows {
+            from: 300,
+            local: vec![Some(0), Some(0)],
+            sound: vec![true, true],
+            draws: vec![None, None],
+        };
+        assert!(broken.rebased_to(301).is_none());
     }
 
     #[test]
