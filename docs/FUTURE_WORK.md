@@ -8243,7 +8243,44 @@ starts. Read `docs/CREDITS_DESIGN.md` before touching them; the credit items bel
 preconditions for ever switching enforcement on, not work for now.
 
 #### #512 — A far computer's cache for a request is keyed by the request id alone, not by who sent it
-`P3` · security · **OPEN (unverified)** — 2026-11-28 · from the security review of #510's rebase change
+`P3` · security · **NARROWED 2026-11-28: confirmed; the CANCEL half fixed (`daemon::state::request_owners`), the FORWARD half open** — 2026-11-28 · from the security review of #510's rebase change
+
+**Confirmed** (security review 2026-11-28, read from the code): nothing on the serving computer binds a
+request id to a sender. (1) `CancelInference` was honoured from ANY authenticated computer
+(`dispatch/mod.rs`, the arm checked only that a sender was authenticated): it aborted the
+conversation's hand-off and forwards here and dropped its cache (`process_pool::cancel_request` →
+`model_worker::release_caches_of_cancelled`), repeatable every step. (2) A forward naming the real
+coordinator with `sequence_num == 0` or `truncate_kv_to` clears or cuts the conversation's cache and
+writes the sender's activations in (`model_worker.rs` `clear_request` / `truncate_request_to`); the
+continuity check guards only a continuation. (3) A superseding streamed forward skips the stream's
+queued turns (`forward_streams`). Each needs the request id, which only a computer of the same chain
+sees.
+**Fixed — (1)**: this node remembers the coordinator each conversation's FIRST admitted forward names
+(`layer_forward::judged_as`) and a hand-off's originator, and honours a cancel only from that computer
+(`request_owners::RequestOwners`, 4,096 conversations, 30 min after the last forward;
+`dispatch::cancel_is_the_owners`) — the rule `hop_timings::HopHeld` already kept (#427). The one
+legitimate cancel comes from the coordinator directly (`router::release_request_on_peers`), so nothing
+legitimate is refused. Tests `only_the_coordinator_the_first_forward_named_may_cancel`,
+`only_the_conversations_owner_may_cancel_it_here`. The change's own security review (2026-11-28) found
+three holes in the first draft, all closed before it landed: one shared bound let a peer opening ~4,096
+ids of its own evict a live conversation's record and then claim it (now each SENDER of forwards holds at
+most 64 records, `MOST_A_SENDER`, and a full table gives up the least recently SEEN; test
+`a_peer_opening_ids_by_the_thousand_pushes_out_only_its_own`); a forgotten-then-renamed id left a stale
+place in the eviction order (the order list is gone); a hand-off decoding past 30 min had its
+end-of-request release ignored (noted again as its reply ends).
+**Residual of (1)**: a chain hop that names ITSELF as coordinator on the first forward a later computer
+sees is recorded there as the owner — indistinguishable from a real coordinator without a signature. It has
+already broken that reply (the later computers answer it); what it gains is the cancel there, and the real
+coordinator's own cancel there is ignored until the record ages out (30 min). Closed by the same
+coordinator-signed `(request_id, chain)` as (2).
+**Open — (2) and (3)**: "first sender only" is the wrong rule for forwards — an unchained re-run after a
+chain failure (`verify_may_chain`) and a failover that replaces a predecessor legitimately send from a
+new computer. The rule the code supports: a DESTRUCTIVE forward (sequence 0 over a held cache,
+`truncate_kv_to`, a superseding stream turn) only from the recorded coordinator or a computer that
+already forwarded this conversation here; a continuation from a new one stays allowed. Closing it
+against every in-chain computer needs the coordinator to sign `(request_id, chain)` — a wire change. The
+residual that stays whatever is built: a conversation's predecessor supplies its activations and can
+always poison them.
 
 The security review of #510's `rebased_to` (2026-11-28, nothing exploitable in that change) noted in
 passing, out of its scope: a far computer keys a conversation's cache by `(model_key, request_id)` off

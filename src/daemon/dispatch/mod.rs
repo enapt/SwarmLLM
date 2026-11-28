@@ -1311,6 +1311,15 @@ pub(crate) async fn dispatch_network_messages(
                                                 continue;
                                             }
                                         };
+                                        // The coordinator this conversation's first forward
+                                        // named is the one computer whose cancel ends it
+                                        // here (#512).
+                                        shared_state.request_owners.note_forward(
+                                            forward.request_id,
+                                            layer_forward::judged_as(forward.requester_node_id, &peer_sender),
+                                            &peer_sender,
+                                            std::time::Instant::now(),
+                                        );
                                         let ss = shared_state.clone();
                                         let ntx = network_tx.clone();
                                         let forward_request_id = forward.request_id;
@@ -3651,10 +3660,37 @@ pub(crate) async fn dispatch_network_messages(
                                     // remote-generate decode so the worker stops streaming
                                     // wasted tokens back.
                                     SwarmMessage::CancelInference(cancel) => {
-                                        if authenticated_sender.is_none() {
+                                        let Some(canceller) = authenticated_sender.as_ref() else {
                                             tracing::debug!("Dropping unauthenticated CancelInference");
                                             continue;
+                                        };
+                                        // Only the computer that owns the conversation may end it
+                                        // here (#512): a hand-off's originator, a split's
+                                        // coordinator. Another computer of the same chain sees the
+                                        // request id on the wire and must not be able to stop the
+                                        // reply or drop its cache.
+                                        let originator_asked = shared_state
+                                            .inbound_generate_aborts
+                                            .get(&cancel.request_id)
+                                            .map(|entry| {
+                                                crate::network::transport::node_id_of_peer_bytes(&entry.1)
+                                                    .is_some_and(|originator| originator == *canceller)
+                                            });
+                                        let coordinator = shared_state.request_owners.cancel_from(
+                                            &cancel.request_id,
+                                            canceller,
+                                            std::time::Instant::now(),
+                                        );
+                                        if !cancel_is_the_owners(originator_asked, coordinator) {
+                                            tracing::warn!(
+                                                request_id = %cancel.request_id,
+                                                sender = %canceller,
+                                                ?coordinator,
+                                                "CancelInference from a computer that does not own the request — ignored"
+                                            );
+                                            continue;
                                         }
+                                        shared_state.request_owners.forget(&cancel.request_id);
                                         let mut aborted_something = false;
                                         if let Some((_, (abort, _))) = shared_state
                                             .inbound_generate_aborts
@@ -3821,6 +3857,42 @@ mod manifest_sync;
 mod prompt_admission;
 pub(crate) mod remote_generate;
 mod vision;
+
+/// Whether a `CancelInference` comes from the computer that owns the
+/// conversation it names (#512) — the one answer the cancel arm asks before it
+/// stops anything. `originator_asked`: a hand-off decoding here for that id,
+/// and whether its originator sent the cancel; `coordinator`: what the
+/// sender is to the conversation's first admitted forward (a hand-off is
+/// recorded there too, so its end-of-request release still drops the cache
+/// after the decode ends, #238). A conversation this node holds no record of
+/// is not ended on anyone's say-so: nothing of it was admitted here.
+fn cancel_is_the_owners(
+    originator_asked: Option<bool>,
+    coordinator: crate::daemon::state::request_owners::CancelFrom,
+) -> bool {
+    use crate::daemon::state::request_owners::CancelFrom;
+    originator_asked == Some(true) || coordinator == CancelFrom::Owner
+}
+
+#[cfg(test)]
+mod cancel_owner_tests {
+    use super::cancel_is_the_owners;
+    use crate::daemon::state::request_owners::CancelFrom;
+
+    #[test]
+    fn only_the_conversations_owner_may_cancel_it_here() {
+        // A split's coordinator, and a hand-off's originator, end it.
+        assert!(cancel_is_the_owners(None, CancelFrom::Owner));
+        assert!(cancel_is_the_owners(Some(true), CancelFrom::Owner));
+        assert!(cancel_is_the_owners(Some(true), CancelFrom::Unknown));
+        // Another computer of the chain that learned the request id does not.
+        assert!(!cancel_is_the_owners(None, CancelFrom::NotTheOwner));
+        assert!(!cancel_is_the_owners(Some(false), CancelFrom::NotTheOwner));
+        // Nor does anyone for a conversation never admitted here.
+        assert!(!cancel_is_the_owners(None, CancelFrom::Unknown));
+        assert!(!cancel_is_the_owners(Some(false), CancelFrom::Unknown));
+    }
+}
 
 #[cfg(test)]
 mod capability_fits_tests {

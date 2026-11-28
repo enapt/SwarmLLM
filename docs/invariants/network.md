@@ -8754,3 +8754,43 @@ Sentences cut from the rules file when it was shortened (2026-11-17); the rule i
 - **Offline mode.** `protocol_traffic` is the known-answer test that builds the node's transport through `swarm_transport`; a dial site that did not ask was the leak.
 - **A request reaches only the nodes its scope names.** Guard `a_requests_keep_instruction_is_never_replaced_by_none` (a path that writes `KeepAsked::Unasked` must be listed in `KEEP_UNASKED_IS_THE_ANSWER`).
 - **A peer's question is weighed.** The first design's two HIGH findings were a wait keyed by the asker's request id and weighing under it: a request id is known to every machine on a route, so anything keyed or held by it is a peer's lever on a live request.
+
+## A conversation served here is ended only by the computer that owns it (2026-11-28, #512)
+
+**What it replaced.** The `CancelInference` arm checked only that its sender was authenticated, then
+aborted the hand-off decoding for that request id, every forward of it running here, and told the
+model process to drop its cache. Request ids are random UUIDs, so a stranger cannot name one — but
+every computer of a chain sees the id on the wire, so a computer inside a chain could end another
+computer's reply on a third, step after step (security review of 2026-11-28, read from the code:
+`dispatch/mod.rs` the cancel arm, `process_pool::cancel_request`, `model_worker::release_caches_of_cancelled`).
+
+**The rule.** The one legitimate cancel comes from the conversation's coordinator, sent straight
+(`router::release_request_on_peers`), or a hand-off's originator. This node records, per conversation,
+the coordinator its FIRST admitted forward names (`layer_forward::judged_as`: a chained forward's named
+coordinator, else the sender) and a hand-off's originator (`stream_reply_to_requester`), in
+`request_owners::RequestOwners` — 4,096 conversations, each 30 min past its last forward — and the
+cancel arm honours a cancel only from that computer (`dispatch::cancel_is_the_owners`); any other is
+logged and ignored. The first name stands; a later forward naming another coordinator does not move it —
+the rule `hop_timings::HopHeld` already kept for a hop's own report (#427). A hand-off is recorded too,
+so the originator's end-of-request release still drops the worker's cache after the decode ends (#238).
+
+**No peer pushes out another's records** (the change's own security review, 2026-11-28). With one shared
+bound and first-in-first-out eviction, a peer opening ~4,096 ids of its own evicted a live conversation's
+record, then named itself owner by sending one forward. Each SENDER of forwards now holds at most 64
+records (`MOST_A_SENDER`, the share `HopHeld` gives a peer), and a full table gives up the record seen
+least recently — a decoding conversation's forwards keep its own fresh. A hand-off is noted again as its
+reply ends, so its originator's release seconds later finds it however long the decode ran.
+
+**What a change must keep.** Never act on a request id alone. A cancel for a conversation never admitted
+here, or one forgotten, ends nothing: the worker's own idle eviction releases it.
+
+**Still open** (FUTURE_WORK #512): a chain hop that names ITSELF as coordinator on the first forward a
+later computer sees is recorded there as the owner — no different, unsigned, from a real coordinator; it
+has already broken that reply, and keeps the cancel there for 30 min. And a forward naming the real coordinator can still clear or cut a
+conversation's cache (sequence 0, `truncate_kv_to`) or skip a stream's turns from any computer of the
+chain. Binding forwards to their first sender is wrong — an unchained re-run after a chain failure and a
+failover legitimately send from a new computer — so it needs a destructive-forward rule or a
+coordinator-signed chain. A conversation's predecessor can always poison its activations.
+
+Prior art: WireGuard binds a session to the peer's static key; QUIC's connection ids belong to one
+connection. Tests: `request_owners::tests::*`, `dispatch::cancel_owner_tests`.

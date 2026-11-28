@@ -386,6 +386,18 @@ async fn stream_reply_to_requester(
     shared_state
         .inbound_generate_aborts
         .insert(request_id, (gen_fut.abort_handle(), sender_bytes.clone()));
+    // The originator owns the conversation here (#512): its cancel, and only
+    // its, ends it — while the decode runs and after, when its end-of-request
+    // release drops the worker's cache (#238).
+    let originator = crate::network::transport::node_id_of_peer_bytes(&sender_bytes);
+    if let Some(originator) = &originator {
+        shared_state.request_owners.note_forward(
+            request_id,
+            originator.clone(),
+            originator,
+            std::time::Instant::now(),
+        );
+    }
 
     // Forward each token back to the coordinator as a `StreamingToken`.
     // Skip the "done" event emitted by `ModelProcessPool::generate` at the
@@ -469,6 +481,16 @@ async fn stream_reply_to_requester(
     // Drop the abort handle now that the decode has exited. A late
     // CancelInference for this request_id becomes a no-op (the entry is gone).
     shared_state.inbound_generate_aborts.remove(&request_id);
+    // Noted again as the reply ends: the originator's end-of-request release
+    // comes seconds after it, however long the decode ran (#512).
+    if let Some(originator) = &originator {
+        shared_state.request_owners.note_forward(
+            request_id,
+            originator.clone(),
+            originator,
+            std::time::Instant::now(),
+        );
+    }
     // Count the work regardless of outcome: time and layers were spent either
     // way, and an operator asking "is my node contributing" wants the truth
     // about effort, not only about successes. Bill only for tokens we can

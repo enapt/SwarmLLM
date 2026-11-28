@@ -43,6 +43,7 @@ mod relay;
 mod removed_shards;
 mod repair;
 pub(crate) mod reply_lengths;
+pub(crate) mod request_owners;
 pub(crate) mod requester_guesses;
 pub(crate) mod retained_activations;
 pub(crate) mod retained_replies;
@@ -864,6 +865,13 @@ pub struct SharedState {
     /// entry per request let the second overwrite the first and the first,
     /// finishing, withdraw the second — which no cancel could then reach.
     pub inbound_forward_aborts: DashMap<uuid::Uuid, Vec<InboundForwardAbort>>,
+    /// The coordinator of each conversation this node serves for another
+    /// computer, as its first admitted forward named it (#512): the one
+    /// computer whose `CancelInference` may end it here. Written ONLY by
+    /// dispatch's `LayerForward` arm (`note_forward`) and the `CancelInference`
+    /// arm (`forget`, the owner's own cancel); read ONLY by that arm
+    /// (`cancel_from`). Bounded (`request_owners::MOST_REMEMBERED`, 30 min).
+    pub(crate) request_owners: request_owners::RequestOwners,
     /// Streamed verifies this node serves, run in each stream's order — see
     /// `forward_streams`. Taken by `handle_layer_forward` for every forward
     /// carrying `LayerForward::stream_seq`; swept on the health tick.
@@ -1567,6 +1575,7 @@ impl SharedState {
             active_pipelines: DashMap::new(),
             inbound_generate_aborts: DashMap::new(),
             inbound_forward_aborts: DashMap::new(),
+            request_owners: request_owners::RequestOwners::default(),
             forward_streams: forward_streams::ForwardStreams::default(),
             cancel_signals: DashMap::new(),
             metrics: MetricsProviders {

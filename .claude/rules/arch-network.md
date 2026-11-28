@@ -142,6 +142,12 @@ Streaming rr sends MUST set `SendDirectMessage.delivery_request_id = Some(uuid)`
 
 → `docs/invariants/network.md` § "A tensor forward is acknowledged on receipt; a result is always its own request"
 
+## A conversation served here is ended only by the computer that owns it (2026-11-28, #512)
+
+A `CancelInference` stops a hand-off, forwards or a cache here ONLY from the conversation's owner: the coordinator its FIRST admitted forward named (`layer_forward::judged_as`) or a hand-off's originator — `daemon::state::request_owners::RequestOwners` (written at forward admission and `stream_reply_to_requester`), asked through `dispatch::cancel_is_the_owners`. Never act on a request id alone: every computer of a chain sees it. Each sender of forwards holds at most `MOST_A_SENDER` (64) records, a full table gives up the least recently seen — never one shared first-in-first-out bound a peer can flood. A destructive FORWARD from another chain computer is still open (FUTURE_WORK #512).
+
+→ `docs/invariants/network.md` § "A conversation served here is ended only by the computer that owns it"
+
 ## A chain hop tells its coordinator its own time, once, straight (2026-11-12, #427)
 
 Each hop notes its held time — arrival (`ServedSince`, keyed by the predecessor) to its onward send or its answer to a coordinator that did not send it (`NetworkCommand::NoteHeldAsHop`) — for one-position decode steps, in `network::manager::hop_timings::HopHeld` (256 requests, 512 steps, 30 min), and answers the coordinator's own `CancelInference` (authenticated sender, never gossip) with `SwarmMessage::HopTimings` (its median), once, gated at the SENDER on `features::HOP_TIMINGS` (bit 40), never relayed (not `is_relay_eligible`). Each sending peer holds its own share (`MOST_REQUESTS_A_PEER`, 64). Never a list each hop appends on the forward (every hop re-seals it). Coordinator side: `arch-scheduling.md`.
