@@ -1023,7 +1023,10 @@ plan), then a here → AU card chain is routable. **First field plan, 2026-11-28
 holding layers 0-21 on a disk under its reserve, was planned layer 63 alone: each card was weighed only
 at its card's full width, and every such window but the one the model's end narrows needed parts the
 disk could not take. **Fixed the same day**: from each start the widest window the card's disk takes
-(`windows`' `takes`; test `a_card_that_can_fetch_nothing_is_planned_the_run_it_holds`, red without it); (4) the review's PLAUSIBLE findings, not acted on:
+(`windows`' `takes`; test `a_card_that_can_fetch_nothing_is_planned_the_run_it_holds`, red without it), the
+parts a card is still downloading charged against its room (they count as held, but their bytes are not yet off
+the room it advertises: without it a disk-narrowed run widened mid-download and narrowed again as the parts
+landed — pre-release review; test `a_run_the_disk_narrowed_stays_put_while_its_parts_download`, red without it); (4) the review's PLAUSIBLE findings, not acted on:
 a card with a large processor share is planned only its card's run (by design: cards across nodes);
 ranking by model concentrates room-making on a node's lowest-ranked models (`not_spare_for_room`); a
 run part of which cannot be fetched lapses its lease and returns after `PASSED_OVER_FOR`; the

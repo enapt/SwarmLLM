@@ -270,8 +270,18 @@ fn plan_card_ranges(
         } else {
             c.layers.min(layers).min(run_of(c))
         };
+        // A part still downloading counts as held (`has`), but its bytes are
+        // not yet off the room the card advertises: charged here, or a run
+        // widened by the disk would widen while its parts download and
+        // narrow again as they land (pre-release review, 2026-11-28).
+        let in_flight: u64 = parts
+            .iter()
+            .zip(c.fetching.iter().zip(&c.held))
+            .filter(|(_, (&f, &h))| f && !h)
+            .map(|(p, _)| p.size)
+            .sum();
         windows(parts, layers, width, |x, e| {
-            lacking_bytes(parts, &c.has, x, e, layers) <= c.disk_bytes
+            lacking_bytes(parts, &c.has, x, e, layers).saturating_add(in_flight) <= c.disk_bytes
         })
     };
     // The run the last plan gave a card it is fetching into, where that
@@ -785,6 +795,26 @@ mod tests {
                 (24, 32),
                 (28, 32)
             ]
+        );
+    }
+
+    /// A card planned a run its disk narrowed keeps it while the parts
+    /// download: their bytes are not yet off its advertised room, and counted
+    /// as room they widened the run, which narrowed again as they landed.
+    #[test]
+    fn a_run_the_disk_narrowed_stays_put_while_its_parts_download() {
+        let mut c = card(1, 16, &[]);
+        c.disk_bytes = 2 * GB;
+        let first = plan_card_ranges(32, &parts(), &[c.clone()], 1);
+        assert_eq!(first, vec![Some((0, 8))]);
+        // Both parts of the run start downloading; the room is unchanged.
+        c.fetching = (0..8).map(|i| i < 2).collect();
+        c.has = c.fetching.clone();
+        c.before = first[0];
+        assert_eq!(
+            plan_card_ranges(32, &parts(), &[c], 1),
+            vec![Some((0, 8))],
+            "two gigabytes downloading leave no room for two more"
         );
     }
 

@@ -3623,7 +3623,9 @@ its card's full width, one window from each part start, then dropped the windows
 not take. On v0.3.316's field plan for the 27B this laptop — layers 0-21 held, its disk under the reserve, so no
 room to fetch — had every full-width window dropped but the one narrowed by the model's END: it was planned
 `225e6fe7:63-64`, and its real run counted as off-run copies prune may give back. `card_ranges::windows` now takes the
-card's disk (`takes`) and keeps, from each start, the widest window it can take. Test
+card's disk (`takes`) and keeps, from each start, the widest window it can take — the parts it is still
+downloading charged against its room, since they count as held before their bytes leave the room it advertises
+(`a_run_the_disk_narrowed_stays_put_while_its_parts_download`). Test
 `a_card_that_can_fetch_nothing_is_planned_the_run_it_holds` (red without it: the stub `(28, 32)` against `(0, 12)`).
 
 ### A spawn leaves the card the room the plan's other ranges here will be grown into (2026-11-19, #481 (5))
