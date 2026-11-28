@@ -1421,9 +1421,14 @@ fn cut_for_the_flow(
 }
 
 /// The cuts [`cut_for_the_flow`] searches at most: the cap and the ones after
-/// it toward the sum's. A balance steps one layer at a time, so the cap is
-/// rarely more than one from a cut the machines can take.
+/// it toward the sum's. Never fewer than one shed moves
+/// (`flow_balance::MOST_LAYERS_A_SHED`): a balance whose cut the plans did not
+/// take reads every cut between as refused (`flow_balance::refused_on_the_way`).
 const MOST_FLOW_CUTS_TRIED: usize = 4;
+const _: () = assert!(
+    crate::daemon::state::flow_balance::MOST_LAYERS_A_SHED as usize <= MOST_FLOW_CUTS_TRIED,
+    "a shed the plans did not take must have had every cut between it and the sum's tried"
+);
 
 /// `candidates` with this node's flow cap at `layers`.
 fn with_flow_cap_at(

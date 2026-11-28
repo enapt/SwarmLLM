@@ -7336,7 +7336,15 @@ over its layers (its fixed costs in: it overstates the far's layer and shortens 
 16 → 12 → 10 → 9, three steps. Halved, and held to 4, because six layers at once ran 26% slower (`real_link_bal314/`,
 the far card's cliff); a cut measured slower lately is passed over for a nearer one; the wall-time judgement still
 undoes a move that ran slower. Back toward this node stays one layer: the far's time carries its queue. Tests
-`a_shed_moves_half_the_measured_gap_at_once`, `a_shed_passes_over_a_cut_measured_slower`. A wider level (16 rows) at
+`a_shed_moves_half_the_measured_gap_at_once`, `a_shed_passes_over_a_cut_measured_slower`. **A step the plans did not take marks every cut they tried** (found on the real link the same day,
+`real_link_t504gap/`: the far end pretending to hold [16,48), a shed from 16 asked 12, the plans kept 16, and only 12
+was remembered as out of reach — so 13, 14 and 15 would each have been asked, four flows apiece). `parallax::cut_for_the_flow`
+searches the asked cut, then each after it toward the sum's (`MOST_FLOW_CUTS_TRIED`, never fewer than a shed moves —
+a const assertion), so where the flows then ran, every cut from the asked one up to it was refused
+(`flow_balance::refused_on_the_way`); and no step asks a cut past a refused one on the same side
+(`past_a_refused_cut`: a far end that cannot start at 12 cannot start at 11). Tests
+`a_shed_the_plans_could_not_take_marks_every_cut_they_tried` (red with only the asked cut recorded),
+`the_cuts_refused_on_the_way_are_those_before_where_the_flows_ran`. A wider level (16 rows) at
 12 lost (code 38.1, prose 18.1-19.9: this node 46-50 ms a forward, its levels waiting 19-22% of the flow).
 ## A chunk is as wide as it pays (2026-10-30, #374)
 

@@ -287,6 +287,39 @@ fn layers_to_shed(flows: &VecDeque<Flow>, k: u32) -> u32 {
     (half as u32).clamp(1, MOST_LAYERS_A_SHED).min(room)
 }
 
+/// The cuts the plans tried and could not take, after a step from `left`
+/// asked for `asked` and the flows then ran at `ran`. The planner searches the
+/// asked cut first, then each after it toward the cut it would otherwise run
+/// (`parallax::cut_for_the_flow`, as many as `MOST_FLOW_CUTS_TRIED`, never
+/// fewer than a shed moves), so every cut from `asked` up to `ran`, `ran`
+/// left out, was refused — where `ran` lies on that way, from `asked` to
+/// `left`. Recording only the asked one sent a shed the far end could not
+/// take back to ask each cut after it, four flows apiece (`real_link_t504gap/`,
+/// 2026-11-28: a far end pretending to hold [16,48) and a shed asking 12).
+fn refused_on_the_way(asked: u32, ran: u32, left: u32) -> Vec<u32> {
+    let on_the_way = (asked.min(left)..=asked.max(left)).contains(&ran);
+    if asked == ran || !on_the_way {
+        Vec::new()
+    } else if asked < ran {
+        (asked..ran).collect()
+    } else {
+        (ran + 1..=asked).collect()
+    }
+}
+
+/// Whether `want`, a step from `k`, is at or past a cut the plans refused on
+/// the same side: the far end that cannot start at 12 cannot start at 11,
+/// and this node that cannot grow to 21 cannot grow to 22.
+fn past_a_refused_cut(refused: &HashMap<u32, Instant>, k: u32, want: u32) -> bool {
+    refused.keys().any(|&r| {
+        if want < k {
+            (want..k).contains(&r)
+        } else {
+            (k + 1..=want).contains(&r)
+        }
+    })
+}
+
 /// How much slower `flows` ran than `pace`, like for like: the median of each
 /// flow's wall time a forward over its kind's there; `None` with no kind in
 /// common.
@@ -363,8 +396,15 @@ impl FlowBalances {
         };
         balance.measured.insert(k, settled);
         // A move is judged once, against the cut it left.
-        match balance.from.take() {
-            Some(left) if left != k => {
+        if let Some(left) = balance.from.take() {
+            // The plans could not take the cut asked for (still the cap), nor
+            // any they tried after it on the way to where the flows ran.
+            if let Some(asked) = balance.cap {
+                for refused in refused_on_the_way(asked, k, left) {
+                    balance.out_of_reach.insert(refused, now);
+                }
+            }
+            if left != k {
                 let slower = balance
                     .measured
                     .get(&left)
@@ -375,14 +415,6 @@ impl FlowBalances {
                     return FlowBalanceStep::Undone;
                 }
             }
-            // The flows after the step still ran where it left: the plans
-            // could not take the cut it asked for (still the cap).
-            Some(_) => {
-                if let Some(asked) = balance.cap {
-                    balance.out_of_reach.insert(asked, now);
-                }
-            }
-            None => {}
         }
         balance.cap = Some(k);
         let ratio = median(balance.at_the_cut.iter().map(|f| f.ratio).collect());
@@ -401,7 +433,7 @@ impl FlowBalances {
         let mut passed_over_a_slower = false;
         let mut chosen = None;
         for want in candidates {
-            if balance.out_of_reach.contains_key(&want) {
+            if past_a_refused_cut(&balance.out_of_reach, k, want) {
                 continue;
             }
             // A cut measured lately is gone to only where it ran faster.
@@ -648,6 +680,54 @@ mod tests {
             FlowBalanceStep::Back
         );
         assert_eq!(layers(&b, later), Some(21));
+    }
+
+    /// A shed of several layers the plans could not take at all — the far end
+    /// holds none of them (`real_link_t504gap/`, 2026-11-28) — marks every cut
+    /// the planner tried on the way, so the balance holds instead of asking
+    /// each again; one taken part of the way marks the ones before it.
+    #[test]
+    fn a_shed_the_plans_could_not_take_marks_every_cut_they_tried() {
+        let b = FlowBalances::default();
+        let t = Instant::now();
+        let at = |k: u32| {
+            let mut last = FlowBalanceStep::Waiting;
+            for _ in 0..FLOWS_A_STEP {
+                last = b.record(M, &far(), D, flow_to_one(k, 48, 41.0, 40.0, 16.0, 27.0), t);
+            }
+            last
+        };
+        assert_eq!(at(16), FlowBalanceStep::Shed);
+        assert_eq!(layers(&b, t), Some(12));
+        // The plans kept 16: 12, 13, 14 and 15 were all tried and refused.
+        assert_eq!(at(16), FlowBalanceStep::Holds);
+        assert_eq!(layers(&b, t), Some(16));
+        assert_eq!(at(16), FlowBalanceStep::Holds);
+        // Part of the way: asked 12 from 16, the plans took 14.
+        let c = FlowBalances::default();
+        let at_c = |k: u32| {
+            let mut last = FlowBalanceStep::Waiting;
+            for _ in 0..FLOWS_A_STEP {
+                last = c.record(M, &far(), D, flow_to_one(k, 48, 41.0, 40.0, 16.0, 27.0), t);
+            }
+            last
+        };
+        assert_eq!(at_c(16), FlowBalanceStep::Shed);
+        assert_eq!(layers(&c, t), Some(12));
+        // 14 ran no slower than 16 and the stages still say shed — but 12 and
+        // 13 were refused on the way, so it holds at 14.
+        assert_eq!(at_c(14), FlowBalanceStep::Holds);
+        assert_eq!(layers(&c, t), Some(14));
+    }
+
+    #[test]
+    fn the_cuts_refused_on_the_way_are_those_before_where_the_flows_ran() {
+        assert_eq!(refused_on_the_way(12, 16, 16), vec![12, 13, 14, 15]);
+        assert_eq!(refused_on_the_way(12, 14, 16), vec![12, 13]);
+        assert_eq!(refused_on_the_way(12, 12, 16), Vec::<u32>::new());
+        assert_eq!(refused_on_the_way(21, 20, 20), vec![21]);
+        // The flows ran past where the step left: the sum moved, nothing is known.
+        assert_eq!(refused_on_the_way(12, 18, 16), Vec::<u32>::new());
     }
 
     /// `real_link_bal313/` (2026-11-27): at 26 layers here this node is the
