@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.3.317-alpha] — 2026-11-28
+
+**The far computer of a split now skips the guesses a reply can no longer use.** When a model is split across
+computers, a small helper model guesses several words ahead as a branching tree, and the computer running the end
+of the model checks the guesses. It checked every guess in the tree it was sent. But once it has chosen a word,
+every branch that guessed a different word is dead: measured the night before this release, 86-90% of the guesses
+it checked were already dead when it reached them. Now it checks only the guesses its own choices can still reach,
+and marks the rest "not checked". On a two-computer split tested on one machine (Qwen2.5 1.5B, with the 0.5B
+guessing), the far computer checked 926 of the 1,398 guesses it was sent; with the change switched off it checked
+all of them. Every reply was correct. One differed from the run without the change at two near-equal words, which
+that run had also written both ways. On 22 of a 14B's layers on one graphics card, a step checking 24 guesses took
+18.1-18.6 ms, and one checking 8 took 14.4-14.9 ms. How much faster whole replies get over real long-distance links will be
+measured once computers run this release. It applies where both computers repeat the same choice exactly (replies
+without random sampling, or splits that share their random draws), it needs this release at both ends, and
+`SWARMLLM_FLOW_LIVE_ROWS=0` on either computer turns it off.
+
+**A computer whose disk is full keeps its share of a model on its graphics card.** Since the last release each
+graphics card is planned one unbroken run of a model's layers. A card was weighed only for runs as wide as the
+card, and a run needing parts its disk had no room for was dropped. On a full disk that dropped every run except a
+one-layer stub at the model's end. On the first plan of Qwen3.8-27B across the swarm, a computer already holding
+layers 0-21 was planned layer 63 alone, and its real run could have been given away as spare copies. Now each card
+is planned the widest run its disk can hold, which for a full disk is the run it already has.
+
 ## [0.3.316-alpha] — 2026-11-28
 
 **Computers with a graphics card now keep whole runs of a model, so cards across the swarm can serve it together.**
