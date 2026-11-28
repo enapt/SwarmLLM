@@ -64,13 +64,7 @@
     "deny": [
       "Bash(cargo publish *)",
       "Read(./.env)",
-      "Read(./.env.*)",
-      "Read(./vendor/**/target/**/*)",
-      "Read(./target/**/deps/**)",
-      "Read(./target/**/build/**)",
-      "Read(./target/**/incremental/**)",
-      "Read(./target/**/.fingerprint/**)",
-      "Read(./target/**/examples/**)"
+      "Read(./.env.*)"
     ]
   },
   "includeGitInstructions": false,
