@@ -816,10 +816,22 @@ struct PromotionInputs {
     /// placement admission made whole.
     split_by_the_load: Option<SplitByTheLoad>,
     /// The worker runs every layer on the processor
-    /// ([`WorkerHandle::placed_on_cpu_because`]) — not a split. Only such a
-    /// worker is moved for a card SPLIT (#498): one already split moves only
-    /// whole, so a promotion never trades one split for another.
+    /// ([`WorkerHandle::placed_on_cpu_because`]) — not a split. Such a worker
+    /// is moved for a card SPLIT that puts half its layers on the card (#498).
     wholly_on_the_processor: bool,
+    /// For a worker running a card/processor SPLIT, the layers it runs on the
+    /// card now ([`CardSplit::card_share`]'s first figure); 0 for one wholly on
+    /// the processor. A split moves for another split only where that one at
+    /// least DOUBLES this ([`moves_for_a_card_split`], #461 (3)), so a
+    /// promotion never trades one split for a slightly better one.
+    card_layers_now: usize,
+    /// The layers that split runs in all (`card_share`'s second figure): one
+    /// already running more than half of them on the card can never double,
+    /// so the card is not read for it ([`may_move_as_a_split`]).
+    card_layers_of: usize,
+    /// A split may move for a better split at all
+    /// ([`split_moves_for_a_split`], the A/B of #461 (3)).
+    splits_move_for_splits: bool,
     /// For a worker wholly on the processor: the spawn's own split of the
     /// asked range in the room as it stands ([`ModelProcessPool::partial_gpu_layers`],
     /// less the plan's other ranges here, as the spawn leaves them) —
@@ -930,23 +942,50 @@ fn should_return_to_gpu(i: &PromotionInputs) -> bool {
 /// model's layers when it loads and moves none later — the room a card frees
 /// is used only once the model is loaded again. Our worker can be replaced
 /// between replies, so it is: the same moment the whole move already uses.
+///
+/// **And a split moves for a split that at least DOUBLES its card layers**
+/// (#461 (3), 2026-11-28): a split placed while the card was busy kept its
+/// few card layers for its life once the card freed, since only a whole move
+/// was weighed for it, and a model too big for the card whole never makes
+/// one. Australia's 3060 re-placed the 14B whole with 5 of its 48 layers on
+/// the card while a 9B sat beside it; the 9B went, 7,572 MB of the card stood
+/// free, and the copy served a split's far half at 2.0-2.7 s an answer against
+/// 32-56 ms for ten minutes (real link t510far2, its placement polled after
+/// every reply). Doubling, so a reload is never paid for a few layers; half,
+/// as for a worker wholly on the processor. The worker's own card share is
+/// counted as given back ([`ModelProcessPool::promotion_weighed`]).
 fn moves_for_a_card_split(i: &PromotionInputs) -> bool {
     may_move_as_a_split(i)
-        && i.split_would_place
-            .is_some_and(|(on_card, of)| of > 0 && on_card.saturating_mul(2) >= of)
+        && i.split_would_place.is_some_and(|(on_card, of)| {
+            of > 0
+                && on_card.saturating_mul(2) >= of
+                && on_card > i.card_layers_now
+                && on_card >= i.card_layers_now.saturating_mul(2)
+        })
 }
 
 /// Could a worker move to the card as a split at all, before the card is read
-/// for it: wholly on the processor, not already missed once, splits offered
+/// for it: wholly on the processor or already split (#461 (3); the doubling
+/// is weighed once the card is read), not already missed once, splits offered
 /// (`SWARMLLM_HYBRID_OFFLOAD`, [`hybrid_offload_on`]), and a ceiling that could
 /// hold at least half its estimate — past that no room the card ever has puts
 /// half its layers there, and reading the card for it on every request is what
 /// the ceiling guard exists to stop (review of #498 (b), 2026-11-23).
 fn may_move_as_a_split(i: &PromotionInputs) -> bool {
-    i.wholly_on_the_processor
+    (i.wholly_on_the_processor
+        || (i.splits_move_for_splits
+            && i.card_layers_now > 0
+            && i.card_layers_now.saturating_mul(2) <= i.card_layers_of))
         && !i.promotion_missed
         && i.splits_offered
         && (i.ceiling_mb == 0 || i.ceiling_mb.saturating_mul(2) >= i.gpu_estimate_mb)
+}
+
+/// May a worker already split move for a better split (#461 (3))?
+/// `SWARMLLM_SPLIT_PROMOTION=whole` keeps it to a whole move, as before — the
+/// A/B inside one binary.
+fn split_moves_for_a_split() -> bool {
+    std::env::var("SWARMLLM_SPLIT_PROMOTION").as_deref() != Ok("whole")
 }
 
 /// Is a model offered a card/processor split at all? `SWARMLLM_HYBRID_OFFLOAD=0`
@@ -8153,6 +8192,15 @@ impl ModelProcessPool {
             reclaimable_mb: 0,
             split_by_the_load: handle.split_by_the_load,
             wholly_on_the_processor: handle.placed_on_cpu_because.is_some(),
+            card_layers_now: handle
+                .card_split
+                .filter(|_| handle.placed_on_cpu_because.is_none())
+                .map_or(0, |split| split.card_share().0),
+            card_layers_of: handle
+                .card_split
+                .filter(|_| handle.placed_on_cpu_because.is_none())
+                .map_or(0, |split| split.card_share().1),
+            splits_move_for_splits: split_moves_for_a_split(),
             split_would_place: None,
             promotion_missed: handle.promotion_missed,
             splits_offered: hybrid_offload_on(),
@@ -8164,8 +8212,12 @@ impl ModelProcessPool {
         inputs.committed_mb = self.vram_committed_mb();
         // The spawn's own split of the asked range, in the room the spawn
         // would weigh it in: the budget just read, less what it leaves for the
-        // plan's other ranges here. Without reclaiming anyone — the spawn may
-        // free more, so this can only under-promise (#498).
+        // plan's other ranges here, plus the worker's own card share — the
+        // retirement gives it back before the spawn reads the card, and
+        // `split_against` takes every committed megabyte off, this worker's
+        // included (0 for a worker wholly on the processor, #498; a split's,
+        // #461 (3)). Without reclaiming anyone — the spawn may free more, so
+        // this can only under-promise.
         if may_move_as_a_split(&inputs) {
             let leaving_mb = self.room_for_the_plans_other_ranges(model_id, segment);
             inputs.split_would_place = self
@@ -8173,7 +8225,10 @@ impl ModelProcessPool {
                     model_id,
                     Some(segment),
                     handle.gpu_estimate_mb,
-                    inputs.budget_mb.saturating_sub(leaving_mb),
+                    inputs
+                        .budget_mb
+                        .saturating_sub(leaving_mb)
+                        .saturating_add(inputs.own_card_mb),
                 )
                 .map(CardSplit::card_share);
         }
@@ -12504,6 +12559,10 @@ impl ModelProcessPool {
         // re-take the promotion decision under the lock: nothing else can charge
         // the budget while we hold it, so the "it fits" the retirement is
         // justified by is still true at the admission below.
+        // The card layers of a SPLIT this promotion retires (#461 (3)): a
+        // respawn that runs no more of them on the card missed, as one landing
+        // wholly on the processor does.
+        let mut card_layers_retired: Option<usize> = None;
         let retire_for_gpu = match self.workers.get(model_id) {
             // Same again under the lock: a worker can die between the fast
             // path and here, and returning it would land the caller on its own
@@ -12515,6 +12574,10 @@ impl ModelProcessPool {
             }
             Some(handle) => {
                 handle.note_handed_out();
+                card_layers_retired = handle
+                    .card_split
+                    .filter(|_| handle.placed_on_cpu_because.is_none())
+                    .map(|split| split.card_share().0);
                 if guest || !self.worker_should_return_to_gpu(model_id, &handle, segment, requester)
                 {
                     // Another task spawned it while this one waited. Hand it
@@ -13038,6 +13101,31 @@ impl ModelProcessPool {
                             .await;
                     }
                     _ => {}
+                }
+                // A promotion that retired a SPLIT and placed no more of the
+                // model on the card than it had (#461 (3)), after the refit
+                // above: the same miss, and the same mark — never a reload a
+                // request for nothing. Like the mark above, only FOR WANT OF
+                // ROOM: a respawn sent to the processor for another reason (a
+                // driver that did not answer) is a new fact, not a miss.
+                if let Some(before) = card_layers_retired.filter(|_| retire_for_gpu) {
+                    let now = match (handle.placed_on_cpu_because, handle.card_split) {
+                        (Some(CpuReason::NotEnoughVram), _) => Some(0),
+                        (Some(_), _) => None,
+                        (None, Some(split)) => Some(split.card_share().0),
+                        (None, None) => None,
+                    };
+                    if now.is_some_and(|now| now <= before) && !handle.promotion_missed {
+                        handle.promotion_missed = true;
+                        tracing::warn!(
+                            model = %model_id,
+                            card_layers_before = before,
+                            card_layers_now = now,
+                            "a split retired so more of this model could go on the graphics card \
+                             was placed with no more layers there — it is not retired for the card \
+                             again"
+                        );
+                    }
                 }
                 handle.card_free_at_load_mb = card_free_bytes.map(|b| b / (1024 * 1024));
                 // Reset the failure counter on first success.
@@ -17873,6 +17961,67 @@ mod tests {
         assert!(!pool.promotion_weighed(&m, &missed, slice, false, Requester::Swarm));
     }
 
+    /// **The pool weighs a split with its own card share given back** (#461
+    /// (3)): the retirement returns it before the spawn reads the card, and
+    /// `split_against` takes every committed megabyte off — this worker's
+    /// included. Here a card where the move is made only BECAUSE that share
+    /// comes back: without it the predicted split stays short of the rule.
+    #[tokio::test]
+    async fn a_split_is_weighed_by_the_spawns_own_split_with_its_share_given_back() {
+        use std::sync::atomic::AtomicU64;
+        let pool = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-461-3"));
+        pool.test_card_in_play.store(true, Ordering::Relaxed);
+        pool.set_gpu_layers(-1);
+        let card = Arc::new(AtomicU64::new(3_000));
+        {
+            let card = card.clone();
+            pool.set_vram_budget_source(Box::new(move || Some(card.load(Ordering::Relaxed))));
+        }
+        let m = ModelId("seventy-b".into());
+        pool.test_footprint_inputs
+            .insert(m.clone(), seventy_b_inputs());
+        let slice = (0, 20);
+        let a_minute_ago = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(60))
+            .expect("a clock old enough to express the idle time");
+        let mut h = fake_worker_handle_split(
+            false,
+            None,
+            false,
+            a_minute_ago,
+            Some(CardSplit::Layers {
+                on_card: 3,
+                total: 20,
+            }),
+        )
+        .await;
+        Arc::get_mut(&mut h).expect("one owner").gpu_estimate_mb = 10_700;
+        let own_mb = 1_500;
+        h.charged_mb.store(own_mb, Ordering::Release);
+        pool.vram_reserved_mb.insert(m.clone(), own_mb);
+        // The split a spawn would make with `budget` read, the worker's share
+        // still charged (`partial_gpu_layers` takes it off).
+        let moves = |budget: u64| {
+            pool.partial_gpu_layers(&m, Some(slice), 10_700, budget)
+                .map(CardSplit::card_share)
+                .is_some_and(|(on_card, of)| on_card * 2 >= of && on_card >= 6)
+        };
+        let reading = (1_000..10_700)
+            .step_by(50)
+            .find(|&b| moves(b + own_mb) && !moves(b))
+            .expect("fixture: a card where only the worker's own share makes the move");
+        assert!(
+            !pool.promotion_weighed(&m, &h, slice, false, Requester::Swarm),
+            "3 GB: no move"
+        );
+        card.store(reading, Ordering::Relaxed);
+        assert!(
+            pool.promotion_weighed(&m, &h, slice, false, Requester::Swarm),
+            "at {reading} MB the respawn — the share given back — holds at least half and \
+             twice its card layers"
+        );
+    }
+
     /// **A retirement waits for the request it last handed the worker to**
     /// (#483 (a) F2). The hand-out and the reply's registration are on the
     /// request's thread, the removal and the drain on another: a drain that
@@ -18176,8 +18325,10 @@ mod tests {
     /// SPLIT Mistral 7B — 12 of its 32 layers, 1,400 MB, on the card — rather
     /// than send it to the processor, and a split was never weighed for a move
     /// back. Once Ollama lets go it moves whole, its own 1,400 MB counted as
-    /// given back; and a model larger than the card could ever give is not
-    /// weighed, so the card is not read for it.
+    /// given back; a card that could never hold it whole still moves the
+    /// split for one with at least twice its card layers (#461 (3)); and a
+    /// model the card could never give half its estimate is not weighed, so
+    /// the card is not read for it.
     #[tokio::test]
     async fn a_split_worker_moves_whole_once_the_card_has_room() {
         use std::sync::atomic::{AtomicU64, AtomicUsize};
@@ -18227,13 +18378,21 @@ mod tests {
             "7,958 MB for a 5,005 MB model: the split must move whole"
         );
 
+        // A card one megabyte short of the whole model still holds far more
+        // than twice the split's 12 layers: it moves for that split (#461 (3)).
         ceiling.store(5_004, Ordering::Relaxed);
+        assert!(
+            pool.promotion_weighed(&mistral, &h, (0, 48), false, Requester::Swarm),
+            "a card that could at least double the split's 12 layers moves it as a split"
+        );
+
+        ceiling.store(2_400, Ordering::Relaxed);
         let before = reads.load(Ordering::Relaxed);
         assert!(!pool.promotion_weighed(&mistral, &h, (0, 48), false, Requester::Swarm));
         assert_eq!(
             reads.load(Ordering::Relaxed),
             before,
-            "a model larger than the card could ever give is not weighed"
+            "a model the card could never give half its estimate is not weighed"
         );
     }
 
@@ -27155,6 +27314,9 @@ mod admission_tests {
             reclaimable_mb: 0,
             split_by_the_load: None,
             wholly_on_the_processor: true,
+            card_layers_now: 0,
+            card_layers_of: 0,
+            splits_move_for_splits: true,
             split_would_place: None,
             promotion_missed: false,
             splits_offered: true,
@@ -27279,6 +27441,77 @@ mod admission_tests {
         assert!(promotion_is_worth_weighing(&i));
     }
 
+    /// **A split moves for a split that at least doubles its card layers**
+    /// (#461 (3)): Australia's 14B re-placed with 5 of 48 layers on its card
+    /// while a 9B held the rest, kept there for ten minutes with 7.5 GB of the
+    /// card free, since only a whole move was weighed for a split.
+    #[test]
+    fn a_split_moves_for_a_split_that_at_least_doubles_its_card_layers() {
+        let au = PromotionInputs {
+            gpu_estimate_mb: 9_800,
+            ceiling_mb: 11_500,
+            budget_mb: 8_400,
+            committed_mb: 900,
+            own_card_mb: 900,
+            wholly_on_the_processor: false,
+            card_layers_now: 5,
+            card_layers_of: 48,
+            split_would_place: Some((40, 48)),
+            ..promotable()
+        };
+        assert!(should_return_to_gpu(&au), "5 → 40 of 48: it moves");
+        assert!(
+            !should_return_to_gpu(&PromotionInputs {
+                splits_move_for_splits: false,
+                ..au
+            }),
+            "the A/B: a split moves only whole, and the 14B never fits whole"
+        );
+        assert!(
+            !should_return_to_gpu(&PromotionInputs {
+                card_layers_now: 21,
+                ..au
+            }),
+            "21 → 40 is short of double: no reload for that"
+        );
+        assert!(should_return_to_gpu(&PromotionInputs {
+            card_layers_now: 20,
+            ..au
+        }));
+        assert!(
+            !should_return_to_gpu(&PromotionInputs {
+                split_would_place: Some((23, 48)),
+                ..au
+            }),
+            "fewer than half its layers on the card"
+        );
+        assert!(
+            !should_return_to_gpu(&PromotionInputs {
+                card_layers_now: 40,
+                ..au
+            }),
+            "no gain at all"
+        );
+        assert!(
+            !may_move_as_a_split(&PromotionInputs {
+                card_layers_now: 25,
+                ..au
+            }),
+            "25 of 48 can never double: the card is not read for a split"
+        );
+        assert!(
+            !should_return_to_gpu(&PromotionInputs {
+                promotion_missed: true,
+                ..au
+            }),
+            "a respawn once placed no more on the card: not again"
+        );
+        assert!(
+            !should_return_to_gpu(&PromotionInputs { busy: true, ..au }),
+            "never mid-conversation"
+        );
+    }
+
     /// **A slice wholly on the processor moves where the card would take at
     /// least half of it** (#498). Qwen3.8-27B's 47 layers on the Australian
     /// computer, ~12 GB, beside 10 GB of its card free: never a whole fit, so
@@ -27312,11 +27545,13 @@ mod admission_tests {
         assert!(
             !should_return_to_gpu(&PromotionInputs {
                 wholly_on_the_processor: false,
+                card_layers_now: 20,
+                card_layers_of: 47,
                 own_card_mb: 3_000,
                 committed_mb: 3_000,
                 ..au
             }),
-            "a split moves only whole — never one split for another"
+            "a split moves for a split only where its card layers at least double — 20 → 38 does not"
         );
         assert!(
             !should_return_to_gpu(&PromotionInputs {

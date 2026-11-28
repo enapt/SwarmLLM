@@ -5563,7 +5563,8 @@ retired (`PromotionInputs::own_card_mb`; without it a 5,005 MB model holding 1,4
 a 6,000 MB budget). A split of a model larger than the card could EVER give — a 14B on 8 GB —
 would have read `nvidia-smi` on every request after 5 s idle, so `PromotionInputs::ceiling_mb`
 (`auto_manage::vram_budget_ceiling`: the budget with no other program on the card, from the live
-config alone) dismisses it before any reading. Tests `a_split_worker_moves_whole_once_the_card_has_room`
+config alone) dismisses it before any reading — since #461 (3) only a model past TWICE what the card could ever
+give, a split that might still double its card layers being weighed (below). Tests `a_split_worker_moves_whole_once_the_card_has_room`
 (red with the old `placed_on_cpu_because` gate), `a_split_worker_counts_its_own_share_of_the_card`,
 `a_model_larger_than_the_card_could_ever_give_is_not_weighed`.
 
@@ -5710,7 +5711,33 @@ spawn that reclaims. A respawn that lands wholly on the processor anyway, for wa
 (`WorkerHandle::promotion_missed`, a WARN) and never retired for a split again: a reload a request for nothing was #93's loop. The card is read for such a worker past the ceiling only while the ceiling could hold half of it and splits are
 offered (`may_move_as_a_split`, from the review): otherwise the read the ceiling guard saves would come back on
 every request. A split is moved only
-whole, as before, so one split is never traded for another.
+whole, as before, so one split is never traded for another (until #461 (3), below).
+
+**And a SPLIT moves for a split that at least doubles its card layers (2026-11-28, #461 (3)).** The rule above moved
+a split only whole, so a split placed while the card was busy kept its few card layers once the card freed whenever
+the model was too big for the card whole. Seen on the real link (t510far2, v0.3.318 both ends, Australia's 3060
+polled after every reply): its 14B re-placed whole with 5 of 48 layers on the card while a 9B sat beside it; the 9B
+went, 7,572 MB of the card stood free, and for ten minutes the copy served a split's far half at 2.0-2.7 s an answer
+against 32-56 ms, every reply ~2 tokens a second, until a later load happened to place it again (25, then 40 layers).
+Now `moves_for_a_card_split` also moves a split where the respawn's own split of the asked range puts at least half
+the layers on the card AND at least twice the card layers it runs now (`PromotionInputs::card_layers_now`):
+doubling, so a reload is never paid for a few layers — the reason the rule above kept splits whole. The worker's own
+card share is counted as given back (`promotion_weighed` adds `own_card_mb` to the room `partial_gpu_layers` is asked
+with, since `split_against` takes every committed megabyte off, the worker's included — 0 for one wholly on the
+processor, which is why #498 never needed it). A split already running more than half its layers on the card can
+never double, so the card is not read for it (`may_move_as_a_split`, the ceiling guard's reason). A respawn after
+such a move that runs no more layers on the card than before is a miss, marked as a processor landing is
+(`promotion_missed`). Still not covered: a request for a SLICE of a held copy never promotes it
+(`promotion_keeps_what_it_holds`, #3 (j12)), nor does a swarm request inside the idle floor — so a far computer under
+steady slice traffic promotes only on its next whole request or after a gap. A/B `SWARMLLM_SPLIT_PROMOTION=whole`.
+Tests `a_split_moves_for_a_split_that_at_least_doubles_its_card_layers` (the predicate) and
+`a_split_is_weighed_by_the_spawns_own_split_with_its_share_given_back` (the pool, at a card reading where only the
+share given back makes the move). **Measured 2026-11-28** (`~/swarmllm-gate/deep/fr/promo461.sh`, one CUDA build,
+Mistral 7B on this RTX 3070 Laptop, the cap 1,500 MB then raised to 4,000 by SIGHUP, past the conversation gap):
+both arms placed 5 of 32 layers on the card; with `SWARMLLM_SPLIT_PROMOTION=whole` it stayed there (card 1,893 MiB,
+48-token replies 6.6-7.3 s), without it the worker was retired ("Graphics memory has freed up") and came back with
+21 of 32 on the card (3,909 MiB): the reply after the move took 1.7 s. Prior art: nothing moves a loaded model (llama.cpp places `n_gpu_layers` at load,
+`i_gpu_start` in `src/llama-model.cpp`; Ollama's `needsReload` fires only on changed options, `server/sched.go`).
 
 Tests: `a_slice_wholly_on_the_processor_moves_where_the_card_takes_half_of_it` (the predicate) and
 `a_slice_on_the_processor_is_weighed_by_the_spawns_own_split` (the pool, 70B geometry: 3 GB → fewer than half, stays;

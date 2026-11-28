@@ -7299,13 +7299,14 @@ HypSplit-DP solves the same min-max over a multi-tier network; HexGen (2311.1151
 reason our search sums; PipeLive (2604.12171) re-partitions as the bottleneck drifts.
 
 #### #461 — A peer's split that asks a computer for a WIDER range replaces its all-card copy with a mostly-processor one, which then serves every narrower request too
-`P3` · memory / admission · **NARROWED** — 2026-11-15 (the growth half shipped in v0.3.292); contributor 1's guard built 2026-11-17 (shipped in v0.3.297-alpha); residual (4)'s placement built 2026-11-18 (shipped in v0.3.299); a partial overlap built 2026-11-25 · found on the real link (`real_link.sh` TAG=bal292, a forced split point) · related: #3 (j12), #3 (j13), #449, #458
+`P3` · memory / admission · **NARROWED** — 2026-11-15 (the growth half shipped in v0.3.292); contributor 1's guard built 2026-11-17 (shipped in v0.3.297-alpha); residual (4)'s placement built 2026-11-18 (shipped in v0.3.299); a partial overlap built 2026-11-25; residual (3)'s split promotion built 2026-11-28 · found on the real link (`real_link.sh` TAG=bal292, a forced split point) · related: #3 (j12), #3 (j13), #449, #458
 
 **Narrowed 2026-11-15 (v0.3.292)**: contributor 2 was the GROWTH ladder (below, "Contributor 2 found"), and
 `charge_segment_as_split` now steps aside for an idle worker whose spawn range the new range takes in, so the
 retirement the planner priced places it afresh (`docs/invariants/memory.md` § "A worker that cannot grow", real
 link 7.56 → 35.25 tok/s). **Left**: (3)
-no promotion under steady use; (4) an up-front "no" whose re-plan finds no route FAILS the request where the slow
+no promotion under steady use (narrowed 2026-11-28, below: a split now moves for a split that doubles its card
+layers; a SLICE request and a swarm request inside the idle floor still never promote); (4) an up-front "no" whose re-plan finds no route FAILS the request where the slow
 copy would have served it — a coordinator with no room (card or processor) for the refused layers; the real fix is
 PLACEMENT (built 2026-11-18, below), and what is left of it: a range widened at its END still loses its held layers
 (the processor takes the range's first layers, which are then the held ones) and is still refused up front; and the
@@ -7461,6 +7462,48 @@ admissible; our own `worth_moving` (#318) moves a chain only for a quarter off i
 
 The balanced-split question that led here (#411 "Also": fewer layers on the head that also drafts) stays
 UNMEASURED: arm 1 (`[0..26)` here) read 19.6 / 44.9, and every later arm measured the slow copy.
+
+**Seen again 2026-11-28, from another computer's request** (real link `TAG=t510far`, 14B, this card ↔ AU's 3060,
+both on v0.3.318): AU served our `[9..48)` all on its card until another computer asked it for the model whole; it
+then held `[0..48)` with 25 layers on its card and a 9B beside it on its processor, and served our slice from that
+copy — two replies at 6.6 and 12.9 tok/s against 19.6-22.4 before. One request FAILED there, the cache device bug
+fixed as #513 (a conversation's history held on the processor while its layer now computed on the card). The
+narrowing this asks for — candidate (b)/(c) above, or narrowing an IDLE copy for a slice where a quarter of the
+slice runs on its processor — must not undo #3 (j12): there the slice came seconds after the copy's last whole
+reply. A rule that waits until the copy has gone unused WHOLE for minutes (a stamp at each hand-out of the whole
+range, none kept today) separates the two; it can only be judged with the far end on a build that carries it.
+**And a third time an hour later, worse: 5 of 48 layers on the card with 7.5 GB of it free** (t510far2,
+16:13-16:26Z, AU's placement polled after every reply): `[8..48)` 40 on its card → asked whole, `[0..48)` 40 on its
+card with 974 MB free → a 9B beside it on its processor (`not_enough_vram`) → `[0..48)` with **5** on its card and
+7,572 MB free (the 9B gone) for ~10 min — our slice's answers took 2.0-2.7 s against 32-56 ms, four replies at ~2
+tok/s — then 25, then `[8..48)` 40 again. So a copy placed while the card was busy STAYS on the processor once the
+card frees: residual (3), "no promotion", is the one that cost the most here — the copy was 43 layers short of what
+the card then had room for. A promotion — re-place an IDLE worker whose processor-held layers the card's free room
+now covers, with hysteresis so a card that frees for a moment does not reload it (#3 (j12)) — would have saved those
+ten minutes for every request, ours and AU's own.
+
+**Built 2026-11-28 (residual (3), the split half)**: promotion code existed (#260, #498) but moved a SPLIT only
+whole, and a 14B never fits a 3060 whole beside anything — so the 5-layer copy was never weighed. Now
+`moves_for_a_card_split` also moves a split where the respawn's own split puts half the layers on the card AND twice
+the card layers it runs now (`PromotionInputs::card_layers_now`), its own card share counted as given back; a split
+past half is not read for; a respawn with no more card layers is a miss (`promotion_missed`). A/B
+`SWARMLLM_SPLIT_PROMOTION=whole`. Tests `a_split_moves_for_a_split_that_at_least_doubles_its_card_layers`,
+`a_split_is_weighed_by_the_spawns_own_split_with_its_share_given_back`. Evidence: `docs/invariants/memory.md` §
+"A SPLIT moves for a split". **Left of (3)**: in t510far2 two more guards stood — our requests asked `[8..48)` of the
+held `[0..48)` (`promotion_keeps_what_it_holds`, #3 (j12): a promotion that respawned the asked slice threw the rest
+away), and back-to-back replies never left the swarm's 5 s idle floor. So this fires there on the next WHOLE request
+or after a gap. The slice half needs the promotion to respawn the HELD range and serve the slice from it as a view
+(#449) — a change to what `get_or_spawn` spawns, not to a predicate. **Mapped 2026-11-28** (not built): the
+"range to respawn" is the narrowest CHARGED range containing the ask (`serving_range`'s rule), only for
+`RunShape::Plain` under `split::view::elastic_spans_on()` and a model `view_of` accepts, and only where every other
+charged range lies inside it; `worker_should_return_to_gpu` returns it (fast path ~12511 and the locked re-check
+~12590 must agree, recomputed under the lock); every `segment` use after the decision in `get_or_spawn_once` takes it
+(estimate, `room_for_the_plans_other_ranges` — check it does not subtract the held range twice — `split_for`,
+`partial_gpu_layers`, `processor_run`, `card_share_of_split_mb`, `machine_charge`, both refits,
+`record_segment_placed_as_spawned`, `tell_the_owner_of_a_load_for_another_computer`) and `promotion_weighed`'s split
+estimate; the slow path's success return, unchecked today because a fresh spawn is charged for exactly the ask,
+then needs `serves_segment(asked, shape)`. `grow_worker`'s `Growth::Respawn` retires before the lock and must carry
+the range through.
 
 #### #458 — A range grown onto a card worker that its loader then refuses pins the WHOLE model to the processor
 `P3` · memory / admission · **PARTIAL — the double head FIXED (card-checked 2026-11-16); residual (1)-(2)** — 2026-11-15 · found on the real link (`real_link27d.sh`, `TAG=c2h1115b` and `c2hfresh1115`)
