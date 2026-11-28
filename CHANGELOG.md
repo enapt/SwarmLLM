@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.3.318-alpha] — 2026-11-28
+
+**A long-distance split no longer drops to half speed part-way through a reply.** Since the last release the far
+computer of a split skips the guesses it knows are dead. When this computer trims its tree of guesses, the far
+computer reads the kept ones again in a batch of another size, and a graphics card's sums depend on the batch size.
+At a near-tie it then chose a different word than the one it had sent first, and the two computers walked the tree
+differently. On a 14B split between Thailand and Australia, 5 of 20 replies lost their fast path part-way and
+finished in slow rounds (prose about 12 tokens a second against 21). Now the far computer keeps the word it sent
+first, and where the two still part (a far computer on the previous release), this computer trims there at once,
+costing one round trip instead of the rest of the reply. With only this computer updated, 0 of 24 replies lost their
+fast path, and code ran 47.0 tokens a second with the far skipping against 43.6 without. The far computer's half
+needs this release on it too.
+
+**A split between two computers finds its fastest division of layers in fewer steps.** When this computer is the
+slower side of a split, it hands layers to the far computer until both keep pace. Measured on the Thailand-Australia
+link with the 14B set by hand: 16 layers here wrote code at 38.2 tokens a second and prose at 17-20, 12 layers at
+46.8 and 18-24, 9 layers at 53.1 and 22-24. It moved one layer every four replies, so getting from 16 to 9 took 28
+replies, and a restart or an idle hour started it over. Now a step moves half the measured gap at once, up to 4
+layers (16, 12, 10, 9). A division measured slower is still undone, and one the far computer cannot take is no
+longer asked for again layer by layer. Left to choose its own division on that link, the split put 8 of 48 layers
+here, moved one back, and served all 48 test replies at 48.3-52.9 tokens a second on code and 16.6-26.2 on prose.
+`SWARMLLM_FLOW_BALANCE_STEP=one` restores the one-layer step.
+
+**Only the computer running a conversation can stop it on a computer serving part of it.** A computer serving part
+of a split reply used to stop that reply's work, and drop its saved prompt, when any connected computer sent a cancel
+naming the reply's id. The ids are random, so a stranger cannot name one, but every computer in the same chain sees
+it. There is no sign this was ever used. Now each serving computer honours a cancel only from the computer
+coordinating the reply, or the one that handed it the whole reply; every legitimate cancel comes from there. A
+computer in the chain can still disturb a reply with a forward of its own; closing that needs the coordinator to sign
+the chain (docs/FUTURE_WORK.md #512).
+
 ## [0.3.317-alpha] — 2026-11-28
 
 **The far computer of a split now skips the guesses a reply can no longer use.** When a model is split across
