@@ -4035,7 +4035,7 @@ per-round rule (`best_gamma_beside_a_step_per_round`) sets the block aside where
 costs more than it writes — read its share there.
 
 #### #147 — Prompt reading on the card: the smaller items left after f16 accumulation
-`P3` · perf-local · **PARTIAL** — 2026-10-09 · history: archive row #147 and § "Prompt reading on the card (#147, 2026-09-29)"
+`P3` · perf-local · **PARTIAL — 2026-11-28: a 1,812-token prompt on the card reads at 1,670-1,780 tok/s against llama.cpp's 2,220 with its flash attention (1,840 without)** — 2026-10-09 · history: archive row #147 and § "Prompt reading on the card (#147, 2026-09-29)"
 
 Shipped in v0.3.213: ≥ 64 rows go to f16 dequant + cuBLAS (llama.cpp's own rule for a dp4a MMQ)
 and a prompt alone on the card reads 512 per forward — Llama-3.1-8B ~740 → ~1,150 tok/s. On main
@@ -4050,6 +4050,16 @@ pass (~5% by the kernel table); one untraced single-row `mul_mat_vec_q4_K` per l
 tensor-core MMQ port (large). Not checked at long context: Qwen 3.5 (reference is llama.cpp master)
 and a MoE model whole on the card (none fits 8 GB). Separately, GLM-4-9B disagrees with llama.cpp
 at a few positions on every path (tokenizer re-tokenisation is the lead) — pre-existing.
+
+**Measured 2026-11-28 against llama.cpp, the gap this item still owns** (`~/swarmllm-gate-common/vs_llamacpp.sh`,
+first run `~/swarmllm-gate/deep/vsllama/`; the README's "Against llama.cpp" table): Qwen2.5-Coder-7B whole on the
+RTX 3070 Laptop, the release check's 1,812-token document. The published v0.3.318 reads it at 1,669-1,784 tok/s
+(time to the first token 1.02-1.09 s); llama.cpp 4b1a27f's `llama-bench -ngl 99 -p 1812` reads 2,216-2,228 with
+flash attention on and 1,840-1,846 with it off. So ours is about level with llama.cpp's prompt pass WITHOUT flash
+attention and ~20-25% behind it WITH. Which part of our pass holds the difference (attention, the matmuls, the
+per-chunk host work) is not measured. Next: one `nsys` trace of each side's prompt pass at 1,812 tokens, kernel
+time by kind, before choosing what to port. Writing, by contrast, is ours: 71.9-73.0 against llama.cpp's
+60.6-61.0 after the same document.
 
 #### #258 — One long prompt in about ten pauses ~0.7 s in a single middle chunk on the card
 `P3` · perf-local · **OPEN** — 2026-10-13 · history: none (seen while measuring #257)

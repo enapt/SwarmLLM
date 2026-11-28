@@ -60,7 +60,11 @@ In the bump commit, beside the counts:
    measured. A figure only main has waits for the release that ships it. A range
    spans every run of the setup, never one run's best (gotcha #990), and names
    the machines.
-3. Set `reviewed for <new version>` in the section's opening marker.
+3. **Against llama.cpp**: both columns come from ONE sitting of `~/swarmllm-gate-common/vs_llamacpp.sh`
+   (~15 min, the live node stopped; ours as the release check runs it, llama.cpp's `llama-bench` on the best
+   of a settings sweep, gotcha #843). Its version comment ages like an across-computer row: past 7 days, run
+   it again on the current release or drop the table. Never set an older llama.cpp figure beside a new one of ours.
+4. Set `reviewed for <new version>` in the section's opening marker.
 
 Guard: `the_readme_speeds_are_reviewed_at_every_release` — the bump changes
 `Cargo.toml`'s version, so the commit gate runs it there. A row's wording follows

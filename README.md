@@ -196,6 +196,18 @@ guess, and the guesses keep the long link busy ([how](docs/plans/faster_than_loc
 model fits on this laptop's card beside the 14B: with other programs holding a
 gigabyte of the card, the helper runs on the processor and the split writes
 21–22 tokens a second of code and 11–12 of prose.
+
+**Against llama.cpp.** The same laptop and the same 1,800-token document, the
+two programs run one after the other, llama.cpp on its best settings:
+
+| Model, and where it runs | Writing: SwarmLLM | Writing: llama.cpp | Reading: SwarmLLM | Reading: llama.cpp |
+|---|---|---|---|---|
+| Qwen2.5 Coder 7B, the graphics card | 72–73 | 61 | 1,670–1,780 | 2,220 |
+| Llama 3.2 3B, the processor only | 15–17 | 14–17 | 77–81 | 74–77 |
+
+On the card SwarmLLM writes about a fifth faster, and llama.cpp reads the
+document about a quarter faster. On the processor the two are level.
+<!-- measured on: both programs in one sitting, 11-28 11:37-11:49Z (~/swarmllm-gate-common/vs_llamacpp.sh, first run ~/swarmllm-gate/deep/vsllama/): SwarmLLM the published v0.3.318 as the release check runs it (its own 1,812-token document, 128 tokens written, the reply store off, two runs of two replies, range across all four); llama.cpp 4b1a27f's llama-bench, reading -p 1812, writing -n 128 -d 1812 (after a document of the same length), the best setting of a sweep: the card -ngl 99 with flash attention on (writing 60.6-61.0, reading 2,216-2,228; off: writing 56.6-56.7 with one 116.3 sample above what the card's memory can feed, reading 1,840-1,846), the processor llama.cpp's CPU-only build at 8 threads (4 threads: writing 12.5-14.8, reading 50.3-50.7). The card held ~0.9-1.0 GB of another program throughout, both programs alike; 0 driver events. -->
 <!-- speeds:end -->
 
 ## Help build the swarm
