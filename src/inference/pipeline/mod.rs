@@ -476,6 +476,7 @@ pub(super) fn build_spec_verify_forward(
         draft_tokens: walk.map(|w| w.drafts.to_vec()).unwrap_or_default(),
         spec_logits_requested: true,
         spec_walk_at_tail: walk.is_some(),
+        rows_may_skip: false,
         coupling_seed: walk.and_then(|w| w.coupling),
         // Only a streamed check (`dsd_stream`) numbers its forwards, and only
         // for a peer advertising `features::STREAMED_VERIFY`.
@@ -1151,6 +1152,7 @@ pub(super) fn build_kv_truncate_forward(
         draft_tokens: Vec::new(),
         spec_logits_requested: false,
         spec_walk_at_tail: false,
+        rows_may_skip: false,
         coupling_seed: None,
         stream_seq: None,
         truncate_kv_to: Some(truncate_to),

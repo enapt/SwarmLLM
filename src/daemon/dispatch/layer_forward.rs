@@ -620,6 +620,9 @@ pub(super) async fn handle_layer_forward(
                         spec_logits_requested: verify_onward.is_some(),
                         spec_walk_at_tail: spec_walk_at_tail
                             && next_has(swarmllm_types::node::features::SPEC_WALK_AT_TAIL),
+                        // A chained run's rows all run (#510 skips at an
+                        // unchained far end only).
+                        rows_may_skip: false,
                         coupling_seed: coupling_seed
                             .filter(|_| next_has(swarmllm_types::node::features::COUPLED_SAMPLING)),
                         draft_tokens,
@@ -1688,6 +1691,7 @@ mod chaining_tests {
             draft_tokens: Vec::new(),
             spec_logits_requested: false,
             spec_walk_at_tail: false,
+            rows_may_skip: false,
             coupling_seed: None,
             stream_seq: None,
             truncate_kv_to: None,
@@ -1826,6 +1830,7 @@ mod chaining_tests {
             // "not met", not "cannot carry it".
             spec_logits_requested: true,
             spec_walk_at_tail: false,
+            rows_may_skip: false,
             coupling_seed: None,
             stream_seq: None,
             truncate_kv_to: None,
@@ -2194,6 +2199,7 @@ mod tests {
             draft_tokens: Vec::new(),
             spec_logits_requested: false,
             spec_walk_at_tail: false,
+            rows_may_skip: false,
             coupling_seed: None,
             stream_seq: None,
             truncate_kv_to: None,
@@ -2351,6 +2357,7 @@ mod tests {
             draft_tokens: vec![7, 8],
             spec_logits_requested: true,
             spec_walk_at_tail: true,
+            rows_may_skip: false,
             coupling_seed: None,
             stream_seq: Some(3),
             truncate_kv_to: None,
@@ -2406,6 +2413,7 @@ mod tests {
             draft_tokens: vec![7, 8],
             spec_logits_requested: true,
             spec_walk_at_tail: true,
+            rows_may_skip: false,
             coupling_seed: None,
             stream_seq: Some(3),
             truncate_kv_to: Some(17),
@@ -2573,6 +2581,7 @@ mod forward_positions_tests {
             draft_tokens: Vec::new(),
             spec_logits_requested: false,
             spec_walk_at_tail: false,
+            rows_may_skip: false,
             coupling_seed: None,
             stream_seq: Some(1),
             truncate_kv_to: None,

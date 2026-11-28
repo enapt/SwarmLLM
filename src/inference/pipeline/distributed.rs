@@ -1569,6 +1569,7 @@ impl PipelineExecutor {
                     draft_tokens: Vec::new(),
                     spec_logits_requested: false,
                     spec_walk_at_tail: false,
+                    rows_may_skip: false,
                     coupling_seed: None,
                     stream_seq: None,
                     // Rewind a segment a failed chained run already ran at this
@@ -3029,6 +3030,7 @@ impl PipelineExecutor {
                 draft_tokens: Vec::new(),
                 spec_logits_requested: false,
                 spec_walk_at_tail: false,
+                rows_may_skip: false,
                 coupling_seed: None,
                 stream_seq: None,
                 truncate_kv_to: None,

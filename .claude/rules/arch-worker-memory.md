@@ -127,6 +127,12 @@ A whole card placement fitted by `fit_whole_placement_to_the_load` (`WorkerHandl
 
 → `docs/invariants/memory.md` § "A worker serves any run inside a range it loaded"
 
+## A far end that skips rows holds only those it ran (2026-11-28, #510)
+
+Where the far end of a flowing tree skips dead rows (`draft_tree::LiveRows`, kept on `KvCacheEntry::live_rows`), its cache holds only the rows it ran: **`KvCacheStore::local_position`** is the ONE translation of a requester's position into it — the continuity check and `truncate_request_to` read it, and so does any new check of a forward's position against the cache. **A draw goes back only for a row live AND sound** (computed after its whole path); `NOT_DRAWN` is never a word at the requester, and a walk standing on one hands the reply to the rounds. A tree's first forward (a rebase's too) runs whole. A/B `SWARMLLM_FLOW_LIVE_ROWS=0`.
+
+→ `docs/invariants/memory.md` § "A far end that skips rows holds only those it ran"
+
 ## A split's stored prompt lives in the worker's prefix cache (2026-10-09, #10)
 
 Chain-keyed entries in the worker's `PrefixCache` (`lookup_chain` / `insert_chain_from_kv`), never a second store (gotcha #440). In `handle_forward`: look up BEFORE admission, admit restored + computed positions, hydrate AFTER; a mismatch is `PromptCacheMiss`. **Planned at the final piece, copied once the answer is SENT** (#433: `plan_chain_insert`, `finish_chain_insert`) — never before the first token. A/B `SWARMLLM_SPLIT_PROMPT_SAVE=before-answer`.

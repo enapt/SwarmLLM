@@ -857,3 +857,82 @@ fn a_recording_whose_last_graph_is_made_is_finished_though_a_message_came() {
         "the recording made its last graph and was still reported stopped"
     );
 }
+
+/// A far end that runs only the rows its draws leave on the walk (#510): its
+/// cache holds the rows it ran and nothing between them, and every row it
+/// answers must read as that row's own path does from nothing — the compact
+/// tree and the positions it is read at stand for the whole tree's.
+#[test]
+fn a_far_that_runs_only_its_live_rows_reads_them_as_their_paths_do() {
+    use crate::inference::draft_tree::LiveRows;
+    let mut model = whole_model();
+    let kv = KvCacheStore::new(std::time::Duration::from_secs(60));
+    let prompt = model.tensor_from_ids(&PROMPT).unwrap();
+    model.forward(&prompt, 0, &kv, "lr").unwrap();
+    let (tokens, parents) = tree();
+    let base = PROMPT.len();
+    let first = DraftTree::new(base, parents[..3].to_vec()).unwrap();
+    let plan = LiveRows::plan(None, &first, &tokens[..3], 0, 3, 8).unwrap();
+    assert_eq!(plan.rows, vec![0, 1, 2]);
+    let input = model.tensor_from_ids(&tokens[..3]).unwrap();
+    let at = plan.index_pos();
+    model
+        .with_draft_tree(plan.tree.clone().unwrap(), None, |m| {
+            m.forward_verify_all_positions(&input, at, &kv, "lr")
+        })
+        .unwrap()
+        .unwrap();
+    // Row 0 drew 9 (row 1's token), row 1 drew 13 (row 3's): of rows 3-5,
+    // 3 and 5 are on the walk and 4 (under row 2) is not.
+    let (_, kept) = plan.answer(&[9, 13, 99]).unwrap();
+    let whole = DraftTree::new(base, parents.clone()).unwrap();
+    let second = LiveRows::plan(Some(kept), &whole, &tokens, 0, 3, 2).unwrap();
+    assert_eq!(second.rows, vec![0, 2]);
+    let live: Vec<u32> = second.rows.iter().map(|&r| tokens[3 + r]).collect();
+    let input = model.tensor_from_ids(&live).unwrap();
+    let at = second.index_pos();
+    assert_eq!(at, base + 3);
+    let out = model
+        .with_draft_tree(second.tree.clone().unwrap(), None, |m| {
+            m.forward_verify_all_positions(&input, at, &kv, "lr")
+        })
+        .unwrap()
+        .unwrap();
+    let rows = rows_of(&out);
+    assert_eq!(rows.len(), 2);
+    for (i, row) in [3usize, 5].into_iter().enumerate() {
+        let mut seq = PROMPT.to_vec();
+        seq.extend(path_of(&tokens, &parents, row));
+        assert_close(
+            &rows[i],
+            &read_fresh(&mut model, &seq),
+            &format!("row {row}"),
+        );
+    }
+    // The prompt and the five rows run, never the sixth.
+    let key = model.kv_model_key().to_string();
+    assert_eq!(kv.request_positions(&key, "lr"), base + 5);
+    // A third forward: row 6 follows row 5, which sits in the cache where
+    // the skipped row 4 would have — every slot past it is one lower.
+    let (_, kept) = second.answer(&[21, 40]).unwrap();
+    let mut grown_tokens = tokens.clone();
+    grown_tokens.push(40);
+    let mut grown_parents = parents.clone();
+    grown_parents.push(Some(5));
+    let grown = DraftTree::new(base, grown_parents.clone()).unwrap();
+    let third = LiveRows::plan(Some(kept), &grown, &grown_tokens, 0, 1, 2).unwrap();
+    assert_eq!(third.rows, vec![0]);
+    let at = third.index_pos();
+    assert_eq!(at, base + 5);
+    let input = model.tensor_from_ids(&[40]).unwrap();
+    let out = model
+        .with_draft_tree(third.tree.clone().unwrap(), None, |m| {
+            m.forward_verify_all_positions(&input, at, &kv, "lr")
+        })
+        .unwrap()
+        .unwrap();
+    let mut seq = PROMPT.to_vec();
+    seq.extend(path_of(&grown_tokens, &grown_parents, 6));
+    assert_close(&rows_of(&out)[0], &read_fresh(&mut model, &seq), "row 6");
+    assert_eq!(kv.request_positions(&key, "lr"), base + 6);
+}

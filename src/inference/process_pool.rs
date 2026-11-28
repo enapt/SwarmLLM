@@ -13975,6 +13975,7 @@ impl ModelProcessPool {
             draft_tokens,
             spec_logits_requested,
             spec_walk_at_tail: _,
+            rows_may_skip,
             coupling_seed,
             stream_seq,
             truncate_kv_to,
@@ -14027,6 +14028,7 @@ impl ModelProcessPool {
             generated_ids,
             spec_logits_requested,
             spec_walk_at_tail: walk_with_the_callers_sampler,
+            rows_may_skip,
             // Shared noise is meaningful only to a walk that samples with the
             // caller's parameters; anything else keeps the worker's own draw.
             coupling_seed: coupling_seed.filter(|_| walk_with_the_callers_sampler),
@@ -14581,6 +14583,7 @@ impl ModelProcessPool {
                 draft_tokens,
                 spec_logits_requested,
                 spec_walk_at_tail,
+                rows_may_skip: _,
                 coupling_seed: _,
                 // Streamed verifies are never batched (`forward_is_schedulable`).
                 stream_seq: _,
@@ -14627,6 +14630,7 @@ impl ModelProcessPool {
                 generated_ids,
                 spec_logits_requested,
                 spec_walk_at_tail,
+                rows_may_skip: false,
                 // Batched forwards are never verify walks (`forward_is_schedulable`).
                 coupling_seed: None,
                 stream_seq: None,
@@ -16240,6 +16244,7 @@ mod tests {
             draft_tokens: Vec::new(),
             spec_logits_requested: false,
             spec_walk_at_tail: false,
+            rows_may_skip: false,
             coupling_seed: None,
             stream_seq: None,
             truncate_kv_to: None,
@@ -20031,6 +20036,7 @@ mod tests {
             draft_tokens: Vec::new(),
             spec_logits_requested: false,
             spec_walk_at_tail: false,
+            rows_may_skip: false,
             coupling_seed: None,
             stream_seq: None,
             truncate_kv_to: None,

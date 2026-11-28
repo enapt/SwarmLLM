@@ -71,7 +71,9 @@ use futures::FutureExt;
 
 use crate::daemon::state::{ExpectedStep, PendingLayerResult, SharedState, WaiterKey};
 use crate::error::SwarmError;
-use crate::inference::draft_tree::{walk_draws, FlowOp, FlowTree, WalkEnd, MAX_TREE_ROWS};
+use crate::inference::draft_tree::{
+    walk_draws, FlowOp, FlowTree, WalkEnd, MAX_TREE_ROWS, NOT_DRAWN,
+};
 use crate::types::inference::stream_seq;
 use crate::types::{LayerResult, NetworkCommand, NetworkFinishReason};
 
@@ -1144,6 +1146,75 @@ fn walk_on_the_forward(lead: usize, at: usize) -> Result<u16, SwarmError> {
         .map_err(|_| SwarmError::Internal("a tree that flows ran past the walk's numbering".into()))
 }
 
+/// Whether this flow's far end runs only the rows its draws leave on the
+/// walk (#510): ONE peer that draws (`far_walks`, no chain), dense layers — a
+/// flow with the walk carries it for a recurrent checkpoint — that peer
+/// advertising `features::FLOW_LIVE_ROWS`, and the switch on here
+/// (`draft_tree::live_rows_on`: the A/B lever where the far is someone else's).
+/// And only where a row drawn twice draws alike (`draws_repeat`: greedy, or the
+/// shared noise): a rebase's forward draws its kept rows again, the far walks
+/// those and this node the first in — two random draws would part the walks
+/// at every rebase (security review, 2026-11-28).
+fn far_skips_rows(
+    state: &SharedState,
+    shape: &StreamShape,
+    with_the_walk: bool,
+    draws_repeat: bool,
+) -> bool {
+    crate::inference::draft_tree::live_rows_on()
+        && draws_repeat
+        && shape.far_walks()
+        && !shape.chained()
+        && !with_the_walk
+        && state.peer_advertises_feature(
+            &shape.far.node_id,
+            swarmllm_types::node::features::FLOW_LIVE_ROWS,
+        )
+}
+
+/// The rows a far end that skips (#510) ran of a forward of `rows`, `drawn`
+/// of them answered: none where it drew none; else its live rows padded to
+/// one shape (`draft_tree::LIVE_ROWS_WIDTH`), or the forward whole where it is
+/// no wider. Live rows it left undrawn for a lost path are rare and not seen.
+fn rows_the_far_ran(rows: usize, drawn: usize) -> usize {
+    use crate::inference::draft_tree::LIVE_ROWS_WIDTH;
+    match drawn {
+        0 => 0,
+        d if d == rows => rows,
+        d if d > LIVE_ROWS_WIDTH => d,
+        _ => rows.min(LIVE_ROWS_WIDTH),
+    }
+}
+
+/// Take one row's answer: a row's draw does not depend on the forward that
+/// carried it, so the first one in stands. One the far end left undrawn
+/// (#510, `NOT_DRAWN`) is marked beside it, never read as a word; a later real
+/// draw of the row (a rebase's forward runs whole) takes it and clears the mark.
+fn take_row_answer(draws: &mut [Option<u32>], not_drawn: &mut [bool], row: usize, draw: u32) {
+    if draws.get(row).is_none_or(Option::is_some) {
+        return;
+    }
+    if draw == NOT_DRAWN {
+        if let Some(mark) = not_drawn.get_mut(row) {
+            *mark = true;
+        }
+    } else {
+        draws[row] = Some(draw);
+        if let Some(mark) = not_drawn.get_mut(row) {
+            *mark = false;
+        }
+    }
+}
+
+/// The row a walk that stopped at `end` waits on where the far end left that
+/// row undrawn (#510): the far's walk left it, so the two walks parted there.
+fn walk_parted_at(end: WalkEnd, not_drawn: &[bool]) -> Option<usize> {
+    match end {
+        WalkEnd::Waiting { row } if not_drawn.get(row).copied().unwrap_or(false) => Some(row),
+        _ => None,
+    }
+}
+
 /// Whether a reply of `model` flows with the walk's row on every forward
 /// (`LayerForward::flow_walk`): a model with recurrent layers (Qwen 3.5's
 /// DeltaNet), which read the tree from a checkpoint at that row
@@ -1481,6 +1552,16 @@ struct FlowRun<'a, 'r> {
     /// (`take_together`), weighed after the one ahead of it moved the walk.
     rows_answered: u32,
     rows_dead_at_service: u32,
+    /// The far end runs only the rows its draws leave on the walk and answers
+    /// the rest "not drawn" (#510, [`far_skips_rows`]).
+    skips_rows: bool,
+    /// Per row, beside `draws`: its answer came back "not drawn". A walk
+    /// standing on such a row has parted from the far's: the rounds finish.
+    not_drawn: Vec<bool>,
+    /// This tree's own rows answered "not drawn", and the answers that drew
+    /// none of theirs — what the far end did not compute (#510).
+    rows_not_drawn: u32,
+    forwards_not_drawn: u32,
     /// Answers held back because the walk can reach none of their rows
     /// (`dead_wait_on`), in turn: read with the next answer it can reach, or
     /// never, where a rebase cuts this node's cache below them first.
@@ -1548,6 +1629,12 @@ impl PipelineExecutor {
                     .for_the_owner(&self.request)
             })
             .map(|store| (store, flow_exposure(&shape)));
+        let skips_rows = far_skips_rows(
+            &state,
+            &shape,
+            flows_with_the_walk(&self.shared_state, &self.request.model_id),
+            self.request.sampling_params.temperature <= 0.0 || coupling.is_some(),
+        );
         let mut run = FlowRun {
             exec: self,
             state,
@@ -1609,6 +1696,10 @@ impl PipelineExecutor {
             dead_rows_here: 0,
             rows_answered: 0,
             rows_dead_at_service: 0,
+            skips_rows,
+            not_drawn: vec![false],
+            rows_not_drawn: 0,
+            forwards_not_drawn: 0,
             waiting_dead: Vec::new(),
             dead_waited: 0,
             dead_cut: 0,
@@ -1657,6 +1748,9 @@ impl PipelineExecutor {
             dead_rows_here = run.dead_rows_here,
             rows_answered = run.rows_answered,
             rows_dead_at_service = run.rows_dead_at_service,
+            skips_rows = run.skips_rows,
+            rows_not_drawn = run.rows_not_drawn,
+            forwards_not_drawn = run.forwards_not_drawn,
             dead_wait = dead_wait_on(),
             dead_waited = run.dead_waited,
             // Those still waiting when the reply ended were never read either.
@@ -1907,6 +2001,7 @@ impl FlowRun<'_, '_> {
                 .push(usize::from(parent), token)
                 .map_err(|e| SwarmError::Internal(format!("a drafter's proposal: {e}")))?;
             self.draws.push(None);
+            self.not_drawn.push(false);
             self.copied.push(Copied::No);
             self.drafted_at.push(Some(drafted));
         }
@@ -1927,6 +2022,11 @@ impl FlowRun<'_, '_> {
             new_index[old] = Some(new);
         }
         self.draws = rebased.kept.iter().map(|&old| self.draws[old]).collect();
+        self.not_drawn = rebased
+            .kept
+            .iter()
+            .map(|&old| self.not_drawn[old])
+            .collect();
         self.copied = rebased.kept.iter().map(|&old| self.copied[old]).collect();
         self.drafted_at = rebased
             .kept
@@ -2027,6 +2127,7 @@ impl FlowRun<'_, '_> {
                 break;
             };
             self.draws.push(None);
+            self.not_drawn.push(false);
             self.copied.push(from);
             self.drafted_at.push(Some(std::time::Instant::now()));
             self.ops.push(FlowOp::Copy {
@@ -2134,6 +2235,7 @@ impl FlowRun<'_, '_> {
         let at = self.flow.at();
         let row = self.flow.push(at, token).map_err(SwarmError::Internal)?;
         self.draws.push(None);
+        self.not_drawn.push(false);
         self.copied.push(Copied::No);
         self.drafted_at.push(None);
         self.ops.push(FlowOp::Push {
@@ -2252,6 +2354,21 @@ impl FlowRun<'_, '_> {
             Some(seq),
         );
         tree(&mut forward);
+        if self.skips_rows {
+            // The far walks its own draws from the walk's row over the whole
+            // tree's tokens (#510): a rebase's forward IS its tree (path and
+            // kept rows), any other carries the rows after the earlier ones.
+            let tokens = if rows.tokens.len() == rows.wire.len() {
+                rows.tokens.clone()
+            } else {
+                self.flow.tokens().to_vec()
+            };
+            if tokens.len() == rows.wire.len() {
+                forward.rows_may_skip = true;
+                forward.draft_tokens = tokens;
+                forward.flow_walk = Some(walk_on_the_forward(rows.lead, self.flow.at())?);
+            }
+        }
         if !self.shape.chain.is_empty() {
             forward.chain = self.shape.chain.clone();
             forward.requester_node_id = Some(self.state.identity.node_id().0);
@@ -2812,16 +2929,25 @@ impl FlowRun<'_, '_> {
                 return Ok(Taken::Continue);
             }
         };
+        let not_drawn = result
+            .token_ids
+            .iter()
+            .skip(sent.lead)
+            .filter(|&&t| t == NOT_DRAWN)
+            .count();
+        let none_drawn = not_drawn > 0 && not_drawn == sent.rows - sent.lead;
+        if current && sent.lead == 0 {
+            self.rows_not_drawn += not_drawn as u32;
+            self.forwards_not_drawn += u32::from(none_drawn);
+        }
         for (i, &draw) in result.token_ids.iter().enumerate().skip(sent.lead) {
             let row = sent.first_row + i - sent.lead;
             let row = match remap {
                 None => Some(row),
                 Some(map) => map.get(row).copied().flatten(),
             };
-            if let Some(slot) = row.and_then(|r| self.draws.get_mut(r)) {
-                // A row's draw does not depend on the forward that carried it:
-                // the first one in stands.
-                slot.get_or_insert(draw);
+            if let Some(row) = row {
+                take_row_answer(&mut self.draws, &mut self.not_drawn, row, draw);
             }
         }
         // When it ARRIVED: the time it then sat while this node drafted or ran
@@ -2831,14 +2957,19 @@ impl FlowRun<'_, '_> {
             .as_secs_f64()
             * 1000.0;
         self.least_answer_ms = Some(self.least_answer_ms.map_or(delay_ms, |l| l.min(delay_ms)));
-        if sent.alone && current && sent.lead == 0 && !joined {
+        if sent.alone && current && sent.lead == 0 && !joined && !none_drawn {
             // A check's cost runs to its draws: this node's layers after the
-            // peers' too, where they draw.
-            self.reply
-                .check
-                .record(sent.rows as u32, delay_ms + here_ms);
+            // peers' too, where they draw. Where the far skipped rows (#510),
+            // the rows it ran: its live ones, padded to one shape.
+            self.reply.check.record(
+                rows_the_far_ran(sent.rows, sent.rows - not_drawn) as u32,
+                delay_ms + here_ms,
+            );
         }
-        if let Some(us) = served_us.filter(|_| self.far_said_ms.len() < Verdicts::MOST_KEPT) {
+        // An answer the far drew nothing of took no step: no sample of its time.
+        if let Some(us) =
+            served_us.filter(|_| self.far_said_ms.len() < Verdicts::MOST_KEPT && !none_drawn)
+        {
             self.far_said_ms.push(us as f32 / 1000.0);
         }
         if sent.lead == 0 {
@@ -2855,7 +2986,10 @@ impl FlowRun<'_, '_> {
                 })
                 .flatten()
                 .map(f64::from);
-            let served_ms = believed_served_ms(delay_ms, served_us, floor_ms);
+            // An answer the far drew nothing of ran no step (#510): its time
+            // is no sample of the far's, though its delay still is the link's.
+            let served_ms =
+                believed_served_ms(delay_ms, served_us, floor_ms).filter(|_| !none_drawn);
             let before = self.guard.at();
             let (cuts, far_cuts, far_undone) =
                 (self.guard.cuts, self.guard.far_cuts, self.guard.far_undone);
@@ -2907,7 +3041,19 @@ impl FlowRun<'_, '_> {
             &self.draws,
             self.flow.at(),
         );
+        // #510: the far leaves undrawn only rows its own walk left, so this
+        // walk standing on one has parted from it — a near-tie drawn two ways.
+        // Its tokens so far are the model's; the rounds finish the reply.
+        let parted = walk_parted_at(end, &self.not_drawn);
+        let walks_parted = |row: usize| {
+            SwarmError::Inference(format!(
+                "a tree that flows: the walk reached row {row}, which the far computer left undrawn"
+            ))
+        };
         if emitted.is_empty() {
+            if let Some(row) = parted {
+                return Err(walks_parted(row));
+            }
             return Ok(Taken::Continue);
         }
         let (WalkEnd::Waiting { row: reached } | WalkEnd::Missed { row: reached, .. }) = end;
@@ -2951,7 +3097,12 @@ impl FlowRun<'_, '_> {
             return Ok(Taken::Done);
         }
         match end {
-            WalkEnd::Waiting { row } => self.advance(row)?,
+            WalkEnd::Waiting { row } => {
+                self.advance(row)?;
+                if let Some(row) = parted {
+                    return Err(walks_parted(row));
+                }
+            }
             WalkEnd::Missed { row, token } => {
                 self.advance(row)?;
                 self.misses += 1;
@@ -3086,6 +3237,67 @@ fn median_of(values: &[f32]) -> f32 {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_row_the_far_left_undrawn_is_never_read_as_a_word() {
+        let mut draws = vec![None, None, Some(7)];
+        let mut not_drawn = vec![false; 3];
+        take_row_answer(&mut draws, &mut not_drawn, 1, NOT_DRAWN);
+        assert_eq!(draws, [None, None, Some(7)], "the sentinel is never a draw");
+        assert_eq!(not_drawn, [false, true, false]);
+        // A real draw of that row later (a rebase's forward runs whole) takes it.
+        take_row_answer(&mut draws, &mut not_drawn, 1, 42);
+        assert_eq!(draws[1], Some(42));
+        assert!(!not_drawn[1], "the mark goes with the real draw");
+        // The first draw in stands: neither a sentinel nor another draw moves it.
+        take_row_answer(&mut draws, &mut not_drawn, 2, NOT_DRAWN);
+        take_row_answer(&mut draws, &mut not_drawn, 2, 9);
+        assert_eq!((draws[2], not_drawn[2]), (Some(7), false));
+        // A row past the tree is dropped.
+        take_row_answer(&mut draws, &mut not_drawn, 3, 5);
+        assert_eq!(draws.len(), 3);
+    }
+
+    #[test]
+    fn a_walk_waiting_on_a_row_the_far_left_undrawn_has_parted_from_it() {
+        let not_drawn = [false, false, true];
+        assert_eq!(
+            walk_parted_at(WalkEnd::Waiting { row: 2 }, &not_drawn),
+            Some(2)
+        );
+        assert_eq!(
+            walk_parted_at(WalkEnd::Waiting { row: 1 }, &not_drawn),
+            None,
+            "a row with no answer yet is waited for, not parted from"
+        );
+        assert_eq!(
+            walk_parted_at(WalkEnd::Missed { row: 2, token: 3 }, &not_drawn),
+            None,
+            "a miss ends the walk in the tree's own way"
+        );
+        assert_eq!(
+            walk_parted_at(WalkEnd::Waiting { row: 9 }, &not_drawn),
+            None
+        );
+    }
+
+    #[test]
+    fn a_check_is_priced_by_the_rows_the_far_ran() {
+        let width = crate::inference::draft_tree::LIVE_ROWS_WIDTH;
+        assert_eq!(rows_the_far_ran(24, 0), 0, "drew none: ran none");
+        assert_eq!(rows_the_far_ran(24, 24), 24, "drew all: ran all");
+        assert_eq!(
+            rows_the_far_ran(24, 3),
+            width,
+            "a few live rows pad to one shape"
+        );
+        assert_eq!(
+            rows_the_far_ran(5, 2),
+            5,
+            "a forward no wider than the shape runs whole"
+        );
+        assert_eq!(rows_the_far_ran(24, width + 3), width + 3);
+    }
 
     #[test]
     fn a_forwards_rows_the_walk_has_left_are_counted_as_dead_at_service() {

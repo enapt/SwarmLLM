@@ -443,6 +443,9 @@ fn advertised_features(shared: &SharedState) -> u64 {
     if crate::model::auto_manage::card_ranges_on() {
         bits |= features::CARD_RANGES;
     }
+    if crate::inference::draft_tree::live_rows_on() {
+        bits |= features::FLOW_LIVE_ROWS;
+    }
     bits
 }
 

@@ -3776,7 +3776,7 @@ TAG=fresh303, 02:26-02:29Z, the thread sampler beside it in `threads_fresh303.tx
 the owner is #146 (4).
 
 #### #510 — A split's far card computes every row of a guess tree, the ones the walk has already left too
-`P2` · perf-split · **OPEN** (step 0 MEASURED and PASSED: 86-90% of the far's rows dead at service; 24 rows +24-29% over 8 on a card) — 2026-11-27 · evidence: memory `archive/fable_flow_law_1127.md`
+`P2` · perf-split · **BUILT, real link pending** (step 0 PASSED: 86-90% of the far's rows dead at service; 24 rows +24-29% over 8 on a card; built 2026-11-28 — the far must run the release carrying it) — 2026-11-27 · evidence: memory `archive/fable_flow_law_1127.md`
 
 In a flow whose far end draws (`peer-last`), the far learns the walk ~62 ms before this node, yet serves every row it is
 sent: the head counts dead rows only for a shape it finishes itself (`dsd_flow::note_dead_here`, `sent.here`), and
@@ -3816,7 +3816,41 @@ Then
 build behind `SWARMLLM_FLOW_LIVE_ROWS=0` (read at the far), rig it with this card as the far over a delayed link
 (§ 13), and the real link once the far runs the release. Prior art: PipeInfer (2407.11798 § IV-D) cancels invalid
 queued runs, a node polling a flag mid-run; FlowSpec (2507.02620) and SpecPipe (2504.04104) prune rows after a verify,
-not before a stage serves them; #149 (b) skips a whole unstarted stream chunk stood on a refused walk.
+not before a stage serves them; #149 (b) skips a whole unstarted stream chunk stood on a refused walk. Prior art
+(the cache): vLLM / SGLang tree verification gathers the accepted rows' KV slots into place after a check; here
+the far gathers BEFORE it runs — only live rows are ever written, in row order, with a row→slot map; the one shape
+they pad to is vLLM's CUDA-graph batch padding.
+
+**BUILT 2026-11-28 (for the release after v0.3.316)**: the requester sets `rows_may_skip` (`0x03` flags bit 2) only
+for ONE dense peer that draws and advertises `features::FLOW_LIVE_ROWS` (bit 49), sending the whole tree's tokens and
+its walk's row; the far (`draft_tree::LiveRows::plan`, kept on `KvCacheEntry::live_rows`) walks its own draws from
+that row, runs the rows the walk may reach padded to 8 (a tree's first forward and a rebase whole: a rebase leads
+with the path, rows every kept row reads), answers the rest `u32::MAX`, and runs no step for a forward with none
+live. **A draw goes back only for a row live AND computed after its whole path** ("sound"): a padding row, or one
+whose path lost a skipped row, answers `NOT_DRAWN`, so a requester whose walk parted from the far's (a near-tie
+drawn two ways) meets `NOT_DRAWN` and the rounds finish — never a wrong word. The requester counts `rows_not_drawn`
+/ `forwards_not_drawn` on the reply line, prices a check by the rows the far ran (`rows_the_far_ran`), and takes no
+`far_said` sample from an answer that ran nothing; the far logs `rows_sent` / `rows_served` / `rows_drawn`
+(`DIAG: a far forward ran its live rows`). Tests: `draft_tree::tests::a_far_*`, `a_rebase_forward_runs_whole_*`,
+`split::tests::draft_trees::a_far_that_runs_only_its_live_rows_reads_them_as_their_paths_do` (red with the slot
+map read as wire rows), the flag's plaintext and sealed round trips, and at the requester
+`dsd_flow::tests::a_row_the_far_left_undrawn_is_never_read_as_a_word` (red with the sentinel taken as a draw),
+`a_walk_waiting_on_a_row_the_far_left_undrawn_has_parted_from_it`, `a_check_is_priced_by_the_rows_the_far_ran`.
+Reviewed the same night (security: nothing exploitable; correctness): the far skips only where a row drawn twice
+draws alike (greedy or shared noise — a rebase redraws its kept rows), refuses rows kept of another tree, and an
+answer that ran nothing gives the flow guard no far time. **Fired on a local rig** (2026-11-28,
+`~/swarmllm-gate/deep/live510/rig510.sh`: Qwen2.5-1.5B split on the processor in a network namespace, A parts 0-1 +
+the 0.5B drafter named, B parts 2-3 drawing, trees forced, greedy, two asks an arm, `SWARMLLM_FLOW_LIVE_ROWS=0` at A
+the control): on — `skips_rows=true`, 621 of 971 rows answered not drawn, B ran 926 of the 1,398 rows sent over 107
+forwards (e.g. 24 sent, 8 run, 3 drawn); off — 0. Its first run caught the refusal of rows kept of another tree
+refusing EVERY flow at its first rebase (a rebase's forward runs whole from the OLD base; the next tree starts at
+the path's end, its first rows the kept ones): `LiveRows::rebased_to` re-keys the map there, only where every row
+before the new base was computed (test `rows_kept_start_a_later_tree_only_where_none_before_it_was_skipped`). Replies:
+3 of 4 identical across arms; the fourth parts at a near-tie ("read it carefully." / "read it.") that the CONTROL
+arm itself drew both ways across the two runs — the processor flow's own variance, not the skip. **Fired when** `rows_not_drawn` > 0 on a reply
+to a far on the release; **measured** as prose / code tok/s on TH→AU against `SWARMLLM_FLOW_LIVE_ROWS=0` at this
+end, one binary. Not yet: a recurrent far (Qwen 3.5's checkpoint rows), a chained run, the far skipping inside a
+rebase's kept rows.
 
 #### #412 — A busy far card is busy with our own forwards: run its backlog as one
 `P2` · perf-split · **OPEN** (conceptual, tests first) — 2026-11-06 · evidence: `docs/plans/faster_than_local.md` § 13; history: #388

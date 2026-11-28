@@ -812,6 +812,7 @@ impl PipelineExecutor {
             draft_tokens: Vec::new(),
             spec_logits_requested: false,
             spec_walk_at_tail: false,
+            rows_may_skip: false,
             coupling_seed: None,
             stream_seq: Some(seq),
             truncate_kv_to: None,

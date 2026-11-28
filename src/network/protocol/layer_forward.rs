@@ -139,6 +139,11 @@ pub(crate) const SPEC_FLAG_LOGITS: u8 = 0x01;
 /// `0x03` flags bit 1: walk the drafts at the sampler and return token ids
 /// (`features::SPEC_WALK_AT_TAIL`). An older peer reads only bit 0.
 pub(crate) const SPEC_FLAG_WALK_AT_TAIL: u8 = 0x02;
+/// `0x03` flags bit 2: the requester takes rows answered "not drawn"
+/// (`LayerForward::rows_may_skip`, #510). Written only to a peer advertising
+/// `features::FLOW_LIVE_ROWS`: an older one rebuilds the AAD from the bits it
+/// reads and would fail the seal.
+pub(crate) const SPEC_FLAG_ROWS_MAY_SKIP: u8 = 0x04;
 
 /// The `0x03` trailer's flags byte — the ONE writer, for the plaintext frame,
 /// the encrypted frame and the AAD alike. A receiver rebuilds the AAD from the
@@ -151,6 +156,9 @@ pub(crate) fn spec_trailer_flags(forward: &LayerForward) -> u8 {
     }
     if forward.spec_walk_at_tail {
         flags |= SPEC_FLAG_WALK_AT_TAIL;
+    }
+    if forward.rows_may_skip {
+        flags |= SPEC_FLAG_ROWS_MAY_SKIP;
     }
     flags
 }
@@ -1071,7 +1079,7 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
     // Optional: speculative trailer (marker 0x03 + flags(1) + num_drafts(2 LE) + drafts*4)
     // Unknown to older decoders — presence is required to be gated by
     // PipelineAssignment.supports_speculative on the sender.
-    let (draft_tokens, spec_logits_requested, spec_walk_at_tail) =
+    let (draft_tokens, spec_logits_requested, spec_walk_at_tail, rows_may_skip) =
         if data.len() >= cursor + 4 && data[cursor] == 0x03 {
             let flags = data[cursor + 1];
             let num_drafts = u16::from_le_bytes(
@@ -1107,9 +1115,10 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
                 drafts,
                 flags & SPEC_FLAG_LOGITS != 0,
                 flags & SPEC_FLAG_WALK_AT_TAIL != 0,
+                flags & SPEC_FLAG_ROWS_MAY_SKIP != 0,
             )
         } else {
-            (Vec::new(), false, false)
+            (Vec::new(), false, false, false)
         };
 
     // Optional: KV truncation trailer (marker 0x04 + target_len(4 LE))
@@ -1209,6 +1218,7 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
         draft_tokens,
         spec_logits_requested,
         spec_walk_at_tail,
+        rows_may_skip,
         coupling_seed,
         stream_seq,
         truncate_kv_to,
@@ -1259,6 +1269,7 @@ mod tests {
             draft_tokens: Vec::new(),
             spec_logits_requested: false,
             spec_walk_at_tail: false,
+            rows_may_skip: false,
             coupling_seed: None,
             stream_seq: None,
             truncate_kv_to: None,
@@ -1461,6 +1472,35 @@ mod tests {
         let at = bytes.len() - (1 + 1 + 2 + 3 * 4);
         assert_eq!(&bytes[at..at + 2], &[0x03, SPEC_FLAG_LOGITS]);
         assert!(!decode_layer_forward(&bytes).unwrap().spec_walk_at_tail);
+    }
+
+    #[test]
+    fn a_requester_taking_skipped_rows_says_so_on_the_wire_and_only_when_it_does() {
+        let mut f = base_forward();
+        f.draft_tokens = vec![11, 22, 33];
+        f.spec_logits_requested = true;
+        f.spec_walk_at_tail = true;
+        f.rows_may_skip = true;
+        let bytes = encode_layer_forward(&f).unwrap();
+        let at = bytes.len() - (1 + 1 + 2 + 3 * 4);
+        assert_eq!(
+            &bytes[at..at + 2],
+            &[
+                0x03,
+                SPEC_FLAG_LOGITS | SPEC_FLAG_WALK_AT_TAIL | SPEC_FLAG_ROWS_MAY_SKIP
+            ]
+        );
+        let decoded = decode_layer_forward(&bytes).unwrap();
+        assert!(decoded.rows_may_skip && decoded.spec_walk_at_tail);
+        assert_eq!(decoded.draft_tokens, vec![11, 22, 33]);
+        // Unset, the byte is what a build before #510 writes.
+        f.rows_may_skip = false;
+        let bytes = encode_layer_forward(&f).unwrap();
+        assert_eq!(
+            &bytes[at..at + 2],
+            &[0x03, SPEC_FLAG_LOGITS | SPEC_FLAG_WALK_AT_TAIL]
+        );
+        assert!(!decode_layer_forward(&bytes).unwrap().rows_may_skip);
     }
 
     #[test]

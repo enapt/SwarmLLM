@@ -517,10 +517,19 @@ pub mod features {
     /// (`SWARMLLM_CARD_RANGES`, on by default).
     pub const CARD_RANGES: u64 = 1 << 48;
 
+    /// As the last segment of a tree that FLOWS, runs only the rows its own
+    /// draws leave on the walk and answers the rest "not drawn" (`u32::MAX`)
+    /// where the requester says it takes them (`LayerForward::rows_may_skip`,
+    /// #510): a requester sets that flag only for a peer advertising this —
+    /// an older one would draw a word for every row and fail the seal on the
+    /// flag's bit. NOT in [`ALL`]: advertised while the node's switch is on
+    /// (`SWARMLLM_FLOW_LIVE_ROWS`, on by default).
+    pub const FLOW_LIVE_ROWS: u64 = 1 << 49;
+
     /// The full feature set THIS build implements. Advertised by every node,
     /// with [`KV_HALF_ON_CARD`], [`KV_WINDOW_SLIDES`], [`REQUESTER_GUESSES`],
-    /// [`SERVES_SLICES`], [`PROCESSOR_RUN_FIRST`] and [`CARD_RANGES`] beside
-    /// it where they apply.
+    /// [`SERVES_SLICES`], [`PROCESSOR_RUN_FIRST`], [`CARD_RANGES`] and
+    /// [`FLOW_LIVE_ROWS`] beside it where they apply.
     pub const ALL: u64 = RELAY
         | TENSOR_RELAY
         | PIPELINE_CHAIN

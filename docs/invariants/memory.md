@@ -6687,6 +6687,42 @@ the planner's bound, owner vs swarm), `a_budget_judges_the_owner_against_the_own
 (both red with `judging` ignoring the requester),
 `the_owners_memory_budget_is_the_machines_whole_job_share_at_any_level`.
 
+## A far end that skips rows holds only those it ran (2026-11-28, FUTURE_WORK #510)
+
+**What it replaced.** The far end of a split whose guess tree FLOWS ran every row it was sent and drew one
+token a row; the requester walked. Measured on the real link (TH→AU, the 14B, 2026-11-27), 86-90% of those rows
+were already off the walk when the far served them, and on a card 24 rows cost 24-29% more than 8.
+
+**What it does now.** Told the whole tree's tokens and the requester's walk row (`rows_may_skip`, only to a peer
+advertising `features::FLOW_LIVE_ROWS`), the far walks its OWN draws from that row and runs only the rows the walk
+may reach, padded to one captured shape (`draft_tree::LIVE_ROWS_WIDTH`, `cuda_graph::MAX_POSITIONS`). Its cache
+holds only the rows it ran, in row order: `KvCacheEntry::live_rows` maps each row of the tree to its slot. Every
+check of a forward's position against the cache — the stream's continuity check, `truncate_request_to` — reads
+the requester's position through **`KvCacheStore::local_position`**; a new check that compared `fwd.index_pos` to
+`request_positions` directly would refuse every skipping forward after the first skip, or, worse, pass a wrong one.
+
+**The rule that keeps it correct: a draw goes back only for a row live AND sound.** A row is sound where every row
+on its path was computed (`LiveRows::plan` keeps `sound` per row). A padding row, and a row whose path lost a
+skipped row (the requester's walk row being one the far left), are computed over a cache missing what they read:
+they answer `NOT_DRAWN`. So the far never sends a word it read wrongly, and a requester whose walk parted from the
+far's (a near-tie drawn two ways, the first draw in standing at the requester) meets `NOT_DRAWN` on its walk and
+the tree rounds finish the reply (`dsd_flow::FlowRun::walk`). Liveness only shrinks as the walk moves, so a row the
+walk reaches in agreement was live, and sound, when it ran.
+
+**A tree's first forward runs whole** — a rebase's leads with the path the walk took, rows BEFORE the walk's row
+that every kept row reads; skipping them as "not on the walk" would leave every kept row unsound.
+
+**The tree after a rebase starts where the path ends** — its first rows are the ones the rebase kept, held under the
+rebase forward's base. `LiveRows::rebased_to` re-keys the map at the new base only where every row before it was
+computed: then the cache holds those positions where they say. Refusing any other base (the first cut, after the
+security review) failed every flow at its first rebase on the rig; accepting any (the cut before it) let a
+requester truncate into a skipped region and start a tree there.
+
+Tests: `draft_tree::tests::a_far_keeps_only_the_live_rows_and_answers_only_sound_ones`,
+`a_rebase_forward_runs_whole_and_answers_its_kept_rows`, `a_far_refuses_rows_it_kept_a_different_count_of`;
+`split::tests::draft_trees::a_far_that_runs_only_its_live_rows_reads_them_as_their_paths_do` — three forwards on a
+model, the third's row read at a slot one lower than its row — red with the slot map read as wire rows.
+
 ## Machine memory is read in one place, and a container's limit counts (2026-10-09)
 
 `daemon::machine_memory::machine_memory()` is the one reading of how much memory this process

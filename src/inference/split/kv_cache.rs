@@ -1345,6 +1345,9 @@ pub(crate) struct KvCacheEntry {
     pub(crate) ssm_states: Vec<Option<SsmState>>,
     /// When this entry was last accessed.
     pub(crate) last_accessed: std::time::Instant,
+    /// Where a far segment skips dead rows of a flowing tree (#510): which of
+    /// the tree's rows this cache holds, and where. Goes with the entry.
+    pub(crate) live_rows: Option<crate::inference::draft_tree::LiveRows>,
 }
 
 /// Where a request's caches stand in a segment with NO attention layer — a
@@ -1463,6 +1466,7 @@ impl KvCacheEntry {
             layers: (0..num_layers).map(|_| None).collect(),
             ssm_states: vec![None; num_layers],
             last_accessed: std::time::Instant::now(),
+            live_rows: None,
         }
     }
 
@@ -2401,8 +2405,10 @@ impl KvCacheStore {
             .unwrap_or(0)
     }
 
-    /// Truncate a request's KV cache (all layers) to `target_len`. No-op if
-    /// no entry is present. Used by the speculative-decoding partial-accept
+    /// Truncate a request's KV cache (all layers) to `target_len` — the
+    /// REQUESTER's position, taken to this cache's own where this segment
+    /// skipped rows of a flowing tree (#510, [`Self::local_position`]). No-op
+    /// if no entry is present. Used by the speculative-decoding partial-accept
     /// fixup on the segment holder.
     pub fn truncate_request_to(
         &self,
@@ -2412,9 +2418,61 @@ impl KvCacheStore {
     ) -> Result<(), crate::error::SwarmError> {
         let key = Self::cache_key(model_key, request_id);
         if let Some(mut entry) = self.caches.get_mut(key.as_str()) {
-            entry.truncate_to(target_len)?;
+            let local = entry
+                .live_rows
+                .as_ref()
+                .map_or(target_len, |rows| rows.local_position(target_len));
+            entry.truncate_to(local)?;
+            entry.live_rows = entry
+                .live_rows
+                .take()
+                .and_then(|rows| rows.truncated_to(target_len));
         }
         Ok(())
+    }
+
+    /// Where the requester's position `pos` sits in this request's cache: the
+    /// same, unless this segment skipped rows of a flowing tree (#510) — then
+    /// past only the rows it computed. Every check of a forward's position
+    /// against the cache asks this.
+    pub(crate) fn local_position(&self, model_key: &str, request_id: &str, pos: usize) -> usize {
+        let key = Self::cache_key(model_key, request_id);
+        self.caches
+            .get(key.as_str())
+            .and_then(|entry| {
+                entry
+                    .live_rows
+                    .as_ref()
+                    .map(|rows| rows.local_position(pos))
+            })
+            .unwrap_or(pos)
+    }
+
+    /// What this segment kept of the request's flowing tree where it skips
+    /// dead rows (#510).
+    pub(crate) fn live_rows(
+        &self,
+        model_key: &str,
+        request_id: &str,
+    ) -> Option<crate::inference::draft_tree::LiveRows> {
+        let key = Self::cache_key(model_key, request_id);
+        self.caches
+            .get(key.as_str())
+            .and_then(|entry| entry.live_rows.clone())
+    }
+
+    /// Keep it once the forward that grew it has written its rows. Nothing
+    /// where the request holds no cache here.
+    pub(crate) fn keep_live_rows(
+        &self,
+        model_key: &str,
+        request_id: &str,
+        rows: crate::inference::draft_tree::LiveRows,
+    ) {
+        let key = Self::cache_key(model_key, request_id);
+        if let Some(mut entry) = self.caches.get_mut(key.as_str()) {
+            entry.live_rows = Some(rows);
+        }
     }
 
     /// Bring every layer's f16 mirror for this request level with its f32
@@ -3874,6 +3932,7 @@ mod tests {
             layers: vec![Some(filled(&dev, 8)), None],
             ssm_states: vec![None, Some(SsmState::new(slot(), 8))],
             last_accessed: std::time::Instant::now(),
+            live_rows: None,
         };
         assert!(entry.truncate_to(5).is_err());
         assert_eq!(
@@ -3984,11 +4043,13 @@ mod tests {
             layers: vec![Some(filled(&dev, 8))],
             ssm_states: vec![None],
             last_accessed: std::time::Instant::now(),
+            live_rows: None,
         };
         let mut in_place = KvCacheEntry {
             layers: vec![Some(filled(&dev, 8))],
             ssm_states: vec![None],
             last_accessed: std::time::Instant::now(),
+            live_rows: None,
         };
         let original_k = flat(&in_place.layers[0].as_ref().unwrap().k().unwrap().unwrap());
 
@@ -4069,6 +4130,7 @@ mod tests {
             layers: vec![Some(filled(&dev, 8))],
             ssm_states: vec![None],
             last_accessed: std::time::Instant::now(),
+            live_rows: None,
         };
         let before = buffer_id(&e);
         e.truncate_to_with(TruncateMode::InPlace, 3).unwrap();
@@ -4082,6 +4144,7 @@ mod tests {
             layers: vec![Some(filled(&dev, 8))],
             ssm_states: vec![None],
             last_accessed: std::time::Instant::now(),
+            live_rows: None,
         };
         let before = buffer_id(&control);
         control.truncate_to_with(TruncateMode::Copy, 3).unwrap();
@@ -4568,6 +4631,7 @@ mod tests {
                 layers: vec![Some(kv)],
                 ssm_states: vec![None],
                 last_accessed: std::time::Instant::now(),
+                live_rows: None,
             };
             let err = entry.truncate_to_with(mode, serves - 1).unwrap_err();
             assert!(

@@ -588,6 +588,14 @@ pub struct LayerForward {
     /// `sampling` beside it — the walk IS sampling.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub spec_walk_at_tail: bool,
+    /// The requester of a tree that FLOWS takes a row answered "not drawn"
+    /// (`u32::MAX`) for a row it can do without (#510): the last segment may
+    /// then run only the rows its own draws leave on the walk from
+    /// `flow_walk`, reading `draft_tokens` as the whole tree's tokens. Sent
+    /// only to a peer advertising `features::FLOW_LIVE_ROWS`; the `0x03`
+    /// trailer's flag `0x04`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rows_may_skip: bool,
     /// The request's SHARED noise seed (`inference::coupled_noise`): the
     /// segment that samples draws each token by Gumbel-max with noise keyed by
     /// (this seed, the token's absolute position, its id), so a drafter holding
@@ -1750,6 +1758,7 @@ mod chunk_assembly_tests {
             draft_tokens: Vec::new(),
             spec_logits_requested: false,
             spec_walk_at_tail: false,
+            rows_may_skip: false,
             coupling_seed: None,
             stream_seq: None,
             truncate_kv_to: None,

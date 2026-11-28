@@ -2758,7 +2758,9 @@ async fn handle_forward(
     };
     if continues {
         let held = kv_store.request_positions(&model_key, &req_id_str);
-        if held != fwd.index_pos as usize {
+        // Where this segment skipped rows of a flowing tree (#510), the
+        // requester's position counts rows this cache does not hold.
+        if held != kv_store.local_position(&model_key, &req_id_str, fwd.index_pos as usize) {
             return Err(SwarmError::ServiceUnavailable(if fwd.sequence_num == 0 {
                 format!(
                     "this computer holds {held} positions of request {request_id}, not the {} \
@@ -2991,6 +2993,55 @@ async fn handle_forward(
     if draws_each_row {
         refuse_draws_with_penalties(&fwd.sampling, &fwd.generated_ids)?;
     }
+    // A FAR end of a tree that flows, whose requester takes rows answered "not
+    // drawn" (#510), runs only the rows its own draws leave on the walk — 86-90%
+    // of a far's rows were already off it as it served them (TH→AU, the 14B,
+    // 2026-11-27) — padded to one captured shape, its cache holding only the
+    // rows it ran (`draft_tree::LiveRows`). Dense layers only: a recurrent
+    // layer keeps its checkpoint at the walk (`flow_walk`).
+    let live_rows = match draft_tree.as_ref() {
+        Some(tree)
+            if fwd.rows_may_skip
+                && draws_each_row
+                && fwd.spec_walk_at_tail
+                && is_last
+                && !is_first
+                && tp_meta.is_none()
+                && !model.carries_recurrent_state()
+                && crate::inference::draft_tree::live_rows_on() =>
+        {
+            Some(
+                crate::inference::draft_tree::LiveRows::plan(
+                    kv_store.live_rows(&model_key, &req_id_str),
+                    tree,
+                    &fwd.draft_tokens,
+                    fwd.flow_walk.map_or(0, usize::from),
+                    input_positions,
+                    crate::inference::draft_tree::LIVE_ROWS_WIDTH,
+                )
+                .map_err(SwarmError::Validation)?,
+            )
+        }
+        _ => None,
+    };
+    let rows_sent = input_positions;
+    let (draft_tree, input_tensor, input_positions) = match live_rows.as_ref() {
+        Some(plan) if !plan.rows.is_empty() => {
+            let rows: Vec<u32> = plan.rows.iter().map(|&row| row as u32).collect();
+            let live = candle_core::Tensor::new(rows.as_slice(), input_tensor.device())
+                .and_then(|rows| input_tensor.index_select(&rows, 1))
+                .map_err(|e| SwarmError::Internal(format!("a far forward's live rows: {e}")))?;
+            (plan.tree.clone(), live, plan.rows.len())
+        }
+        _ => (draft_tree, input_tensor, input_positions),
+    };
+    // Where the rows run from in this cache: the requester's position, but
+    // past only the rows this segment ran where it skips (#510).
+    let index_pos = live_rows
+        .as_ref()
+        .map_or(fwd.index_pos as usize, |plan| plan.index_pos());
+    // Nothing of the forward live: answered "not drawn" without a step.
+    let runs_nothing = live_rows.as_ref().is_some_and(|plan| plan.rows.is_empty());
     // The block drafter's layers this segment runs, where the forward asks for
     // their rows (#428 stage 3): the coordinator drafts from them. Kept by the
     // forward itself, so they cost no second pass.
@@ -3125,7 +3176,7 @@ async fn handle_forward(
                 let (out, caught) = model
                     .forward_verify_keeping(
                         &input_tensor,
-                        fwd.index_pos as usize,
+                        index_pos,
                         kv_store,
                         &req_id_str,
                         !is_first,
@@ -3136,18 +3187,13 @@ async fn handle_forward(
                 out
             } else if is_first {
                 model
-                    .forward_verify_all_positions(
-                        &input_tensor,
-                        fwd.index_pos as usize,
-                        kv_store,
-                        &req_id_str,
-                    )
+                    .forward_verify_all_positions(&input_tensor, index_pos, kv_store, &req_id_str)
                     .map_err(|e| format!("Forward speculative verify: {e}"))?
             } else {
                 model
                     .forward_verify_all_positions_pre_embedded(
                         &input_tensor,
-                        fwd.index_pos as usize,
+                        index_pos,
                         kv_store,
                         &req_id_str,
                     )
@@ -3369,7 +3415,7 @@ async fn handle_forward(
                 model
                     .forward_tp_phase(
                         &input_tensor,
-                        fwd.index_pos as usize,
+                        index_pos,
                         kv_store,
                         &req_id_str,
                         tp.single_layer as usize,
@@ -3385,7 +3431,7 @@ async fn handle_forward(
                 model
                     .forward_prompt_in_chunks_keeping(
                         &input_tensor,
-                        fwd.index_pos as usize,
+                        index_pos,
                         kv_store,
                         &req_id_str,
                         lora_adapter.as_deref(),
@@ -3399,7 +3445,7 @@ async fn handle_forward(
                 model
                     .forward_multimodal(
                         &input_tensor,
-                        fwd.index_pos as usize,
+                        index_pos,
                         kv_store,
                         &req_id_str,
                         Some(vis_emb),
@@ -3413,7 +3459,7 @@ async fn handle_forward(
                 model
                     .forward_prompt_in_chunks_keeping(
                         &input_tensor,
-                        fwd.index_pos as usize,
+                        index_pos,
                         kv_store,
                         &req_id_str,
                         lora_adapter.as_deref(),
@@ -3519,15 +3565,53 @@ async fn handle_forward(
     // its walk still starts where its guesses would have. Not a tree that
     // flows through recurrent layers: those keep their checkpoint at the walk
     // whatever its shape (`docs/plans/recurrent_flow.md`).
-    let compute_result = tokio::task::block_in_place(|| match draft_tree.clone() {
-        Some(tree) if !tree.is_chain() || flow_walk.is_some() => model
-            .with_draft_tree(tree, flow_walk, compute)
-            .map_err(|e| e.to_string())
-            .and_then(|r| r),
-        _ => compute(model),
-    });
+    let compute_result = if runs_nothing {
+        Ok(crate::types::LayerResult {
+            request_id,
+            token_ids: Vec::new(),
+            finish_reason: None,
+            activations: vec![],
+            sealed_token_ids: None,
+            spec_logits: Vec::new(),
+            matched_stop_sequence: None,
+            token_logprobs: Vec::new(),
+            locally_constructed: false,
+            refusal: None,
+            answers_step: None,
+            prompt_blocks_stored: None,
+            block_rows: None,
+            served_us: None,
+            how_served: None,
+        })
+    } else {
+        tokio::task::block_in_place(|| match draft_tree.clone() {
+            Some(tree) if !tree.is_chain() || flow_walk.is_some() => model
+                .with_draft_tree(tree, flow_walk, compute)
+                .map_err(|e| e.to_string())
+                .and_then(|r| r),
+            _ => compute(model),
+        })
+    };
 
     let mut result = compute_result.map_err(SwarmError::Internal)?;
+    if let Some(plan) = live_rows {
+        let rows_served = plan.rows.len();
+        let (token_ids, keep) = plan
+            .answer(&result.token_ids)
+            .map_err(SwarmError::Internal)?;
+        kv_store.keep_live_rows(&model_key, &req_id_str, keep);
+        tracing::debug!(
+            %request_id,
+            rows_sent,
+            rows_served,
+            rows_drawn = token_ids
+                .iter()
+                .filter(|&&t| t != crate::inference::draft_tree::NOT_DRAWN)
+                .count(),
+            "DIAG: a far forward ran its live rows (#510)"
+        );
+        result.token_ids = token_ids;
+    }
     if let (Some(here), Some(caught)) = (rows_here.as_ref(), block_caught.into_inner()) {
         // A check walked here answers only the positions it kept — a tree's
         // along its kept path, in order (#437). A tree that flows is answered

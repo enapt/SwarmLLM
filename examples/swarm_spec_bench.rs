@@ -426,6 +426,7 @@ fn make_bench_forward(activations: Vec<u8>) -> LayerForward {
         draft_tokens: Vec::new(),
         spec_logits_requested: false,
         spec_walk_at_tail: false,
+        rows_may_skip: false,
         coupling_seed: None,
         stream_seq: None,
         truncate_kv_to: None,

@@ -582,6 +582,9 @@ pub struct IpcForward {
     /// (`LayerForward::spec_walk_at_tail`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub spec_walk_at_tail: bool,
+    /// The requester takes rows answered "not drawn" (`LayerForward::rows_may_skip`, #510).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rows_may_skip: bool,
     /// The request's shared noise seed for the walk (`LayerForward::coupling_seed`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coupling_seed: Option<u64>,
@@ -1824,6 +1827,7 @@ mod tests {
             generated_ids: vec![],
             spec_logits_requested: false,
             spec_walk_at_tail: false,
+            rows_may_skip: false,
             coupling_seed: None,
             stream_seq: None,
             truncate_kv_to: None,
@@ -1872,6 +1876,7 @@ mod tests {
             generated_ids: vec![],
             spec_logits_requested: false,
             spec_walk_at_tail: false,
+            rows_may_skip: false,
             coupling_seed: None,
             stream_seq: None,
             truncate_kv_to: None,
@@ -1922,6 +1927,7 @@ mod tests {
             generated_ids: vec![],
             spec_logits_requested: false,
             spec_walk_at_tail: false,
+            rows_may_skip: false,
             coupling_seed: None,
             stream_seq: None,
             truncate_kv_to: None,

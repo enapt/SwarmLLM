@@ -1,7 +1,7 @@
 use crate::error::SwarmError;
 use crate::types::{LayerForward, ModelId, TensorFormat};
 
-use super::layer_forward::{SPEC_FLAG_LOGITS, SPEC_FLAG_WALK_AT_TAIL};
+use super::layer_forward::{SPEC_FLAG_LOGITS, SPEC_FLAG_ROWS_MAY_SKIP, SPEC_FLAG_WALK_AT_TAIL};
 use super::TENSOR_TAG_ENCRYPTED;
 
 /// Build the AAD bytes for sealing/opening a `LayerForward` activation payload.
@@ -429,7 +429,7 @@ pub fn decode_layer_forward_encrypted(
         };
 
     // Optional: speculative trailer (marker 0x03)
-    let (draft_tokens, spec_logits_requested, spec_walk_at_tail) =
+    let (draft_tokens, spec_logits_requested, spec_walk_at_tail, rows_may_skip) =
         if data.len() >= cursor + 4 && data[cursor] == 0x03 {
             let flags = data[cursor + 1];
             let num_drafts = u16::from_le_bytes(
@@ -464,9 +464,10 @@ pub fn decode_layer_forward_encrypted(
                 drafts,
                 flags & SPEC_FLAG_LOGITS != 0,
                 flags & SPEC_FLAG_WALK_AT_TAIL != 0,
+                flags & SPEC_FLAG_ROWS_MAY_SKIP != 0,
             )
         } else {
-            (Vec::new(), false, false)
+            (Vec::new(), false, false, false)
         };
 
     // Optional: KV truncation trailer (marker 0x04 + target_len(4 LE))
@@ -559,6 +560,7 @@ pub fn decode_layer_forward_encrypted(
         draft_tokens,
         spec_logits_requested,
         spec_walk_at_tail,
+        rows_may_skip,
         coupling_seed,
         stream_seq,
         truncate_kv_to,
@@ -614,6 +616,7 @@ mod tests {
             draft_tokens: Vec::new(),
             spec_logits_requested: false,
             spec_walk_at_tail: false,
+            rows_may_skip: false,
             coupling_seed: None,
             stream_seq: None,
             truncate_kv_to: None,
@@ -757,6 +760,26 @@ mod tests {
         unwalked.spec_walk_at_tail = false;
         assert_ne!(
             build_layer_forward_aad(&unwalked),
+            build_layer_forward_aad(&orig)
+        );
+    }
+
+    #[test]
+    fn skipped_rows_taken_are_sealed_and_survive_the_encrypted_frame() {
+        let mut orig = base_forward();
+        orig.draft_tokens = vec![7, 8];
+        orig.spec_logits_requested = true;
+        orig.spec_walk_at_tail = true;
+        orig.rows_may_skip = true;
+        let bytes = encode_layer_forward_encrypted(&orig, vec![0u8; 32]).unwrap();
+        let (decoded, _sealed, aad) = decode_layer_forward_encrypted(&bytes).unwrap();
+        assert!(decoded.rows_may_skip);
+        assert_eq!(aad, build_layer_forward_aad(&orig));
+        // Bound: a relay clearing the bit breaks the seal.
+        let mut whole = orig.clone();
+        whole.rows_may_skip = false;
+        assert_ne!(
+            build_layer_forward_aad(&whole),
             build_layer_forward_aad(&orig)
         );
     }
