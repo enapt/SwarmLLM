@@ -427,6 +427,11 @@ impl DeltaNetWeights {
         index_pos: usize,
         into_spare: bool,
     ) -> CandleResult<Tensor> {
+        // The state lives where this layer now computes (#514): moved here,
+        // where every step of the layer passes before anything reads it.
+        if let Some(held) = ssm_state.as_mut() {
+            held.follow(x.device())?;
+        }
         if let Some(walk) = super::flow_walk_now() {
             return self.forward_flowing(x, ssm_state, index_pos, walk as usize);
         }
@@ -1372,6 +1377,25 @@ pub(super) struct FlowLines {
 }
 
 impl FlowRows {
+    /// This flow on `device` (`SsmState::follow`, #514): every state and row
+    /// input it keeps copied there. Not the scratch pair: it is lent between
+    /// the conversation's layers and written, never read — the next forward
+    /// borrows or makes one where it computes (`stage_level`, or two memsets
+    /// uncaptured).
+    pub(super) fn to_device(&self, device: &Device) -> CandleResult<Self> {
+        let mut moved = self.clone();
+        for (_, state) in &mut moved.starts {
+            *state = state.to_device(device)?;
+        }
+        moved.anchor = self.anchor.to_device(device)?;
+        moved.before_anchor = self.before_anchor.to_device(device)?;
+        for kind in moved.store.kinds.iter_mut().flatten() {
+            *kind = kind.to_device(device)?;
+        }
+        moved.scratch = None;
+        Ok(moved)
+    }
+
     /// A flow whose tree starts at `base`, from the state there.
     pub(super) fn new(base: usize, at_base: SsmSlot) -> Self {
         Self {
@@ -6029,6 +6053,95 @@ mod tests {
                     close(&g.conv_state, &w.conv_state, what);
                 }
                 _ => panic!("the card and the processor showed different things"),
+            }
+        }
+    }
+
+    /// A conversation's state follows its layer to another device (#514): a
+    /// layer re-placed under a standing conversation — a state the processor
+    /// wrote read by a step on the card, and the other way — answers as the
+    /// processor alone does, the step after writes into the moved pair, and a
+    /// take-back after the move lands where the processor's does.
+    #[cfg(feature = "candle-cuda")]
+    #[test]
+    fn a_held_state_follows_its_layer_to_another_device() {
+        fn script(
+            pool: &Tensor,
+            first: (&DeltaNetWeights, &Device),
+            then: (&DeltaNetWeights, &Device),
+        ) -> Vec<Tensor> {
+            let rows = |from: usize, n: usize, dev: &Device| {
+                pool.narrow(1, from, n).unwrap().to_device(dev).unwrap()
+            };
+            let mut held = None;
+            let mut out = Vec::new();
+            let (w, dev) = first;
+            out.push(w.forward_deltanet(&rows(0, 5, dev), &mut held, 0).unwrap());
+            let (w, dev) = then;
+            out.push(
+                w.forward_deltanet(&rows(5, 2, dev), &mut held, 5)
+                    .unwrap_or_else(|e| panic!("the moved layer's step failed: {e}")),
+            );
+            let state = held.as_mut().unwrap();
+            assert!(
+                state.current().recurrent_state.device().same_device(dev),
+                "the state stayed behind"
+            );
+            assert!(state.can_rewind_to(6) && state.rewind_to(6).unwrap());
+            out.push(w.forward_deltanet(&rows(6, 2, dev), &mut held, 6).unwrap());
+            out.into_iter()
+                .map(|t| t.to_device(&Device::Cpu).unwrap())
+                .collect()
+        }
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
+        let Ok(device) = Device::new_cuda(0) else {
+            eprintln!("SKIPPED: no card");
+            return;
+        };
+        let (on_cpu, on_card) = head_width_weights(&device);
+        let cpu = Device::Cpu;
+        let pool = Tensor::randn(0f32, 1.0, (1, 8, 256), &cpu).unwrap();
+        // Red first: a state that stays where the processor wrote it fails
+        // the step on the card.
+        {
+            use crate::inference::split::kv_cache::HELD_STATE_STAYS_IN_TEST;
+            let mut held = None;
+            on_cpu
+                .forward_deltanet(&pool.narrow(1, 0, 5).unwrap(), &mut held, 0)
+                .unwrap();
+            HELD_STATE_STAYS_IN_TEST.with(|c| c.set(true));
+            let step = pool.narrow(1, 5, 2).unwrap().to_device(&device).unwrap();
+            let failed = on_card.forward_deltanet(&step, &mut held, 5);
+            HELD_STATE_STAYS_IN_TEST.with(|c| c.set(false));
+            assert!(
+                failed.is_err(),
+                "a state left on the processor served the card's step: the test cannot see the fix"
+            );
+        }
+        let moved_before = crate::inference::split::kv_cache::kv_caches_moved();
+        let want = script(&pool, (&on_cpu, &cpu), (&on_cpu, &cpu));
+        let to_card = script(&pool, (&on_cpu, &cpu), (&on_card, &device));
+        let to_cpu = script(&pool, (&on_card, &device), (&on_cpu, &cpu));
+        assert!(
+            crate::inference::split::kv_cache::kv_caches_moved() >= moved_before + 2,
+            "the move never ran"
+        );
+        for (got, what) in [(&to_card, "to the card"), (&to_cpu, "to the processor")] {
+            for (step, (got, want)) in got.iter().zip(&want).enumerate() {
+                let scale: f32 = want
+                    .abs()
+                    .unwrap()
+                    .flatten_all()
+                    .unwrap()
+                    .max(0)
+                    .unwrap()
+                    .to_scalar()
+                    .unwrap();
+                let diff = max_abs_diff(got, want);
+                assert!(
+                    diff <= 1e-4 * scale.max(1.0),
+                    "{what}, step {step}: {diff} off (up to {scale})"
+                );
             }
         }
     }

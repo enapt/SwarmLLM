@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #513**; #505 is reserved for the carry ask, memory `next_up.md` item 5b). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #515**; #505 is reserved for the carry ask, memory `next_up.md` item 5b). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -37,7 +37,7 @@ residual).
 14B TH↔AU flow; #510's step 0 since measured: 86-90% of the far's rows dead, 24 rows +24-29% over 8): the flow fits R = λ / (1 + m·λ·D) (λ levels a second, D
 the verdict's delay, m the loss a level in flight; checked against the 11-16 US link, 11.5 predicted vs 11.7-11.8),
 prose's ceiling with today's drafter and D ≈ 36 tok/s, so a faster head alone is damped (pace ×1.3 → +9%). First
-build: #510 (the far computes only rows still alive) — RELEASED in v0.3.317, its real-link A/B next. The 27B's 20-30 bar needs a ring of D ≤ ~150 ms — one region.**
+build: #510 (the far computes only rows still alive) — CLOSED: +28% prose / +31% code on the real link with .318 at both ends (2026-11-28). The 27B's 20-30 bar needs a ring of D ≤ ~150 ms — one region.**
 
 **2026-11-20: split speed is the focus (owner: "we need to focus on getting split speeds going"; each node a small
 slice, nobody's card locked by a whole model). The plan: `docs/plans/small_slices.md`. The bar (owner, same day):
@@ -3624,6 +3624,25 @@ the restoring request still held it — fixed (447-815 → 118-506 ms, faults 65
 copies into fresh pages, 450-930 ms; huge pages make each fault slower here (2.2-6 µs against
 1.4-1.7 µs with `MIMALLOC_ALLOW_THP=0`, one arm) — ABBA `MIMALLOC_ALLOW_THP=0` against the default
 before choosing it, and whether a turn sent with no gap still waits.
+**Mapped 2026-11-28 (night, not built): a growing conversation copies its WHOLE prompt every turn, through pageable
+memory.** Where snapshots live in host RAM (a card reached through WSL2, `SnapshotHome::for_device`), turn N+1's save
+is a full copy of `[0..pos)` of every layer (`prefix_cache::snapshot_at`: `narrow` + `force_contiguous` + `to_device(Cpu)`
+→ cudarc `clone_dtoh` into a plain `Vec`, synchronous on the worker's loop), and only then drops turn N's entry; its
+restore on a hit is a full `to_device(card)` before the prompt pass. Measured on the 7B (trace `ttft_trace_1129`,
+1,812 positions, 99 MB): copy 47-70 ms, card part 29-48 ms = 2-3.4 GB/s — and a back-to-back ask waits for it
+(the first token of R2-R4 came 45-67 ms later than R1's). At 20K positions that is ~1.1 GB a turn each way. **Next**:
+(e) copy only the positions past the snapshot it replaces (an entry of per-turn segments sharing the earlier ones by
+`Arc`; a restore appends each segment, `kv.append` already takes pieces) and (f) stage the device→host copy through
+two page-locked chunks with events, as the weight loader does (#424 (3b), `quantized/cuda.rs`, flags 0 — never
+`alloc_pinned`'s write-combined default for memory the host reads). Prior art: llama.cpp's server copies a slot's
+whole state into its host prompt cache on the slot's next use (`server_prompt_cache`), no delta; vLLM keeps a
+CPU-offloaded cache in pinned blocks and moves only the blocks a request lacks; it turned pinning OFF under WSL until
+PR #41496 (now allowed on WSL2 kernels ≥ 4.19.121; the block crashed `--cpu-offload-gb` beside CUDA graphs, which copy
+only from pinned memory). NVIDIA's WSL guide says only that pinned system memory "is limited" (no figure);
+`cudaHostRegister` fails under WSL2 while `cudaHostAlloc` works (NVIDIA forum, 2024) — the loader's
+`cuMemHostAlloc` chunks agree. Pinned D2H runs ~2-4x pageable on PCIe (PyTorch's pinned-memory devlog; 24 against
+6 GB/s on a PCIe 4 x16 desktop); no WSL2 figure was found, so measure (f) here. llama.cpp falls back to an ordinary
+buffer where `cudaMallocHost` fails (`ggml_cuda_host_malloc`) — keep that fallback.
 
 #### #411 — Where the flow's line ends under 110 ms
 `P3` · perf-split · **OPEN** (narrowed 2026-11-06 and 2026-11-15; (b) closed) · evidence: `docs/invariants/scheduling.md` § "A tree that flows" (the flow's distance line); history: #388 (closed 2026-11-06)
@@ -3782,107 +3801,6 @@ TAG=fresh303, 02:26-02:29Z, the thread sampler beside it in `threads_fresh303.tx
 0 ms, the far wait 0-5 ms, and the longest continuous `dxgvmb_send_sync_msg` wait any thread made was 45 ms (0.45-5 s at
 50.8 h). These are the 14B rows' fresh-boot figures for the next bump (uptime 0.1 h). Detecting the stall and telling
 the owner is #146 (4).
-
-#### #510 — A split's far card computes every row of a guess tree, the ones the walk has already left too
-`P2` · perf-split · **RELEASED v0.3.317 (2026-11-28); real link MEASURED: no gain as released — its parted-walk fix RELEASED v0.3.318 (head half measured: 0 of 24 replies lost their flow against a far on .317, code 47.0 vs 43.6 tok/s skipping on/off); OPEN: the far half's real-link measurement, both ends on .318** (step 0 PASSED: 86-90% of the far's rows dead at service; 24 rows +24-29% over 8 on a card) — 2026-11-27 · evidence: memory `archive/fable_flow_law_1127.md`
-
-**Real link, 2026-11-28 05:46-06:23Z** (t517ab: the published v0.3.317 at BOTH ends, here [0,16) + AU's 3060
-[16,48), the 1.5B helper, the copy store off; ABBA BAAB inside one head binary, `SWARMLLM_FLOW_LIVE_ROWS=0` the off
-arms; 4 prompts × 4 arms each way; `~/swarmllm-gate/deep/fr/real_link_t517ab/`). **The mechanism fired**: the far's
-own time a forward 33-41 → 26-28 ms. **The speed did not move**: arm means on / off — code 38.2 / 41.2, prose 18.1 /
-18.7, prose2 19.5 / 20.0, prose3 17.3 / 20.0. Two causes: (1) **5 of 20 skipping replies ended their flow** at a
-parted walk (0 of 20 off) — a rebase's forward drew rows again in another row count and a near-tie flipped; the far
-walked by the second draw, the head by the first (`docs/invariants/memory.md` § "A far end that skips rows", gotcha
-#1192); those replies finished in tree rounds (prose 12.1, code 30.6). **Fixed on main**: the far keeps the draw it
-sent first across the cut (`draft_tree::SentBefore`), the head rebases where walks part
-(`rebase_where_the_walks_parted`, one round trip) and counts `redrawn_otherwise`; the far half needs the next
-release on the far. (2) **This node, not the far, set the pace**: here 37-44 ms a forward against the far's 26-28,
-and #504's balance sheds ONE layer per step — each rig arm starts fresh and took one step at its last reply, so the
-memo's "6-8 layers off the head" never happened inside an arm. A sitting judging the skip needs the head at the
-balanced cut (here [0,12)) or arms long enough for the balance to settle.
-**The head half VERIFIED the same morning** (t510fix, 06:36-07:07Z, a CUDA build of main + the fix at the head, AU
-still on the published v0.3.317, here [0,12) + AU [12,48), skip on / off ABBA BA, 3 arms × 4 replies each way):
-**0 of 24 flows ended** (8 partings rebased and went on, `walks_parted`); the far's re-draws came back OTHERWISE than
-its first draws in nearly every reply of BOTH arms (`redrawn_otherwise` 0-11 a reply) — the mechanism, seen
-directly. The far's own time 29-36 ms with the skip against 44-98 without (at 36 layers the far set the pace), and
-**code 47.0 tok/s against 43.6 (+8%; every skipping reply above every other)**; prose 17.5 / 20.7 / 21.4 against
-20.3 / 20.5 / 20.8 over three prompts (−3%, inside the spread: every greedy reply's text differed, gotcha index
-"ONE greedy prompt"). Still open: the far half (needs the next release on the far), and the head's own pace — at
-[0,12) here ~37-39 ms a forward, its 1.5B drafter ~24 of them — which now bounds prose and code alike.
-
-In a flow whose far end draws (`peer-last`), the far learns the walk ~62 ms before this node, yet serves every row it is
-sent: the head counts dead rows only for a shape it finishes itself (`dsd_flow::note_dead_here`, `sent.here`), and
-`far_left_behind` is a timing exclusion, not a skip. Measured on t509rd (14B TH↔AU, here [0,16) + the 1.5B, AU [16,48),
-2026-11-27): one prose reply's 181 forwards of 23.2 rows bought 160 tokens; 52 levels died under its 7 misses and the
-34 tokens taken at the drafter's rank 2 or later each killed the first guess's trunk ~5 levels deep. Since the 11-24
-row kernels 8 rows run 1.09-1.26× the floor against 1.55-2.0× at 24, so § 13's "dropping is worthless on a card" no
-longer holds. **The change**: the far answers a wholly dead forward at once and computes the rest's live rows only,
-padded to 8 / 16 / 24 (graph shapes, #357); dense models first (a recurrent layer's per-row state needs its own pass);
-gated on a head-advertised bit if an older head needs a draw for every row. **Arithmetic** (the memo's law, above):
-half the rows dead at service → far 35 → ~25 ms, #504's balance moves 6-8 layers off the head, λ 68 → 86, D 193 →
-163 ms → prose ~29, code ~60 (from 22-24 / 48-51). With #412 and the opt-in near-tie acceptance (§ 7.3) ≈ 35.
-**Step 0, before building**: on this node, count rows already off the walk when the far served them (the peer-last
-form of `note_dead_here`) and levels lost at non-first takes; `prefill_bench` the far range at 8 / 16 / 24 rows on a
-3060-class card (the first count is BUILT, 2026-11-27: `rows_answered` / `rows_dead_at_service` on the reply
-line — an answer's own rows the walk had left as it was read, before its own draws, i.e. as the far end knew the
-walk when it served it where the far walks; counted in `take_answer`, which every shape reaches — a first cut
-counted in the turn order only, which a far-walking shape never enters, and read 0 on the real link). **Kill it** if
-under 35% of rows are dead at service or 8 against 24 rows differ by under 15%. **The first half MEASURED
-2026-11-27 (t511d, 20:56Z, `463c07b0f`'s code in a CUDA build, the 14B to AU's 3060, the 1.5B helper, the copy
-store off, one reply each, 160 tokens): 85.8-89.5% of rows dead at service** — prose 2,474 / 2,848, 2,971 / 3,319,
-2,525 / 2,825, 2,706 / 3,026; code 1,125 / 1,311 — the shape's own arithmetic (one row of a level's 8 on the walk,
-so ~7/8 of the next level hangs off rows it left). Far past the kill line. **The second half MEASURED the same
-evening** (`~/swarmllm-gate/deep/rows510/`, `prefill_bench` SPEC sweep as a tree, the 14B's layers 0-22 on this
-3070 Laptop — a far range cannot be fed token ids, and a layer's row cost is the same wherever it sits — ~520
-positions, min of 7 pairs, two rounds, live node stopped, under the kit): 1 row 12.2 ms, 8 rows 14.4-14.9, 16 rows
-16.6-17.3, 24 rows 18.1-18.6 — **24 against 8 rows +24-29%, past the 15% line** (3 rows read 16.1-18.6, above 8: a
-shape the bench did not record ahead, not the card's cost). So a far forward cut from ~24 rows to the ~3 alive
-would spend about a third less on its layers; the output head (all rows' logits) is not in this figure. Both
-halves pass: build it, for the release after v0.3.316 (the far end must run it). **Correction (implementation
-plan, Fable, read from the code the same night — `memory/issue510_plan_1127.md`): the far has NO walk today** — it
-is sent no row tokens and draws one token a row, the head walks; the count above is what it COULD skip once told
-its rows' tokens and the head's walk row (both trailers exist: `draft_tokens`, `flow_walk`). Its cache appends, so
-the far keeps its LIVE rows compacted (a row-to-slot map per request) and answers a skipped row `u32::MAX`; a dense
-far captures at most 8 rows, so live rows pad to 8. Gated on a new bit (`FLOW_LIVE_ROWS`) and a flag the head sets.
-Then
-build behind `SWARMLLM_FLOW_LIVE_ROWS=0` (read at the far), rig it with this card as the far over a delayed link
-(§ 13), and the real link once the far runs the release. Prior art: PipeInfer (2407.11798 § IV-D) cancels invalid
-queued runs, a node polling a flag mid-run; FlowSpec (2507.02620) and SpecPipe (2504.04104) prune rows after a verify,
-not before a stage serves them; #149 (b) skips a whole unstarted stream chunk stood on a refused walk. Prior art
-(the cache): vLLM / SGLang tree verification gathers the accepted rows' KV slots into place after a check; here
-the far gathers BEFORE it runs — only live rows are ever written, in row order, with a row→slot map; the one shape
-they pad to is vLLM's CUDA-graph batch padding.
-
-**BUILT 2026-11-28 (for the release after v0.3.316)**: the requester sets `rows_may_skip` (`0x03` flags bit 2) only
-for ONE dense peer that draws and advertises `features::FLOW_LIVE_ROWS` (bit 49), sending the whole tree's tokens and
-its walk's row; the far (`draft_tree::LiveRows::plan`, kept on `KvCacheEntry::live_rows`) walks its own draws from
-that row, runs the rows the walk may reach padded to 8 (a tree's first forward and a rebase whole: a rebase leads
-with the path, rows every kept row reads), answers the rest `u32::MAX`, and runs no step for a forward with none
-live. **A draw goes back only for a row live AND computed after its whole path** ("sound"): a padding row, or one
-whose path lost a skipped row, answers `NOT_DRAWN`, so a requester whose walk parted from the far's (a near-tie
-drawn two ways) meets `NOT_DRAWN` and the rounds finish — never a wrong word. The requester counts `rows_not_drawn`
-/ `forwards_not_drawn` on the reply line, prices a check by the rows the far ran (`rows_the_far_ran`), and takes no
-`far_said` sample from an answer that ran nothing; the far logs `rows_sent` / `rows_served` / `rows_drawn`
-(`DIAG: a far forward ran its live rows`). Tests: `draft_tree::tests::a_far_*`, `a_rebase_forward_runs_whole_*`,
-`split::tests::draft_trees::a_far_that_runs_only_its_live_rows_reads_them_as_their_paths_do` (red with the slot
-map read as wire rows), the flag's plaintext and sealed round trips, and at the requester
-`dsd_flow::tests::a_row_the_far_left_undrawn_is_never_read_as_a_word` (red with the sentinel taken as a draw),
-`a_walk_waiting_on_a_row_the_far_left_undrawn_has_parted_from_it`, `a_check_is_priced_by_the_rows_the_far_ran`.
-Reviewed the same night (security: nothing exploitable; correctness): the far skips only where a row drawn twice
-draws alike (greedy or shared noise — a rebase redraws its kept rows), refuses rows kept of another tree, and an
-answer that ran nothing gives the flow guard no far time. **Fired on a local rig** (2026-11-28,
-`~/swarmllm-gate/deep/live510/rig510.sh`: Qwen2.5-1.5B split on the processor in a network namespace, A parts 0-1 +
-the 0.5B drafter named, B parts 2-3 drawing, trees forced, greedy, two asks an arm, `SWARMLLM_FLOW_LIVE_ROWS=0` at A
-the control): on — `skips_rows=true`, 621 of 971 rows answered not drawn, B ran 926 of the 1,398 rows sent over 107
-forwards (e.g. 24 sent, 8 run, 3 drawn); off — 0. Its first run caught the refusal of rows kept of another tree
-refusing EVERY flow at its first rebase (a rebase's forward runs whole from the OLD base; the next tree starts at
-the path's end, its first rows the kept ones): `LiveRows::rebased_to` re-keys the map there, only where every row
-before the new base was computed (test `rows_kept_start_a_later_tree_only_where_none_before_it_was_skipped`). Replies:
-3 of 4 identical across arms; the fourth parts at a near-tie ("read it carefully." / "read it.") that the CONTROL
-arm itself drew both ways across the two runs — the processor flow's own variance, not the skip. **Fired when** `rows_not_drawn` > 0 on a reply
-to a far on the release; **measured** as prose / code tok/s on TH→AU against `SWARMLLM_FLOW_LIVE_ROWS=0` at this
-end, one binary. Not yet: a recurrent far (Qwen 3.5's checkpoint rows), a chained run, the far skipping inside a
-rebase's kept rows.
 
 #### #412 — A busy far card is busy with our own forwards: run its backlog as one
 `P2` · perf-split · **OPEN** (conceptual, tests first) — 2026-11-06 · evidence: `docs/plans/faster_than_local.md` § 13; history: #388
@@ -4060,6 +3978,51 @@ attention and ~20-25% behind it WITH. Which part of our pass holds the differenc
 per-chunk host work) is not measured. Next: one `nsys` trace of each side's prompt pass at 1,812 tokens, kernel
 time by kind, before choosing what to port. Writing, by contrast, is ours: 71.9-73.0 against llama.cpp's
 60.6-61.0 after the same document.
+
+**Read 2026-11-28 (code, not a trace): what one layer of that pass launches** (Qwen2.5-Coder-7B Q4_K_M whole on the
+RTX 3070 Laptop, a 512-token chunk past the first, half KV cache). About 25 kernels: one fused add-norm; ONE
+activation quantize shared by q/k/v, then a llama.cpp int8 tensor-core `mul_mat_q` each (`mmq_mma_layout`, so the
+f16-cuBLAS path and its "f16 cast shared across q/k/v" item above are DEAD on this card); three `heads_first_f32`
+(bias + transpose + RoPE fused); two `kv_write_f16`; attention as `q.transpose(1,2).contiguous()` (`ucopy_f32`),
+a cast to f16, candle-flash-attn's FA2 kernel (`Flash_fwd_kernel_traits<128,64,64,4>`, 224 blocks, no split, each
+of the 28 query heads reading its K/V tile again), a cast back, then `.transpose(1,2).contiguous()` AND, in
+`attend`, `transpose(1,2).reshape` — two `ucopy_f32` that undo each other (`layers/mod.rs` ~6127 and ~6578); the
+output projection, add-norm, gate/up on one quantize, `silu_mul`, down. Once a chunk, the output head runs on the
+chunk's last row and is thrown away on every chunk but the last (`executor.rs` ~2713-2731). No CUDA graph (512 >
+`MAX_POSITIONS` 8), no device sync, no mask upload. Only 3 of the "8 `ucopy_f32` a layer" above were found; the
+rest need `SWARMLLM_COUNT_KERNELS=1` on the run. llama.cpp 4b1a27f differs where it matters: its prompt attention
+is the mma kernel (`fattn.cu:637-664`) packing a GQA group's 7 query heads into one tile (`ncols2 = 8`), so a group
+reads K/V once; it reads Q as f32 (no transpose, no cast) and skips masked tiles. Its Q4_K matmul is the same MMQ.
+Cheap items (est. ≤ 2% together, unmeasured): the two cancelling copies are GONE (2026-11-28: flash's output is returned as a strided BHSD view, which the callers' transpose back makes contiguous with no copy — two `ucopy_f32` a layer a chunk fewer, bit for bit); cast flash's output in place, skip
+the head on all but the last chunk. The attention kernel is the candidate for the bulk — the nsys trace decides.
+**And the matmuls are NOT the gap** (read 2026-11-28): our MMQ headers (`mmq.cuh`, `mmq-config-ampere.cuh`,
+`mmq-load-tiles.cuh`, `mmq-vec-dot.cuh`) and the activation quantizer are byte-identical to llama.cpp 4b1a27f's, and
+a 512-row chunk takes the same tile (mmq_x 128, mmq_y 128, 8 warps), the same stream-k grid and fixup rule and the
+same shared memory; ours quantizes q/k/v and gate/up once a group where llama.cpp quantizes per matmul, and llama.cpp
+fuses no matmul in a prompt pass (its gate/up fusion is single-row only, `ggml-cuda.cu:1777`). So the difference is
+attention, the elementwise launches around it, or what the README's figure carries that `llama-bench` does not: ours
+is time to the first token THROUGH THE API (templating, tokenizing, planning, the worker hop), llama.cpp's the
+compute alone. Step 0 of the night (`~/swarmllm-gate/deep/fr/step0_1129.sh` (b)) times our compute alone
+(`examples/prefill_bench`) beside `llama-bench`, which splits the two.
+**Split 2026-11-28 16:57Z — the compute is at PARITY; the gap is the request path** (step 0 (b), idle card, the
+night's CUDA build of main): `prefill_bench` reads Qwen2.5-Coder-7B Q4_K_M's 1,812-token prompt in 0.75 s (2,292 /
+2,429 / 2,429 tok/s), `llama-bench -p 1812` (4b1a27f, flash on, -ngl 99) 2,443 ± 11 tok/s — under nsys, so if
+anything a little low. The README's 1,669-1,784 tok/s is the time to the first token THROUGH THE API (1.01-1.09 s,
+`queue_ms=0 sched_ms=0`, release check `speed.card_*`): ~0.25-0.3 s of it is outside the prompt pass. So no
+attention or elementwise port can buy the README's gap; what to find is that quarter-second (templating,
+tokenizing, the worker hop, admission, the first step, the stream). Next: one node at `-v` (the worker's
+`BatchGenerate prefill chunk ran` lines are debug), the same document, per-request timestamps
+(`~/swarmllm-gate/deep/fr/ttft_trace_1129.sh`).
+**Corrected 2026-11-28 18:00Z — the quarter-second was NOT the request path.** The trace (`ttft_trace_1129`, the
+night's build, `-v`, four asks of 16 tokens): template and admission ~10 ms; the prompt pass ~700 ms of card work
+(each chunk's `forward_ms` is the PREVIOUS chunk's work — the forwards are asynchronous — and the last chunk's
+~195 ms shows after it); first token 0.71-0.79 s; on an ask sent with no gap, the previous reply's snapshot copy
+(45-67 ms, #367 (e)/(f)) first. Then the two binaries in one sitting (`ttft_ab_1129.sh`, ABCD DCBA, three asks an
+arm, the default log level): v0.3.318 0.91-1.04 s at 16 tokens a reply and at 128 alike, the night's build
+0.75-0.86 s — ~0.17 s off the first token in the PASS, not around it (1,812 / 0.76 s ≈ 2,380 tok/s through the API,
+above `llama-bench`'s 2,220-2,443). The only change of the night on a whole-card 7B's prompt pass is flash's output
+kept as a view (the cheap item above); which of step 0's builds carried it is not recorded. **Next**: the mechanism,
+one build, `SWARMLLM_FLASH_OUT=copied` against the view (`~/swarmllm-gate/deep/fr/flashout_1129.sh`, ABBA ABBA).
 
 #### #258 — One long prompt in about ten pauses ~0.7 s in a single middle chunk on the card
 `P3` · perf-local · **OPEN** — 2026-10-13 · history: none (seen while measuring #257)
@@ -9001,6 +8964,27 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-11-28** (#510, #513, #514)
+- #510 — `P2` — **A split's far card computed every row of a guess tree, the ones the walk had already left too.** Built for v0.3.317 (the far gets the rows' tokens and the walk's anchor, compacts the live rows, sentinel draws for the dead, feature bit 49), the parted-walk fix in v0.3.318. Measured on the real link with .318 at both ends (2026-11-28, the 14B flowing to AU's 3060): prose 24.4 against 19.1 tok/s, code 55.1 against 42.2 (+28% / +31%), the far's own time an answer 32-56 ms against 79-147. History: archive § "#510".
+- #514 — `P2` — **A Qwen 3.5 recurrent layer's state did not follow its layer to another device under a standing conversation** (#513's sibling: `SsmState` sits in the same cache entry under the same key). Fixed: `SsmState::follow(device)` at the top of `forward_deltanet_into` moves the state, its kept step and its flowing checkpoint to the device the layer now computes on (never inside a capture: a new copy's first step is never captured); counted with `kv_caches_moved`. Test `a_held_state_follows_its_layer_to_another_device` (card build: red with the move held off by its test switch, then forward, rewind into the step and forward again in both directions within 1e-4 of the all-processor run). Prior art: llama.cpp allocates a recurrent layer's state on the layer's own device (`llama-memory-recurrent.cpp`, `dev_layer(i)`); PyTorch's `Module.to()` moves buffers with parameters. History: archive § "#514".
+- #513 — `P1` — **A far computer failed a split's request when the layers it served had changed device under a
+  standing conversation** (`attn: device mismatch in slice-set, lhs: Cpu, rhs: Cuda`). Seen live on v0.3.318,
+  2026-11-28 15:21Z (rig t510far, this card ↔ AU's 3060, the 14B flowing): another computer's request had made AU
+  hold the 14B whole (`[0, 48)`, 25 layers on its card, the rest on its processor, a 9B beside it), and our
+  `[9, 48)` was then served from that copy — a request's attention cache, keyed by its range, outlived the
+  placement it was written under (a worker re-placed, or a saved prompt restored to the card it was taken on), so a
+  layer now computing on the card wrote into a history held on the processor; one request failed, the others ran
+  6.6 and 12.9 tok/s. Fix: **`LayerKv::conform_to` takes the device of the rows being written (REQUIRED)** — the
+  one write path, `layers::append_to_cache`, passes it, and so does prefix-cache hydration — and a held history on
+  another device is copied across once (only the held positions: `force_contiguous` before `to_device`), in the
+  dtype the new device keeps; a mirror is dropped and restarts beside the moved cache. Counted
+  (`kv_cache::kv_caches_moved`, the prompt-chunk DIAG's `caches_moved`) and logged once a process. Test
+  `a_held_cache_follows_its_layer_to_another_device` (card build; red without the move). Prior art: vLLM's swap
+  preemption moves a request's KV blocks back to the card (`CacheEngine.swap_in`) rather than recomputing them;
+  llama.cpp's scheduler pins a K/V write to the cache's own backend and copies views across (`ggml_backend_sched`
+  pass 5). Not covered: a Qwen 3.5 recurrent layer's state (`SsmState`) is not a `LayerKv` — #514. Why AU served a
+  slice from a copy half on its processor is #461 (seen again the same day).
 
 **Closed 2026-11-27** (#511)
 - #511 — `P1` — **A computer whose disk was under its reserve gave back copies of other models to make room it

@@ -1,6 +1,6 @@
 // ── Per-request KV-cache store ──
 
-use candle_core::{DType, Tensor};
+use candle_core::{DType, Device, Tensor};
 
 use super::SsmState;
 
@@ -311,6 +311,17 @@ pub(crate) static KV_GROWTH_STEPS: std::sync::atomic::AtomicU64 =
 /// model that leaves it at 0 kept every position.
 pub(crate) static KV_SLIDES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Held caches moved to another device by every [`LayerKv`] in this process
+/// ([`LayerKv::conform_to`]) — the mechanism check for a layer that changed
+/// device while its conversation's cache stood.
+pub(crate) static KV_CACHES_MOVED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// See [`KV_CACHES_MOVED`].
+pub(crate) fn kv_caches_moved() -> u64 {
+    KV_CACHES_MOVED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// See [`KV_SLIDES`].
 pub(crate) fn kv_slides() -> u64 {
     KV_SLIDES.load(std::sync::atomic::Ordering::Relaxed)
@@ -399,6 +410,24 @@ pub(crate) fn windowed_caches_slide() -> bool {
 thread_local! {
     /// A test's own `SWARMLLM_KV_WINDOW_SLIDE=0`, on its thread only.
     pub(crate) static NO_SLIDE_IN_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// A test's own way back to before #513/#514, on its thread only: a held
+    /// cache or recurrent state STAYS on the device it was written on, so the
+    /// test that the move fixes the failure shows the failure first, in the
+    /// same binary (`diagnosis.md` rule 5).
+    pub(crate) static HELD_STATE_STAYS_IN_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether a held cache or recurrent state stays where it was written —
+/// never outside a test (`HELD_STATE_STAYS_IN_TEST`, compiled into tests only).
+pub(crate) fn held_state_stays() -> bool {
+    #[cfg(test)]
+    {
+        HELD_STATE_STAYS_IN_TEST.with(std::cell::Cell::get)
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
 }
 
 /// See [`KV_GROWTH_STEPS`].
@@ -763,43 +792,106 @@ impl LayerKv {
     /// positions; a cache that should mirror is built that way from the start
     /// (`new_kv_cache`) or filled in one append (prefix-cache hydration, which
     /// mirrors the whole snapshot correctly because it appends it at once).
-    pub(crate) fn conform_to(&mut self, storage: KvStorage) -> candle_core::Result<()> {
+    ///
+    /// **And it lives where its layer now computes: `device`, the device of
+    /// the rows about to be written** (REQUIRED). A conversation's cache
+    /// outlives the placement it was written under — a worker re-placed
+    /// between two forwards (a range held whole beside a processor run, then
+    /// narrowed or promoted), or a snapshot restored to the card it was taken
+    /// on — and a held history on the processor beside a step computed on the
+    /// card failed the request (`attn: device mismatch in slice-set, lhs: Cpu,
+    /// rhs: Cuda`, a far end on v0.3.318, 2026-11-28). The history is copied
+    /// across once, O(history), as vLLM's swap-in moves a preempted request's
+    /// blocks back to the card rather than recomputing them; the mirror, which
+    /// lives beside the cache it mirrors, is dropped and starts again on the
+    /// next prompt chunk where the new device keeps one (`append` catches it
+    /// up whole).
+    pub(crate) fn conform_to(
+        &mut self,
+        storage: KvStorage,
+        device: &Device,
+    ) -> candle_core::Result<()> {
         match storage {
             KvStorage::F16 => {
                 self.mirrorable = false;
                 self.shadow = None;
-                self.convert_main(DType::F16)
+                self.convert_main(DType::F16, device)
             }
             KvStorage::F32 => {
                 self.mirrorable = false;
                 self.shadow = None;
-                self.convert_main(DType::F32)
+                self.convert_main(DType::F32, device)
             }
-            KvStorage::F32Mirrored => self.convert_main(DType::F32),
+            KvStorage::F32Mirrored => self.convert_main(DType::F32, device),
         }
     }
 
-    /// Hold `dtype` from now on, converting the positions already held.
-    fn convert_main(&mut self, dtype: DType) -> candle_core::Result<()> {
+    /// Hold `dtype` on `device` from now on, converting — and moving — the
+    /// positions already held.
+    fn convert_main(&mut self, dtype: DType, device: &Device) -> candle_core::Result<()> {
         let dim = self.main.k_cache().dim();
         let capacity = self.main.k_cache().max_seq_len();
-        if self.main.k_cache().all_data().is_none() {
-            // Nothing held: only what the first allocation will be changes.
+        let Some(held_on) = self.main.k_cache().all_data().as_ref().map(Tensor::device) else {
+            // Nothing held: only what the first allocation will be changes. It
+            // is made on the device of the first rows written (`SeqCache::append`).
             self.main = KvPair::with_capacity_in(dim, capacity, self.growth, Some(dtype));
             return Ok(());
-        }
-        if self.main.k_cache().dtype() == Some(dtype) {
+        };
+        let moves = !held_on.same_device(device) && !held_state_stays();
+        if !moves && self.main.k_cache().dtype() == Some(dtype) {
             self.main.k.store_dtype = Some(dtype);
             self.main.v.store_dtype = Some(dtype);
             return Ok(());
         }
+        // A copy between devices inside a CUDA graph capture is silent garbage
+        // (`arch-inference.md`). A conversation's first step on a placement is
+        // never captured (`DecodeGraph::follows_previous_step`), so this never
+        // fires — and if it ever did, a refused capture beats a wrong cache.
+        if moves
+            && (crate::inference::layers::device_is_capturing(device)
+                || crate::inference::layers::device_is_capturing(held_on))
+        {
+            candle_core::bail!("a held KV cache would move between devices inside a graph capture")
+        }
+        if moves {
+            self.shadow = None;
+        }
         let (k, v) = (self.main.k()?, self.main.v()?);
+        if moves && KV_CACHES_MOVED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
+            // The bytes too: the history lands on `device` uncharged by the
+            // forward's room claim, which counts only the rows it adds.
+            let held_bytes = [&k, &v]
+                .iter()
+                .filter_map(|t| t.as_ref())
+                .map(|t| t.elem_count() * dtype.size_in_bytes())
+                .sum::<usize>();
+            tracing::info!(
+                target: "swarmllm::inference::split::kv_cache",
+                from = ?held_on,
+                to = ?device,
+                positions = self.main.current_seq_len() - self.held_from(),
+                held_bytes,
+                capacity_positions = capacity,
+                "DIAG: a held KV cache followed its layer to another device \
+                 (first in this process; kv_caches_moved counts the rest)"
+            );
+        }
         let mut converted = KvPair::with_capacity_in(dim, capacity, self.growth, Some(dtype));
         // A slid cache stays slid: what it holds starts where it did.
         converted.begin_at(self.held_from());
         converted.slide_beyond(self.window.map(positions_kept_for_window));
         if let (Some(k), Some(v)) = (k, v) {
             if k.dim(dim)? > 0 {
+                // A view's `to_device` copies its whole buffer, reserved
+                // positions included: only the held ones go across.
+                let (k, v) = if moves {
+                    (
+                        k.force_contiguous()?.to_device(device)?,
+                        v.force_contiguous()?.to_device(device)?,
+                    )
+                } else {
+                    (k, v)
+                };
                 converted.append(&k, &v)?;
             }
         }
@@ -4225,7 +4317,7 @@ mod tests {
         kv.append(&k, &k).unwrap();
         assert_eq!(kv.shadow_len_for_test(), Some(4), "precondition: mirroring");
 
-        kv.conform_to(KvStorage::F32).unwrap();
+        kv.conform_to(KvStorage::F32, &dev).unwrap();
         assert_eq!(kv.shadow_len_for_test(), None, "the mirror was not dropped");
 
         // And it must stay off — a later append must not resurrect it.
@@ -4244,7 +4336,7 @@ mod tests {
         let mut kv = LayerKv::with_capacity(2, 64, 64);
         let k = t(&dev, 1, 2, 4, 4);
         kv.append(&k, &k).unwrap();
-        kv.conform_to(KvStorage::F32Mirrored).unwrap();
+        kv.conform_to(KvStorage::F32Mirrored, &dev).unwrap();
         assert_eq!(
             kv.shadow_len_for_test(),
             None,
@@ -4352,7 +4444,7 @@ mod tests {
             "a cache that follows its source holds f32"
         );
 
-        kv.conform_to(KvStorage::F16).unwrap();
+        kv.conform_to(KvStorage::F16, &Device::Cpu).unwrap();
         assert!(kv.holds_half());
         assert_eq!(kv.current_seq_len(), 5);
         assert_eq!(kv.k_cache().max_seq_len(), 16, "the reservation is kept");
@@ -4366,12 +4458,12 @@ mod tests {
 
         // Already right: nothing moves.
         let before = kv.k_cache().all_data().as_ref().unwrap().id();
-        kv.conform_to(KvStorage::F16).unwrap();
+        kv.conform_to(KvStorage::F16, &Device::Cpu).unwrap();
         assert_eq!(kv.k_cache().all_data().as_ref().unwrap().id(), before);
 
         // And back, should a layer ever keep f32: what the half cache held,
         // widened — the rounding cannot be undone, and nothing pretends to.
-        kv.conform_to(KvStorage::F32).unwrap();
+        kv.conform_to(KvStorage::F32, &Device::Cpu).unwrap();
         assert!(!kv.holds_half());
         let k = kv.k().unwrap().unwrap();
         assert_eq!(k.dtype(), DType::F32);
@@ -4381,7 +4473,7 @@ mod tests {
     #[test]
     fn an_empty_cache_conforms_without_allocating() {
         let mut kv = LayerKv::with_capacity(2, 16, 16);
-        kv.conform_to(KvStorage::F16).unwrap();
+        kv.conform_to(KvStorage::F16, &Device::Cpu).unwrap();
         assert!(kv.holds_half(), "the next allocation is the half cache");
         assert!(kv.k_cache().all_data().is_none());
         let k = noisy(1, 2, 3, 4);
@@ -4480,6 +4572,101 @@ mod tests {
             .take(held)
             .map(|p| p as usize)
             .collect()
+    }
+
+    /// A conversation's cache written under one placement, then written by its
+    /// layer after the layer moved: the history follows the rows to their
+    /// device, in the dtype the new device keeps, every position intact — and
+    /// back again. Before `conform_to` took the device, the first case failed
+    /// the request on a far end (`attn: device mismatch in slice-set, lhs: Cpu,
+    /// rhs: Cuda`, v0.3.318, 2026-11-28). ⚠ Gated, so no default build runs it:
+    /// `cargo test --features candle-cuda --lib held_cache_follows`, and look
+    /// for the SKIPPED line before believing a pass.
+    #[cfg(feature = "candle-cuda")]
+    #[test]
+    fn a_held_cache_follows_its_layer_to_another_device() {
+        let _card_to_itself = crate::inference::cuda_graph::card_to_itself();
+        let card = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("SKIPPED a held cache moving to the card: no CUDA device ({e})");
+                return;
+            }
+        };
+        let read_back = |k: &Tensor| -> Vec<usize> {
+            k.to_device(&Device::Cpu)
+                .unwrap()
+                .to_dtype(DType::F32)
+                .unwrap()
+                .i((0, 0, .., 0))
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap()
+                .into_iter()
+                .map(|p| p as usize)
+                .collect()
+        };
+        // Red first: a history that stays where it was written fails the
+        // moved layer's write, as it did on the far end.
+        HELD_STATE_STAYS_IN_TEST.with(|c| c.set(true));
+        let mut stayed = None;
+        let first = rows_at(0, 5);
+        append_to_cache(&mut stayed, &first, &first, 0, KvStorage::F32, 128, 0, None).unwrap();
+        let step = rows_at(5, 2).to_device(&card).unwrap();
+        let failed = append_to_cache(&mut stayed, &step, &step, 5, KvStorage::F16, 128, 0, None);
+        HELD_STATE_STAYS_IN_TEST.with(|c| c.set(false));
+        assert!(
+            failed.is_err(),
+            "a cache left on the processor took the card's rows: the test cannot see the fix"
+        );
+        let moved_before = kv_caches_moved();
+        // (where the history was written, how; where the layer runs now, how)
+        for (from, from_storage, to, to_storage) in [
+            (Device::Cpu, KvStorage::F32, card.clone(), KvStorage::F16),
+            (
+                Device::Cpu,
+                KvStorage::F32,
+                card.clone(),
+                KvStorage::F32Mirrored,
+            ),
+            (card.clone(), KvStorage::F16, Device::Cpu, KvStorage::F32),
+        ] {
+            let mut slot = None;
+            let first = rows_at(0, 5).to_device(&from).unwrap();
+            append_to_cache(&mut slot, &first, &first, 0, from_storage, 128, 0, None).unwrap();
+            let step = rows_at(5, 2).to_device(&to).unwrap();
+            let (k, v) = append_to_cache(&mut slot, &step, &step, 5, to_storage, 128, 0, None)
+                .unwrap_or_else(|e| {
+                    panic!("{from:?} -> {to:?}: the moved layer's write failed: {e}")
+                });
+            assert!(k.device().same_device(&to) && v.device().same_device(&to));
+            assert_eq!(
+                read_back(&k),
+                (0..7).collect::<Vec<_>>(),
+                "{from:?} -> {to:?}"
+            );
+            assert_eq!(
+                read_back(&v),
+                (0..7).collect::<Vec<_>>(),
+                "{from:?} -> {to:?}"
+            );
+            let want = if to_storage == KvStorage::F16 {
+                DType::F16
+            } else {
+                DType::F32
+            };
+            assert_eq!(k.dtype(), want, "{from:?} -> {to:?}");
+            // And the next step lands beside it, as on a cache that never moved.
+            let next = rows_at(7, 1).to_device(&to).unwrap();
+            let (k, _) =
+                append_to_cache(&mut slot, &next, &next, 7, to_storage, 128, 0, None).unwrap();
+            assert_eq!(
+                read_back(&k),
+                (0..8).collect::<Vec<_>>(),
+                "{from:?} -> {to:?}"
+            );
+        }
+        assert!(kv_caches_moved() >= moved_before + 3, "the move never ran");
     }
 
     /// A windowed cache of a 128-position context, fed `positions` in chunks

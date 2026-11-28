@@ -1735,7 +1735,7 @@ impl PrefixCache {
                 crate::inference::layers::KV_CACHE_GROWTH_TOKENS,
             );
             if let Some(layout) = layout {
-                kv.conform_to(layout.storage).map_err(|e| {
+                kv.conform_to(layout.storage, k_src.device()).map_err(|e| {
                     SwarmError::Internal(format!(
                         "prefix-cache hydrate layer {i}: conform failed: {e}"
                     ))

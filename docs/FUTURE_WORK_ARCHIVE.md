@@ -16393,6 +16393,126 @@ When an item in `docs/FUTURE_WORK.md` closes, its line moves to that file's § "
 any history worth keeping — what was measured, what the fix replaced — is appended here
 under a heading naming its number.
 
+### #510 — a split's far card computed every row of a guess tree (closed 2026-11-28)
+
+**The far half on the real link, 2026-11-28 16:06-16:30Z** (t510far2: the published v0.3.318 at BOTH ends, here `[0, 9)` + the drafter, AU's 3060 `[9, 48)`, the 14B flowing, arms on/off/off/on/off/on, `SWARMLLM_FLOW_LIVE_ROWS=0` the off arm, 4 replies an arm): skipping ON prose 23.2-26.1 (mean 24.4), code 53.9 / 56.2 tok/s; OFF prose 17.4-20.7 (19.1), code 41.9 / 42.5 — **+28% prose, +31% code**, step 0's +24-29% predicted. Mechanism: the far's own time an answer (`far_said_ms_median`) 32-56 ms on against 79-147 off; `skips_rows=true`, `rows_not_drawn` 1,166-3,200 a reply. Arm 4 (on) is left out: AU had re-placed the 14B whole with 5 of 48 layers on its card (its advertised placement, polled between replies), its answers took 2.0-2.7 s and every reply ran ~2 tok/s; arm 3 (off) caught the start of it (433-458 ms). That is #461 (3), not this.
+
+**As the entry stood.**
+
+`P2` · perf-split · **RELEASED v0.3.317 (2026-11-28); real link MEASURED: no gain as released — its parted-walk fix RELEASED v0.3.318 (head half measured: 0 of 24 replies lost their flow against a far on .317, code 47.0 vs 43.6 tok/s skipping on/off); OPEN: the far half's real-link measurement, both ends on .318** (step 0 PASSED: 86-90% of the far's rows dead at service; 24 rows +24-29% over 8 on a card) — 2026-11-27 · evidence: memory `archive/fable_flow_law_1127.md`
+
+**Real link, 2026-11-28 05:46-06:23Z** (t517ab: the published v0.3.317 at BOTH ends, here [0,16) + AU's 3060
+[16,48), the 1.5B helper, the copy store off; ABBA BAAB inside one head binary, `SWARMLLM_FLOW_LIVE_ROWS=0` the off
+arms; 4 prompts × 4 arms each way; `~/swarmllm-gate/deep/fr/real_link_t517ab/`). **The mechanism fired**: the far's
+own time a forward 33-41 → 26-28 ms. **The speed did not move**: arm means on / off — code 38.2 / 41.2, prose 18.1 /
+18.7, prose2 19.5 / 20.0, prose3 17.3 / 20.0. Two causes: (1) **5 of 20 skipping replies ended their flow** at a
+parted walk (0 of 20 off) — a rebase's forward drew rows again in another row count and a near-tie flipped; the far
+walked by the second draw, the head by the first (`docs/invariants/memory.md` § "A far end that skips rows", gotcha
+#1192); those replies finished in tree rounds (prose 12.1, code 30.6). **Fixed on main**: the far keeps the draw it
+sent first across the cut (`draft_tree::SentBefore`), the head rebases where walks part
+(`rebase_where_the_walks_parted`, one round trip) and counts `redrawn_otherwise`; the far half needs the next
+release on the far. (2) **This node, not the far, set the pace**: here 37-44 ms a forward against the far's 26-28,
+and #504's balance sheds ONE layer per step — each rig arm starts fresh and took one step at its last reply, so the
+memo's "6-8 layers off the head" never happened inside an arm. A sitting judging the skip needs the head at the
+balanced cut (here [0,12)) or arms long enough for the balance to settle.
+**The head half VERIFIED the same morning** (t510fix, 06:36-07:07Z, a CUDA build of main + the fix at the head, AU
+still on the published v0.3.317, here [0,12) + AU [12,48), skip on / off ABBA BA, 3 arms × 4 replies each way):
+**0 of 24 flows ended** (8 partings rebased and went on, `walks_parted`); the far's re-draws came back OTHERWISE than
+its first draws in nearly every reply of BOTH arms (`redrawn_otherwise` 0-11 a reply) — the mechanism, seen
+directly. The far's own time 29-36 ms with the skip against 44-98 without (at 36 layers the far set the pace), and
+**code 47.0 tok/s against 43.6 (+8%; every skipping reply above every other)**; prose 17.5 / 20.7 / 21.4 against
+20.3 / 20.5 / 20.8 over three prompts (−3%, inside the spread: every greedy reply's text differed, gotcha index
+"ONE greedy prompt"). Still open: the far half (needs the next release on the far), and the head's own pace — at
+[0,12) here ~37-39 ms a forward, its 1.5B drafter ~24 of them — which now bounds prose and code alike.
+
+In a flow whose far end draws (`peer-last`), the far learns the walk ~62 ms before this node, yet serves every row it is
+sent: the head counts dead rows only for a shape it finishes itself (`dsd_flow::note_dead_here`, `sent.here`), and
+`far_left_behind` is a timing exclusion, not a skip. Measured on t509rd (14B TH↔AU, here [0,16) + the 1.5B, AU [16,48),
+2026-11-27): one prose reply's 181 forwards of 23.2 rows bought 160 tokens; 52 levels died under its 7 misses and the
+34 tokens taken at the drafter's rank 2 or later each killed the first guess's trunk ~5 levels deep. Since the 11-24
+row kernels 8 rows run 1.09-1.26× the floor against 1.55-2.0× at 24, so § 13's "dropping is worthless on a card" no
+longer holds. **The change**: the far answers a wholly dead forward at once and computes the rest's live rows only,
+padded to 8 / 16 / 24 (graph shapes, #357); dense models first (a recurrent layer's per-row state needs its own pass);
+gated on a head-advertised bit if an older head needs a draw for every row. **Arithmetic** (the memo's law, above):
+half the rows dead at service → far 35 → ~25 ms, #504's balance moves 6-8 layers off the head, λ 68 → 86, D 193 →
+163 ms → prose ~29, code ~60 (from 22-24 / 48-51). With #412 and the opt-in near-tie acceptance (§ 7.3) ≈ 35.
+**Step 0, before building**: on this node, count rows already off the walk when the far served them (the peer-last
+form of `note_dead_here`) and levels lost at non-first takes; `prefill_bench` the far range at 8 / 16 / 24 rows on a
+3060-class card (the first count is BUILT, 2026-11-27: `rows_answered` / `rows_dead_at_service` on the reply
+line — an answer's own rows the walk had left as it was read, before its own draws, i.e. as the far end knew the
+walk when it served it where the far walks; counted in `take_answer`, which every shape reaches — a first cut
+counted in the turn order only, which a far-walking shape never enters, and read 0 on the real link). **Kill it** if
+under 35% of rows are dead at service or 8 against 24 rows differ by under 15%. **The first half MEASURED
+2026-11-27 (t511d, 20:56Z, `463c07b0f`'s code in a CUDA build, the 14B to AU's 3060, the 1.5B helper, the copy
+store off, one reply each, 160 tokens): 85.8-89.5% of rows dead at service** — prose 2,474 / 2,848, 2,971 / 3,319,
+2,525 / 2,825, 2,706 / 3,026; code 1,125 / 1,311 — the shape's own arithmetic (one row of a level's 8 on the walk,
+so ~7/8 of the next level hangs off rows it left). Far past the kill line. **The second half MEASURED the same
+evening** (`~/swarmllm-gate/deep/rows510/`, `prefill_bench` SPEC sweep as a tree, the 14B's layers 0-22 on this
+3070 Laptop — a far range cannot be fed token ids, and a layer's row cost is the same wherever it sits — ~520
+positions, min of 7 pairs, two rounds, live node stopped, under the kit): 1 row 12.2 ms, 8 rows 14.4-14.9, 16 rows
+16.6-17.3, 24 rows 18.1-18.6 — **24 against 8 rows +24-29%, past the 15% line** (3 rows read 16.1-18.6, above 8: a
+shape the bench did not record ahead, not the card's cost). So a far forward cut from ~24 rows to the ~3 alive
+would spend about a third less on its layers; the output head (all rows' logits) is not in this figure. Both
+halves pass: build it, for the release after v0.3.316 (the far end must run it). **Correction (implementation
+plan, Fable, read from the code the same night — `memory/issue510_plan_1127.md`): the far has NO walk today** — it
+is sent no row tokens and draws one token a row, the head walks; the count above is what it COULD skip once told
+its rows' tokens and the head's walk row (both trailers exist: `draft_tokens`, `flow_walk`). Its cache appends, so
+the far keeps its LIVE rows compacted (a row-to-slot map per request) and answers a skipped row `u32::MAX`; a dense
+far captures at most 8 rows, so live rows pad to 8. Gated on a new bit (`FLOW_LIVE_ROWS`) and a flag the head sets.
+Then
+build behind `SWARMLLM_FLOW_LIVE_ROWS=0` (read at the far), rig it with this card as the far over a delayed link
+(§ 13), and the real link once the far runs the release. Prior art: PipeInfer (2407.11798 § IV-D) cancels invalid
+queued runs, a node polling a flag mid-run; FlowSpec (2507.02620) and SpecPipe (2504.04104) prune rows after a verify,
+not before a stage serves them; #149 (b) skips a whole unstarted stream chunk stood on a refused walk. Prior art
+(the cache): vLLM / SGLang tree verification gathers the accepted rows' KV slots into place after a check; here
+the far gathers BEFORE it runs — only live rows are ever written, in row order, with a row→slot map; the one shape
+they pad to is vLLM's CUDA-graph batch padding.
+
+**BUILT 2026-11-28 (for the release after v0.3.316)**: the requester sets `rows_may_skip` (`0x03` flags bit 2) only
+for ONE dense peer that draws and advertises `features::FLOW_LIVE_ROWS` (bit 49), sending the whole tree's tokens and
+its walk's row; the far (`draft_tree::LiveRows::plan`, kept on `KvCacheEntry::live_rows`) walks its own draws from
+that row, runs the rows the walk may reach padded to 8 (a tree's first forward and a rebase whole: a rebase leads
+with the path, rows every kept row reads), answers the rest `u32::MAX`, and runs no step for a forward with none
+live. **A draw goes back only for a row live AND computed after its whole path** ("sound"): a padding row, or one
+whose path lost a skipped row, answers `NOT_DRAWN`, so a requester whose walk parted from the far's (a near-tie
+drawn two ways) meets `NOT_DRAWN` and the rounds finish — never a wrong word. The requester counts `rows_not_drawn`
+/ `forwards_not_drawn` on the reply line, prices a check by the rows the far ran (`rows_the_far_ran`), and takes no
+`far_said` sample from an answer that ran nothing; the far logs `rows_sent` / `rows_served` / `rows_drawn`
+(`DIAG: a far forward ran its live rows`). Tests: `draft_tree::tests::a_far_*`, `a_rebase_forward_runs_whole_*`,
+`split::tests::draft_trees::a_far_that_runs_only_its_live_rows_reads_them_as_their_paths_do` (red with the slot
+map read as wire rows), the flag's plaintext and sealed round trips, and at the requester
+`dsd_flow::tests::a_row_the_far_left_undrawn_is_never_read_as_a_word` (red with the sentinel taken as a draw),
+`a_walk_waiting_on_a_row_the_far_left_undrawn_has_parted_from_it`, `a_check_is_priced_by_the_rows_the_far_ran`.
+Reviewed the same night (security: nothing exploitable; correctness): the far skips only where a row drawn twice
+draws alike (greedy or shared noise — a rebase redraws its kept rows), refuses rows kept of another tree, and an
+answer that ran nothing gives the flow guard no far time. **Fired on a local rig** (2026-11-28,
+`~/swarmllm-gate/deep/live510/rig510.sh`: Qwen2.5-1.5B split on the processor in a network namespace, A parts 0-1 +
+the 0.5B drafter named, B parts 2-3 drawing, trees forced, greedy, two asks an arm, `SWARMLLM_FLOW_LIVE_ROWS=0` at A
+the control): on — `skips_rows=true`, 621 of 971 rows answered not drawn, B ran 926 of the 1,398 rows sent over 107
+forwards (e.g. 24 sent, 8 run, 3 drawn); off — 0. Its first run caught the refusal of rows kept of another tree
+refusing EVERY flow at its first rebase (a rebase's forward runs whole from the OLD base; the next tree starts at
+the path's end, its first rows the kept ones): `LiveRows::rebased_to` re-keys the map there, only where every row
+before the new base was computed (test `rows_kept_start_a_later_tree_only_where_none_before_it_was_skipped`). Replies:
+3 of 4 identical across arms; the fourth parts at a near-tie ("read it carefully." / "read it.") that the CONTROL
+arm itself drew both ways across the two runs — the processor flow's own variance, not the skip. **Fired when** `rows_not_drawn` > 0 on a reply
+to a far on the release; **measured** as prose / code tok/s on TH→AU against `SWARMLLM_FLOW_LIVE_ROWS=0` at this
+end, one binary. Not yet: a recurrent far (Qwen 3.5's checkpoint rows), a chained run, the far skipping inside a
+rebase's kept rows.
+
+### #514 — a recurrent layer's state following its layer to another device (closed 2026-11-28)
+
+**As the entry stood.**
+
+`P2` · reliability · **OPEN — UNVERIFIED** — 2026-11-28 · history: #513
+
+#513 moved a held attention cache to the device its layer computes on now (`LayerKv::conform_to`). A Qwen 3.5
+recurrent layer keeps an `SsmState` instead, written by `layers::qwen35`'s DeltaNet paths and restored by
+prefix-cache hydration to the card it was saved on (`KvSnapshot::restore_to`); nothing yet moves it when the
+layer's placement changes between two forwards of one conversation. Unverified whether that fails (a device
+mismatch) or cannot arise (a recurrent model's re-placement may always start the conversation over). Step 0: a
+card test like `a_held_cache_follows_its_layer_to_another_device` over one DeltaNet layer — state written on the
+processor, the next step on the card. If red, move the pair where `forward_deltanet_into` first reads it.
+
 ### #156 — a node computing with a header from another upload (closed 2026-10-03)
 
 **As the entry stood.** After v0.3.221 the release node switched Qwen2.5-Coder-7B to the

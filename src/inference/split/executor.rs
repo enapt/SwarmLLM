@@ -2292,6 +2292,7 @@ impl SplitModel {
         // request, which is what a mechanism check runs.
         let growth_before = super::kv_cache::kv_growth_steps();
         let slides_before = super::kv_cache::kv_slides();
+        let moves_before = super::kv_cache::kv_caches_moved();
 
         // Get or create the per-request cache entry, extract the layer caches,
         // then drop the DashMap guard before running the (potentially slow) forward pass.
@@ -2699,7 +2700,10 @@ impl SplitModel {
         // Windowed caches that slid instead of growing (FUTURE_WORK #281) —
         // the one thing a decode step reports here, once per ~512 steps.
         let slid = super::kv_cache::kv_slides().saturating_sub(slides_before);
-        if seq_len > 1 || slid > 0 {
+        // Held caches that followed their layers to another device (a worker
+        // re-placed under a standing conversation) — as rare as a slide.
+        let moved = super::kv_cache::kv_caches_moved().saturating_sub(moves_before);
+        if seq_len > 1 || slid > 0 || moved > 0 {
             let grew = super::kv_cache::kv_growth_steps().saturating_sub(growth_before);
             tracing::debug!(
                 request_id,
@@ -2708,6 +2712,7 @@ impl SplitModel {
                 reserved_positions = kv_reserve,
                 growth_steps = grew,
                 windowed_slides = slid,
+                caches_moved = moved,
                 "DIAG: KV cache growth during a prompt chunk"
             );
         }
@@ -3252,6 +3257,7 @@ impl SplitModel {
         // cache grew by concatenation during THIS batch forward.
         let growth_before = super::kv_cache::kv_growth_steps();
         let slides_before = super::kv_cache::kv_slides();
+        let moves_before = super::kv_cache::kv_caches_moved();
 
         // Context window check: reject any item whose index_pos + seq_len
         // exceeds max_seq_len (same guard as forward_inner_impl, prevents RoPE
@@ -3658,7 +3664,10 @@ impl SplitModel {
         // Windowed caches that slid instead of growing (FUTURE_WORK #281) —
         // the one thing a decode step reports here, once per ~512 steps.
         let slid = super::kv_cache::kv_slides().saturating_sub(slides_before);
-        if seq_len > 1 || slid > 0 {
+        // Held caches that followed their layers to another device (a worker
+        // re-placed under a standing conversation) — as rare as a slide.
+        let moved = super::kv_cache::kv_caches_moved().saturating_sub(moves_before);
+        if seq_len > 1 || slid > 0 || moved > 0 {
             let grew = super::kv_cache::kv_growth_steps().saturating_sub(growth_before);
             tracing::debug!(
                 batch_size,
@@ -3667,6 +3676,7 @@ impl SplitModel {
                 reserved_positions = ?kv_reserves,
                 growth_steps = grew,
                 windowed_slides = slid,
+                caches_moved = moved,
                 "DIAG: KV cache growth during a prompt chunk"
             );
         }

@@ -3213,6 +3213,17 @@ impl SsmRows {
         [&self.mixed, &self.qk, &self.v, &self.g, &self.beta]
     }
 
+    /// These rows on `device` ([`SsmState::follow`]).
+    fn to_device(&self, device: &Device) -> CandleResult<Self> {
+        Ok(Self {
+            mixed: self.mixed.to_device(device)?,
+            qk: self.qk.to_device(device)?,
+            v: self.v.to_device(device)?,
+            g: self.g.to_device(device)?,
+            beta: self.beta.to_device(device)?,
+        })
+    }
+
     /// Rows the buffers hold.
     fn capacity(&self) -> usize {
         self.mixed.dims().get(1).copied().unwrap_or(0)
@@ -3247,6 +3258,16 @@ pub(crate) struct SsmSlot {
     pub recurrent_state: Tensor,
 }
 
+impl SsmSlot {
+    /// This state on `device` ([`SsmState::follow`]).
+    pub(crate) fn to_device(&self, device: &Device) -> CandleResult<Self> {
+        Ok(Self {
+            conv_state: self.conv_state.to_device(device)?,
+            recurrent_state: self.recurrent_state.to_device(device)?,
+        })
+    }
+}
+
 impl SsmState {
     /// The widest step whose rows are kept: the most positions a check reads
     /// (`network::protocol::MAX_SPEC_LOGITS_POSITIONS` — an honest chain is at
@@ -3272,6 +3293,95 @@ impl SsmState {
 
     pub(crate) fn current(&self) -> &SsmSlot {
         &self.current
+    }
+
+    /// Moves the whole state to `device`, where its layer now computes — the
+    /// pair a step reads, the pair it can be taken back to, the last step's
+    /// rows and a flowing tree's; `false` where it is there already
+    /// (FUTURE_WORK #514). A conversation's state outlives the placement it
+    /// was written under, as its attention cache does (#513,
+    /// `LayerKv::conform_to`): a range served as a view over a copy placed
+    /// otherwise keeps the same cache key, and a prefix snapshot is restored
+    /// to the device it was taken on. Every DeltaNet step calls this first
+    /// (`qwen35::DeltaNetWeights::forward_deltanet_into`), before anything
+    /// reads the state; a take-back ([`Self::rewind_to`]) needs no weights, so
+    /// it runs wherever the state is. Never inside a capture: a new copy or
+    /// view keeps decode graphs of its own, and a conversation's first step on
+    /// one is never captured (`DecodeGraph::follows_previous_step`).
+    ///
+    /// Prior art: llama.cpp allocates each layer's recurrent state on that
+    /// layer's device (`llama-memory-recurrent.cpp:85-96`, `model.dev_layer(i)`)
+    /// and never moves a layer, so the two cannot part there; ours can be
+    /// re-placed under a standing conversation. PyTorch's `nn.Module.to()`
+    /// moves a module's registered buffers with its parameters, and Hugging
+    /// Face accelerate's `AlignDevicesHook` moves what a layer reads to its
+    /// execution device in `pre_forward`. Taken: move at the layer's entry,
+    /// the whole state at once.
+    pub(crate) fn follow(&mut self, device: &Device) -> CandleResult<bool> {
+        let held_on = self.current.recurrent_state.device().clone();
+        if held_on.same_device(device) || crate::inference::split::kv_cache::held_state_stays() {
+            return Ok(false);
+        }
+        // A copy between devices inside a CUDA graph capture is silent garbage
+        // (`arch-inference.md`). A conversation's first step on a placement is
+        // never captured (`DecodeGraph::follows_previous_step`), so this never
+        // fires — and if it ever did, a refused capture beats wrong state.
+        if qwen35::capturing(device) || qwen35::capturing(&held_on) {
+            candle_core::bail!(
+                "a recurrent state would move between devices inside a graph capture"
+            )
+        }
+        // Everything is copied before anything is replaced: a failed copy
+        // leaves the state as it was. The rollback copy of a flowing forward
+        // no longer shares the flow's row store afterwards — it keeps the rows
+        // as they stood, which is what a put-back reads, and the next flowing
+        // forward begins a new one.
+        let current = self.current.to_device(device)?;
+        let previous = self
+            .previous
+            .as_ref()
+            .map(|s| s.to_device(device))
+            .transpose()?;
+        let rows = self
+            .rows
+            .as_ref()
+            .map(|r| r.to_device(device))
+            .transpose()?;
+        let flow = self
+            .flow
+            .as_ref()
+            .map(|f| f.to_device(device))
+            .transpose()?;
+        let flow_begun = match &self.flow_begun {
+            Some(begun) => Some(FlowBegun {
+                at: begun.at,
+                flow: begun
+                    .flow
+                    .as_ref()
+                    .map(|f| f.to_device(device).map(Box::new))
+                    .transpose()?,
+            }),
+            None => None,
+        };
+        self.current = current;
+        self.previous = previous;
+        self.rows = rows;
+        self.flow = flow;
+        self.flow_begun = flow_begun;
+        if crate::inference::split::kv_cache::KV_CACHES_MOVED
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            == 0
+        {
+            tracing::info!(
+                target: "swarmllm::inference::layers",
+                from = ?held_on,
+                to = ?device,
+                positions = self.at,
+                "DIAG: a held recurrent state followed its layer to another device \
+                 (first in this process; kv_caches_moved counts the rest)"
+            );
+        }
+        Ok(true)
     }
 
     /// Positions the state describes.
@@ -4691,6 +4801,13 @@ pub(crate) fn new_kv_cache(
     cache
 }
 
+/// Is `device`'s stream being captured into a CUDA graph right now — for code
+/// outside this module that must not copy between devices inside one (a held
+/// cache following its layer, `LayerKv::conform_to`). False off a card.
+pub(crate) fn device_is_capturing(device: &Device) -> bool {
+    qwen35::capturing(device)
+}
+
 /// Append a step's K and V to a layer's cache — creating it on the first step,
 /// starting it over at position 0 — and return the whole history as the cache
 /// holds it, in its stored dtype (f16 for [`KvStorage::F16`]).
@@ -4701,8 +4818,10 @@ pub(crate) fn new_kv_cache(
 /// prefix-cache hydration — which builds it from a snapshot and cannot know
 /// how this layer stores its cache (the snapshot carries `n_kv_head` but not
 /// `n_head`, nor the device's choice). [`LayerKv::conform_to`] does that here,
-/// once, for all of them — and [`LayerKv::slide_beyond`] tells it the layer's
-/// sliding window, which a snapshot cannot carry either.
+/// once, for all of them — moving a held history to the device of the rows
+/// being written, where the layer's placement changed under its conversation —
+/// and [`LayerKv::slide_beyond`] tells it the layer's sliding window, which a
+/// snapshot cannot carry either.
 ///
 /// The history comes back from [`LayerKv::held_from`] on: the whole of it,
 /// unless a windowed layer's cache has slid (FUTURE_WORK #281).
@@ -4728,7 +4847,9 @@ pub(crate) fn append_to_cache(
             if index_pos == 0 {
                 cache.reset();
             }
-            cache.conform_to(storage)?;
+            // The rows' device is where the layer computes NOW: a held cache
+            // written under an earlier placement follows it there.
+            cache.conform_to(storage, k.device())?;
             cache.slide_beyond(sliding_window);
             cache.append(k, v)
         }
@@ -5807,6 +5928,15 @@ pub(crate) fn flash_handles_offset_causal() -> bool {
 /// every path without a mirror (CPU, tests, direct calls) is unaffected.
 pub(crate) type FlashKv<'a> = Option<(&'a Tensor, &'a Tensor)>;
 
+/// Does the flash path copy its output into BHSD order, as it did before
+/// 2026-11-28 (`SWARMLLM_FLASH_OUT=copied`)? The A/B for [`run_attention`]'s
+/// view of it; read once.
+#[cfg(feature = "flash-attn")]
+fn flash_out_copied() -> bool {
+    static COPIED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *COPIED.get_or_init(|| std::env::var("SWARMLLM_FLASH_OUT").as_deref() == Ok("copied"))
+}
+
 /// Unified attention dispatch: selects the best backend for the device.
 ///
 /// - **CPU**: Uses `candle_nn::cpu_flash_attention::run_flash_attn_cpu::<f32>()` which
@@ -5815,7 +5945,9 @@ pub(crate) type FlashKv<'a> = Option<(&'a Tensor, &'a Tensor)>;
 ///   fused CUDA kernel, GQA native, O(1) memory. Requires SM80+ (RTX 3070 SM86 compatible).
 /// - **GPU without `flash-attn` / fallback**: Standard matmul path with `repeat_kv`.
 ///
-/// All paths produce output in BHSD layout `(b, n_head, seq, head_dim)`.
+/// All paths produce output in BHSD shape `(b, n_head, seq, head_dim)` — the
+/// flash path's a strided view of its BSHD result, which a caller's transpose
+/// back to BSHD makes contiguous without a copy.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_attention(
     q: &Tensor,
@@ -6155,8 +6287,19 @@ pub(crate) fn run_attention_windowed(
                 }
             };
 
-            // Output is BSHD — transpose to BHSD and cast back to F32
-            out.to_dtype(DType::F32)?.transpose(1, 2)?.contiguous()
+            // Output is BSHD — cast back to F32 and SEEN as BHSD, not copied:
+            // every caller turns it back to BSHD to project it (`transpose(1,
+            // 2).reshape`), which on this view is contiguous and so a view as
+            // well. Copying here made two copies a layer that undid each other
+            // — of a 512-token prompt chunk on a 7B, 7 MB each (FUTURE_WORK
+            // #147); llama.cpp reads its flash output in token order likewise.
+            // `SWARMLLM_FLASH_OUT=copied` makes the copy again, the A/B.
+            let out = out.to_dtype(DType::F32)?.transpose(1, 2)?;
+            if flash_out_copied() {
+                out.contiguous()
+            } else {
+                Ok(out)
+            }
         }
         _ => {
             // Fallback: standard matmul attention with optional soft-capping

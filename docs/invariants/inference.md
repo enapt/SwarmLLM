@@ -5476,6 +5476,25 @@ remove. A/B: `SWARMLLM_KV_F16=0` (old layout; the node also stops advertising bi
 
 **Moved from `arch-inference.md` (trimmed 2026-11-17):** `KvAttention` is a REQUIRED argument of `layers::kv_storage`: MLA is f32 everywhere, and two estimates priced it as the half cache when the rule was asked without it. F16 alone applies on a card where both kernels read it in place - flash (a transposed BHSD view, no copy) and the decode kernel (`decode_attn::card_kernel_covers`); elsewhere the old layout.
 
+**A held cache follows its layer's device (2026-11-28, FUTURE_WORK #513).** `LayerKv::conform_to`
+takes the device of the rows being written as a REQUIRED argument, beside the storage. A
+conversation's cache is keyed by request and range, so it outlives the placement it was written
+under: a worker re-placed between two forwards (a range held whole across card and processor,
+then narrowed or promoted) or a saved prompt restored to the card it was taken on. A layer then
+computing on the card wrote into a history held on the processor, and candle's `slice_set`
+refused it — a far end on v0.3.318 failed a split's request with `attn: device mismatch in
+slice-set, lhs: Cpu, rhs: Cuda`. The move happens at the one write path (`append_to_cache`; both
+`attend` arms hand it rows already on the cache's intended home, `cache_home` included), copies
+only the held positions (`force_contiguous` before `to_device`: a view's copy carries its whole
+reserved buffer), converts to the new device's storage in the same rebuild, and drops the f16
+mirror, which `append` restarts and catches up whole where the new device keeps one. It is counted
+(`kv_cache::kv_caches_moved`; the prompt-chunk DIAG's `caches_moved`) and logged once a process.
+Prior art: vLLM's swap preemption moves a request's blocks back to the card rather than
+recomputing; llama.cpp pins a K/V write to the cache's own backend. **What a change must keep:**
+never a second write path that skips `conform_to`, and never the device taken from anywhere but
+the rows written — the layer's placement as it is NOW. A recurrent state (`SsmState`) is not a
+`LayerKv`; whether it needs the same is #514.
+
 ## A decode step's graph is recorded in groups, launched as it is recorded (2026-09-30)
 
 The whole-step graph above cut ~4 ms of card-side gaps from a 7B token and then spent the same

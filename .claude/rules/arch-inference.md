@@ -129,7 +129,7 @@ Run **`examples/flash_reference_check.rs`** (every head width a family uses, aga
 
 ## A card keeps its KV cache as f16 — `layers::kv_storage` is the one answer (2026-10-09)
 
-**`layers::kv_storage`** says how a layer keeps its cache (`KvStorage::{F32, F32Mirrored, F16}`; its `KvAttention` argument is REQUIRED — MLA is f32 everywhere) for the cache as built AND every estimate of its cost: loader budget, split planner, admission (all via `kv_budget::KvLayout`, per layer), a peer (`kv_storage_as_advertised` + `features::KV_HALF_ON_CARD`). **F16 alone** where both kernels read it in place — flash and the decode kernel (`decode_attn::card_kernel_covers`). Every forward writes through **`layers::append_to_cache`** (`LayerKv::conform_to` corrects a hydrated cache); f32 → f16 is ONE launch (`kv_write::write_into`). A/B `SWARMLLM_KV_F16=0`, `SWARMLLM_KV_WRITE=compose`.
+**`layers::kv_storage`** says how a layer keeps its cache (`KvStorage::{F32, F32Mirrored, F16}`; its `KvAttention` argument is REQUIRED — MLA is f32 everywhere) for the cache as built AND every estimate of its cost: loader budget, split planner, admission (all via `kv_budget::KvLayout`, per layer), a peer (`kv_storage_as_advertised` + `features::KV_HALF_ON_CARD`). **F16 alone** where both kernels read it in place — flash and the decode kernel (`decode_attn::card_kernel_covers`). Every forward writes through **`layers::append_to_cache`** (`LayerKv::conform_to` corrects a hydrated cache, and moves a held one to the device of the rows written — the device is REQUIRED, #513: a cache outlives its placement); f32 → f16 is ONE launch (`kv_write::write_into`). A/B `SWARMLLM_KV_F16=0`, `SWARMLLM_KV_WRITE=compose`.
 
 → `docs/invariants/inference.md` § "A card keeps its KV cache as f16"
 
