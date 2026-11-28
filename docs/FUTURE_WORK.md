@@ -34,10 +34,10 @@ residual).
 ## ▶ PRIORITIES — read this first
 
 **2026-11-27: a split that flows is DELAY-bound on prose, pace-bound on code** (design memo, arithmetic on t509rd's
-14B TH↔AU flow; HYPOTHESES until #510's step 0 is measured): the flow fits R = λ / (1 + m·λ·D) (λ levels a second, D
+14B TH↔AU flow; #510's step 0 since measured: 86-90% of the far's rows dead, 24 rows +24-29% over 8): the flow fits R = λ / (1 + m·λ·D) (λ levels a second, D
 the verdict's delay, m the loss a level in flight; checked against the 11-16 US link, 11.5 predicted vs 11.7-11.8),
 prose's ceiling with today's drafter and D ≈ 36 tok/s, so a faster head alone is damped (pace ×1.3 → +9%). First
-build: #510 (the far computes only rows still alive). The 27B's 20-30 bar needs a ring of D ≤ ~150 ms — one region.**
+build: #510 (the far computes only rows still alive) — RELEASED in v0.3.317, its real-link A/B next. The 27B's 20-30 bar needs a ring of D ≤ ~150 ms — one region.**
 
 **2026-11-20: split speed is the focus (owner: "we need to focus on getting split speeds going"; each node a small
 slice, nobody's card locked by a whole model). The plan: `docs/plans/small_slices.md`. The bar (owner, same day):
@@ -3784,7 +3784,7 @@ TAG=fresh303, 02:26-02:29Z, the thread sampler beside it in `threads_fresh303.tx
 the owner is #146 (4).
 
 #### #510 — A split's far card computes every row of a guess tree, the ones the walk has already left too
-`P2` · perf-split · **BUILT, real link pending** (step 0 PASSED: 86-90% of the far's rows dead at service; 24 rows +24-29% over 8 on a card; built 2026-11-28 — the far must run the release carrying it) — 2026-11-27 · evidence: memory `archive/fable_flow_law_1127.md`
+`P2` · perf-split · **RELEASED v0.3.317 (2026-11-28), real link pending** (step 0 PASSED: 86-90% of the far's rows dead at service; 24 rows +24-29% over 8 on a card; the real-link A/B needs both ends on 0.3.317) — 2026-11-27 · evidence: memory `archive/fable_flow_law_1127.md`
 
 In a flow whose far end draws (`peer-last`), the far learns the walk ~62 ms before this node, yet serves every row it is
 sent: the head counts dead rows only for a shape it finishes itself (`dsd_flow::note_dead_here`, `sent.here`), and
