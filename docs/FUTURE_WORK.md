@@ -1018,7 +1018,12 @@ start) stays until a run is given back — Petals' rebalance with its 0.75 hyste
 is the next step; (2) the plan stands down while a chain is planned (the chain places its segments);
 (3) peers act on it only once they run the release that carries it — verify on the real swarm after
 the release: AU/BE fetch one run each of the 27B (`DIAG: card ranges planned` on this node names the
-plan), then a here → AU card chain is routable; (4) the review's PLAUSIBLE findings, not acted on:
+plan), then a here → AU card chain is routable. **First field plan, 2026-11-28 02:03Z** (every peer on
+.316, one real 27B request from here): `225e6fe7:63-64 aa3d1e66:21-64 5bfbd36e:0-61` — this laptop,
+holding layers 0-21 on a disk under its reserve, was planned layer 63 alone: each card was weighed only
+at its card's full width, and every such window but the one the model's end narrows needed parts the
+disk could not take. **Fixed the same day**: from each start the widest window the card's disk takes
+(`windows`' `takes`; test `a_card_that_can_fetch_nothing_is_planned_the_run_it_holds`, red without it); (4) the review's PLAUSIBLE findings, not acted on:
 a card with a large processor share is planned only its card's run (by design: cards across nodes);
 ranking by model concentrates room-making on a node's lowest-ranked models (`not_spare_for_room`); a
 run part of which cannot be fetched lapses its lease and returns after `PASSED_OVER_FOR`; the

@@ -3618,6 +3618,14 @@ full disk under its reserve could give copies away for nothing; the ranges made 
 it off `StorageLimit::FreeDisk` and missed a node over its own configured limit too (pre-release review). Prior art: Ceph's
 `backfillfull_ratio` refuses recovery onto an OSD that cannot take the data.
 
+**And a card on such a disk is planned the run it holds** (2026-11-28, #506): the planner weighed each card only at
+its card's full width, one window from each part start, then dropped the windows whose missing parts the disk could
+not take. On v0.3.316's field plan for the 27B this laptop — layers 0-21 held, its disk under the reserve, so no
+room to fetch — had every full-width window dropped but the one narrowed by the model's END: it was planned
+`225e6fe7:63-64`, and its real run counted as off-run copies prune may give back. `card_ranges::windows` now takes the
+card's disk (`takes`) and keeps, from each start, the widest window it can take. Test
+`a_card_that_can_fetch_nothing_is_planned_the_run_it_holds` (red without it: the stub `(28, 32)` against `(0, 12)`).
+
 ### A spawn leaves the card the room the plan's other ranges here will be grown into (2026-11-19, #481 (5))
 
 A split that starts and finishes here gives this node two ranges, and they arrive one by one: the first range's

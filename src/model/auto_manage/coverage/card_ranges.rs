@@ -179,9 +179,24 @@ fn longest_held_run(parts: &[Part], has: &[bool], layers: u32) -> u32 {
     best
 }
 
-/// Every window of whole parts at most `width` layers wide, one a part start:
-/// the widest from each. A part wider than `width` starts none.
-fn windows(parts: &[Part], layers: u32, width: u32) -> Vec<(u32, u32)> {
+/// Every window of whole parts at most `width` layers wide that `takes`
+/// accepts, one a part start: the widest from each. A part wider than `width`
+/// starts none.
+///
+/// `takes` is the card's disk: a card that cannot fetch a run of its card's
+/// width is weighed for the widest it can, from each start — the run it
+/// already holds where it can fetch nothing. Weighed only at full width, such
+/// a card was left the one window narrow by the model's END: on 2026-11-28 a
+/// card holding layers 0-21 of a 27B on a disk under its reserve was planned
+/// layer 63 alone, and its real run counted as off-run copies. Petals'
+/// `_choose_best_start` scans only `num_blocks`-wide windows, but its servers
+/// have no disk limit to narrow them.
+fn windows(
+    parts: &[Part],
+    layers: u32,
+    width: u32,
+    takes: impl Fn(u32, u32) -> bool,
+) -> Vec<(u32, u32)> {
     let mut out = Vec::new();
     for (a, first) in parts.iter().enumerate() {
         let x = first.start;
@@ -194,7 +209,9 @@ fn windows(parts: &[Part], layers: u32, width: u32) -> Vec<(u32, u32)> {
             if end - x > width {
                 break;
             }
-            e = Some(end);
+            if takes(x, end) {
+                e = Some(end);
+            }
             if end >= layers {
                 break;
             }
@@ -253,10 +270,9 @@ fn plan_card_ranges(
         } else {
             c.layers.min(layers).min(run_of(c))
         };
-        windows(parts, layers, width)
-            .into_iter()
-            .filter(|&(x, e)| lacking_bytes(parts, &c.has, x, e, layers) <= c.disk_bytes)
-            .collect::<Vec<_>>()
+        windows(parts, layers, width, |x, e| {
+            lacking_bytes(parts, &c.has, x, e, layers) <= c.disk_bytes
+        })
     };
     // The run the last plan gave a card it is fetching into, where that
     // window is still one it may take: kept (`Card::before`).
@@ -738,8 +754,9 @@ mod tests {
 
     #[test]
     fn windows_are_whole_parts_no_wider_than_the_card() {
+        let any = |_: u32, _: u32| true;
         assert_eq!(
-            windows(&parts(), 32, 10),
+            windows(&parts(), 32, 10, any),
             vec![
                 (0, 8),
                 (4, 12),
@@ -752,8 +769,36 @@ mod tests {
             ]
         );
         assert!(
-            windows(&parts(), 32, 3).is_empty(),
+            windows(&parts(), 32, 3, any).is_empty(),
             "a part wider than the card starts none"
+        );
+        // A window the disk cannot take is cut back to the widest it can.
+        assert_eq!(
+            windows(&parts(), 32, 10, |x, e| x != 0 || e <= 4),
+            vec![
+                (0, 4),
+                (4, 12),
+                (8, 16),
+                (12, 20),
+                (16, 24),
+                (20, 28),
+                (24, 32),
+                (28, 32)
+            ]
+        );
+    }
+
+    /// A card that can fetch nothing is planned the run it holds, not the
+    /// stub at the model's end (2026-11-28: this laptop held layers 0-21 of
+    /// the 27B, its disk under the reserve, and was planned layer 63 alone).
+    #[test]
+    fn a_card_that_can_fetch_nothing_is_planned_the_run_it_holds() {
+        let mut c = card(1, 16, &[0, 1, 2, 7]);
+        c.disk_bytes = 0;
+        assert_eq!(
+            plan_card_ranges(32, &parts(), &[c], 1),
+            vec![Some((0, 12))],
+            "its twelve held layers, not the four at the end"
         );
     }
 
@@ -902,7 +947,7 @@ mod tests {
         };
         let plan = |c: Card| plan_card_ranges(32, &parts(), &[c], 1);
         assert_eq!(plan(with_disk(0, &[])), vec![None]);
-        assert_eq!(plan(with_disk(2 * GB, &[])), vec![Some((24, 32))]);
+        assert_eq!(plan(with_disk(2 * GB, &[])), vec![Some((0, 8))]);
         assert_eq!(plan(with_disk(2 * GB, &[6, 7])), vec![Some((16, 32))]);
     }
 
