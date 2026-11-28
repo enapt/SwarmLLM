@@ -3784,7 +3784,7 @@ TAG=fresh303, 02:26-02:29Z, the thread sampler beside it in `threads_fresh303.tx
 the owner is #146 (4).
 
 #### #510 — A split's far card computes every row of a guess tree, the ones the walk has already left too
-`P2` · perf-split · **RELEASED v0.3.317 (2026-11-28); real link MEASURED: no gain as released — a fix for its parted walks is on main** (step 0 PASSED: 86-90% of the far's rows dead at service; 24 rows +24-29% over 8 on a card) — 2026-11-27 · evidence: memory `archive/fable_flow_law_1127.md`
+`P2` · perf-split · **RELEASED v0.3.317 (2026-11-28); real link MEASURED: no gain as released — its parted-walk fix RELEASED v0.3.318 (head half measured: 0 of 24 replies lost their flow against a far on .317, code 47.0 vs 43.6 tok/s skipping on/off); OPEN: the far half's real-link measurement, both ends on .318** (step 0 PASSED: 86-90% of the far's rows dead at service; 24 rows +24-29% over 8 on a card) — 2026-11-27 · evidence: memory `archive/fable_flow_law_1127.md`
 
 **Real link, 2026-11-28 05:46-06:23Z** (t517ab: the published v0.3.317 at BOTH ends, here [0,16) + AU's 3060
 [16,48), the 1.5B helper, the copy store off; ABBA BAAB inside one head binary, `SWARMLLM_FLOW_LIVE_ROWS=0` the off
@@ -7219,7 +7219,7 @@ reverse — and its post-verify keeps drafting while the target verifies (up to 
 between the two; here they would.
 
 #### #504 — A split whose guesses flow is priced as the sum of its stages, but runs at its slowest stage's pace
-`P2` · perf-split · **OPEN — BUILT (closed loop, `daemon::state::flow_balance` + `parallax::cut_for_the_flow`); 2026-11-28: the cut MEASURED on the real link (16 → 12 → 9 here: code 38.2 → 46.8 → 53.1 tok/s) and a shed now moves half the measured gap at once (`layers_to_shed`, 16 → 9 in three steps, not seven); the closed loop's own real-link run (`real_link_t504gap/`, AU holding [3,48)): the planner started at 8 here, the balance stepped back to 9 in every arm, gap vs one-layer shed the same (code 51.7 / 51.6, prose 20-22) since no shed was needed — residual: a multi-layer shed seen to fire on the real link, which needs a shape whose planner leaves too many layers here** (2026-11-27) — 2026-11-26 · evidence: `docs/plans/faster_than_local.md` § 15, `docs/plans/small_slices.md` § 2 and step 6, `docs/invariants/scheduling.md` § "A tree that flows"
+`P2` · perf-split · **OPEN — BUILT (closed loop, `daemon::state::flow_balance` + `parallax::cut_for_the_flow`); the gap shed + reach fix RELEASED v0.3.318; 2026-11-28: the cut MEASURED on the real link (16 → 12 → 9 here: code 38.2 → 46.8 → 53.1 tok/s) and a shed now moves half the measured gap at once (`layers_to_shed`, 16 → 9 in three steps, not seven); the closed loop's own real-link run (`real_link_t504gap/`, AU holding [3,48)): the planner started at 8 here, the balance stepped back to 9 in every arm, gap vs one-layer shed the same (code 51.7 / 51.6, prose 20-22) since no shed was needed — residual: a multi-layer shed seen to fire on the real link, which needs a shape whose planner leaves too many layers here** (2026-11-27) — 2026-11-26 · evidence: `docs/plans/faster_than_local.md` § 15, `docs/plans/small_slices.md` § 2 and step 6, `docs/invariants/scheduling.md` § "A tree that flows"
 
 **Seen** (arithmetic on measured stage times, nothing run): the planner prices a chain as the SUM of its segments'
 costs (`scheduler::parallax::chain_cost_terms`, every `VertexCost` field added up). That is a reply's time when one
@@ -8243,7 +8243,7 @@ starts. Read `docs/CREDITS_DESIGN.md` before touching them; the credit items bel
 preconditions for ever switching enforcement on, not work for now.
 
 #### #512 — A far computer's cache for a request is keyed by the request id alone, not by who sent it
-`P3` · security · **NARROWED 2026-11-28: confirmed; the CANCEL half fixed (`daemon::state::request_owners`), the FORWARD half open** — 2026-11-28 · from the security review of #510's rebase change
+`P3` · security · **NARROWED 2026-11-28: confirmed; the CANCEL half fixed (`daemon::state::request_owners`, RELEASED v0.3.318), the FORWARD half open** — 2026-11-28 · from the security review of #510's rebase change
 
 **Confirmed** (security review 2026-11-28, read from the code): nothing on the serving computer binds a
 request id to a sender. (1) `CancelInference` was honoured from ANY authenticated computer
