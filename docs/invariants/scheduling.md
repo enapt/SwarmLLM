@@ -7316,6 +7316,28 @@ re-partitions a live pipeline as its bottleneck drifts (2604.12171); Petals move
 slowest stage falls enough (`MOVE_AT_MOST`, copied by `auto_manage::coverage::near_chain`). None steps from a
 running pipeline's own stage times; this does, as TCP's congestion window does from its acks.
 
+
+**A shed moves half the measured gap (2026-11-28).** On the real link (14B, AU's 3060 drawing, the 1.5B helper,
+copy store off, one head binary; `~/swarmllm-gate/deep/fr/real_link_t517ab/`, `_t510fix/`, `_t510w/`) the cut
+decided the speed and the balance never got there: each rig arm starts a fresh node, and one layer a step needs four
+flows, so 16 → 9 would take 28 flows (and an idle hour or a restart forgets it). Cuts set by hand, arm means:
+
+| layers here | this node a forward | the far's | code tok/s | prose tok/s (three prompts) |
+|---|---|---|---|---|
+| 16 (#510 on, t517ab) | 37-44 ms | 26-28 | 38.2 | 18.1 / 19.5 / 17.3 |
+| 12 (t510w) | 34-36 | 29-47 | 46.8 | 17.7 / 23.1 / 23.5 |
+| 9 (t510w) | 30-33 | 32-56 | 53.1 | 21.8 / 22.9 / 23.5 |
+
+(16's sitting ran an hour earlier, its parted walks unrecovered — #510's evidence; 12 and 9 alternated ABC CBA in
+one sitting.) So where the far end is ONE segment a shed now moves half the gap's width in layers
+(`flow_balance::layers_to_shed`): the gap is this node's time a forward less the far's, a layer's width the sum of
+this node's LAYERS' time a layer (`near_ms` over its layers — the drafter's ~24 ms left out) and the far's whole time
+over its layers (its fixed costs in: it overstates the far's layer and shortens the move). From the t517ab figures:
+16 → 12 → 10 → 9, three steps. Halved, and held to 4, because six layers at once ran 26% slower (`real_link_bal314/`,
+the far card's cliff); a cut measured slower lately is passed over for a nearer one; the wall-time judgement still
+undoes a move that ran slower. Back toward this node stays one layer: the far's time carries its queue. Tests
+`a_shed_moves_half_the_measured_gap_at_once`, `a_shed_passes_over_a_cut_measured_slower`. A wider level (16 rows) at
+12 lost (code 38.1, prose 18.1-19.9: this node 46-50 ms a forward, its levels waiting 19-22% of the flow).
 ## A chunk is as wide as it pays (2026-10-30, #374)
 
 **The rule**: the continuous stream sends each chunk at one of two widths — the narrow one

@@ -1856,9 +1856,17 @@ impl PipelineExecutor {
                     layers_here: near.layer_range.1,
                     kind: super::reply_kind(&self.request),
                     here_ms_a_forward: (run.drafting_ms + run.near_ms + run.here_ms) / forwards,
+                    near_ms_a_forward: run.near_ms / forwards,
                     far_said_ms_median: f64::from(median_of(&run.far_said_ms)),
                     wall_ms_a_forward: flowed_ms / forwards,
                     forwards: run.forwards,
+                    layers_far: run.shape.chain.is_empty().then(|| {
+                        run.shape
+                            .far
+                            .layer_range
+                            .1
+                            .saturating_sub(run.shape.far.layer_range.0)
+                    }),
                 };
                 let step = run.state.metrics.flow_balances.record(
                     &self.request.model_id.0,

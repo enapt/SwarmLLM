@@ -41,6 +41,27 @@
 //! steps from a running pipeline's own stage times: what a plan cannot know
 //! (the drafter's time, the far card's cliff) is read off the run.
 //!
+//! **How far a shed goes** (2026-11-28): one layer a step took 28 flows to
+//! go from 16 layers here to the 9 the 14B's flow to Australia balanced at
+//! (`real_link_t510w/`: code 46.8 tok/s at 12 here, 53.1 at 9; this node
+//! 34-36 ms a forward at 12, 30-33 at 9; the far 29-56) — and the balance is
+//! memory only, so a node that is restarted or idle an hour started over each
+//! time. Where the far end is ONE segment, a shed now moves half the gap's
+//! width in layers at once, at most [`MOST_LAYERS_A_SHED`]: the gap is this
+//! node's time a forward less the far end's, and a layer's width the sum of
+//! the two stages' times a layer (this node's LAYERS' time over its layers,
+//! the drafter's left out; the far end's whole time over its layers, its
+//! fixed costs in, which overstates it and shortens the move). Halved
+//! because the far card is not a straight line (`real_link_bal314/`: six
+//! layers at once ran 26% slower); a cut measured slower lately is passed
+//! over for a nearer one; the judgement above still undoes a move that ran
+//! slower. A layer comes BACK one at a time: the far end's time carries its
+//! queue, which overstates the gap that way. A/B
+//! `SWARMLLM_FLOW_BALANCE_STEP=one`. Prior art: a proportional controller
+//! with its gain halved for a plant it cannot see whole (the far card's
+//! cliff); Petals re-balances a whole span at once from measured
+//! throughputs, only where its balance quality gains (`should_choose_other_blocks`).
+//!
 //! **One far node, one drafter**: the balance is the pair's. A flow to another
 //! far node, or drafted by another model, starts the model's balance over.
 //! Memory only, forgotten [`FORGET_AFTER`] without a flow.
@@ -79,6 +100,18 @@ pub(crate) const LEAST_FORWARDS: u32 = 32;
 /// The fewest layers a balance leaves this node.
 const LEAST_LAYERS_HERE: u32 = 1;
 
+/// The most layers one shed moves (half the measured gap, at least one).
+pub(crate) const MOST_LAYERS_A_SHED: u32 = 4;
+
+/// Whether a shed may move more than one layer: `SWARMLLM_FLOW_BALANCE_STEP=one`
+/// keeps the one-layer steps (the A/B inside one binary).
+fn sheds_by_the_gap() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !std::env::var("SWARMLLM_FLOW_BALANCE_STEP").is_ok_and(|v| v.trim() == "one")
+    })
+}
+
 /// One finished flow this node drove and the far end drew, as
 /// `pipeline::dsd_flow` hands it over.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -91,12 +124,18 @@ pub struct FlowBalanceSample {
     pub kind: ReplyKind,
     /// This node's time a forward: drafting, its layers and the rest.
     pub here_ms_a_forward: f64,
+    /// Of it, this node's LAYERS' time a forward (the drafter's left out):
+    /// what one layer here costs, for how far a shed goes.
+    pub near_ms_a_forward: f64,
     /// The median of the far end's own times a forward, as it reported them.
     pub far_said_ms_median: f64,
     /// The flow's wall time over its forwards: what the balance is for.
     pub wall_ms_a_forward: f64,
     /// Forwards the flow sent.
     pub forwards: u32,
+    /// The far end's layers where it is ONE segment; `None` for a chain,
+    /// which sheds one layer at a time.
+    pub layers_far: Option<u32>,
 }
 
 /// What a balance holds a flowing split's planner to (`scheduler::parallax`).
@@ -131,6 +170,10 @@ struct Flow {
     /// The far end's time a forward over this node's.
     ratio: f64,
     wall_ms: f64,
+    here_ms: f64,
+    near_ms: f64,
+    far_ms: f64,
+    layers_far: Option<u32>,
 }
 
 /// A cut's pace as last measured there: per kind, the median wall time a
@@ -213,6 +256,37 @@ fn pace_of(flows: &VecDeque<Flow>) -> Vec<(ReplyKind, f64)> {
         .collect()
 }
 
+/// How many layers a shed from `k` moves: half the measured gap's width in
+/// layers, at least one, at most [`MOST_LAYERS_A_SHED`], never past
+/// [`LEAST_LAYERS_HERE`] — one where the far end is a chain or a figure is
+/// missing.
+fn layers_to_shed(flows: &VecDeque<Flow>, k: u32) -> u32 {
+    let room = k.saturating_sub(LEAST_LAYERS_HERE).max(1);
+    let one_far = flows
+        .iter()
+        .map(|f| f.layers_far)
+        .collect::<Option<Vec<u32>>>();
+    let (true, Some(far_layers)) = (sheds_by_the_gap(), one_far) else {
+        return 1;
+    };
+    let far_layers = median(far_layers.into_iter().map(f64::from).collect());
+    let here = median(flows.iter().map(|f| f.here_ms).collect());
+    let near = median(flows.iter().map(|f| f.near_ms).collect());
+    let far = median(flows.iter().map(|f| f.far_ms).collect());
+    let a_layer_here = near / f64::from(k);
+    let a_layer_far = far / far_layers;
+    let width = a_layer_here + a_layer_far;
+    if !(width.is_finite() && width > 0.0 && near > 0.0 && far_layers >= 1.0) {
+        return 1;
+    }
+    let gap_in_layers = (here - far) / width;
+    let half = (gap_in_layers / 2.0).round();
+    if !half.is_finite() || half < 1.0 {
+        return 1;
+    }
+    (half as u32).clamp(1, MOST_LAYERS_A_SHED).min(room)
+}
+
 /// How much slower `flows` ran than `pace`, like for like: the median of each
 /// flow's wall time a forward over its kind's there; `None` with no kind in
 /// common.
@@ -272,6 +346,10 @@ impl FlowBalances {
             kind: sample.kind,
             ratio: sample.far_said_ms_median / sample.here_ms_a_forward,
             wall_ms: sample.wall_ms_a_forward,
+            here_ms: sample.here_ms_a_forward,
+            near_ms: sample.near_ms_a_forward,
+            far_ms: sample.far_said_ms_median,
+            layers_far: sample.layers_far,
         });
         while balance.at_the_cut.len() > FLOWS_A_STEP {
             balance.at_the_cut.pop_front();
@@ -308,24 +386,43 @@ impl FlowBalances {
         }
         balance.cap = Some(k);
         let ratio = median(balance.at_the_cut.iter().map(|f| f.ratio).collect());
-        let want = if ratio > BACK_ABOVE {
-            k + 1
+        // The cuts a step may go to, the farthest first: a shed's by the
+        // measured gap, a layer back one at a time.
+        let candidates: Vec<u32> = if ratio > BACK_ABOVE {
+            vec![k + 1]
         } else if ratio < SHED_BELOW && k > LEAST_LAYERS_HERE {
-            k - 1
+            (1..=layers_to_shed(&balance.at_the_cut, k))
+                .rev()
+                .map(|d| k - d)
+                .collect()
         } else {
             return FlowBalanceStep::Holds;
         };
-        if balance.out_of_reach.contains_key(&want) {
-            return FlowBalanceStep::Holds;
-        }
-        // A cut measured lately is gone to only where it ran faster.
-        if let Some(there) = balance.measured.get(&want) {
-            let faster_there =
-                slower_than(&balance.at_the_cut, &there.pace).is_some_and(|s| s > 1.0 + SLOWER_BY);
-            if !faster_there {
-                return FlowBalanceStep::Kept;
+        let mut passed_over_a_slower = false;
+        let mut chosen = None;
+        for want in candidates {
+            if balance.out_of_reach.contains_key(&want) {
+                continue;
             }
+            // A cut measured lately is gone to only where it ran faster.
+            if let Some(there) = balance.measured.get(&want) {
+                let faster_there = slower_than(&balance.at_the_cut, &there.pace)
+                    .is_some_and(|s| s > 1.0 + SLOWER_BY);
+                if !faster_there {
+                    passed_over_a_slower = true;
+                    continue;
+                }
+            }
+            chosen = Some(want);
+            break;
         }
+        let Some(want) = chosen else {
+            return if passed_over_a_slower {
+                FlowBalanceStep::Kept
+            } else {
+                FlowBalanceStep::Holds
+            };
+        };
         balance.cap = Some(want);
         balance.from = Some(k);
         balance.at_the_cut.clear();
@@ -369,10 +466,88 @@ mod tests {
             layers_here: k,
             kind,
             here_ms_a_forward: here,
+            near_ms_a_forward: 0.0,
             far_said_ms_median: far_said,
             wall_ms_a_forward: wall,
             forwards: 200,
+            layers_far: None,
         }
+    }
+
+    /// A flow whose far end is one segment of `of - k` layers, this node's
+    /// layers taking `near` of its `here` a forward.
+    fn flow_to_one(
+        k: u32,
+        of: u32,
+        wall: f64,
+        here: f64,
+        near: f64,
+        far_said: f64,
+    ) -> FlowBalanceSample {
+        FlowBalanceSample {
+            near_ms_a_forward: near,
+            layers_far: Some(of - k),
+            ..flow(k, Prose, wall, here, far_said)
+        }
+    }
+
+    /// `real_link_t517ab/` and `real_link_t510w/` (2026-11-28, the 14B to
+    /// Australia's 3060, 48 layers): at 16 here this node took ~40 ms a
+    /// forward (its layers ~16, the drafter the rest) and the far end ~27 —
+    /// the gap is ~7 layers wide, and a shed moves half of it at once; one
+    /// step at a time took 28 flows to reach 9.
+    #[test]
+    fn a_shed_moves_half_the_measured_gap_at_once() {
+        let b = FlowBalances::default();
+        let t = Instant::now();
+        let mut last = FlowBalanceStep::Waiting;
+        for _ in 0..FLOWS_A_STEP {
+            last = b.record(M, &far(), D, flow_to_one(16, 48, 41.0, 40.0, 16.0, 27.0), t);
+        }
+        assert_eq!(last, FlowBalanceStep::Shed);
+        // a layer here 1.0 ms, there 27/32: 13 ms is ~7 layers; half is 4.
+        assert_eq!(layers(&b, t), Some(12));
+        // At 12 the gap is narrower: 37.6 against 30 is ~4 layers, 2 move.
+        for _ in 0..FLOWS_A_STEP {
+            last = b.record(M, &far(), D, flow_to_one(12, 48, 39.0, 37.6, 12.7, 30.0), t);
+        }
+        assert_eq!(last, FlowBalanceStep::Shed);
+        assert_eq!(layers(&b, t), Some(10));
+        // A chain, or a figure missing, sheds one.
+        let chain = FlowBalances::default();
+        for _ in 0..FLOWS_A_STEP {
+            chain.record(M, &far(), D, flow(16, Prose, 41.0, 40.0, 27.0), t);
+        }
+        assert_eq!(layers(&chain, t), Some(15));
+    }
+
+    /// A shed never goes to a cut measured slower lately: it passes it over
+    /// for a nearer one.
+    #[test]
+    fn a_shed_passes_over_a_cut_measured_slower() {
+        let b = FlowBalances::default();
+        let t = Instant::now();
+        let at = |k: u32, wall: f64, here: f64, near: f64, far_said: f64| {
+            let mut last = FlowBalanceStep::Waiting;
+            for _ in 0..FLOWS_A_STEP {
+                last = b.record(
+                    M,
+                    &far(),
+                    D,
+                    flow_to_one(k, 48, wall, here, near, far_said),
+                    t,
+                );
+            }
+            last
+        };
+        assert_eq!(at(16, 41.0, 40.0, 16.0, 27.0), FlowBalanceStep::Shed);
+        assert_eq!(layers(&b, t), Some(12));
+        // 12 ran 10% slower than 16: undone, back to 16.
+        assert_eq!(at(12, 45.1, 37.6, 12.7, 30.0), FlowBalanceStep::Undone);
+        assert_eq!(layers(&b, t), Some(16));
+        // The stages still say shed: 12 is passed over for 13.
+        assert_eq!(at(16, 41.0, 40.0, 16.0, 27.0), FlowBalanceStep::Shed);
+        assert_eq!(layers(&b, t), Some(13));
     }
 
     fn layers(balances: &FlowBalances, at: Instant) -> Option<u32> {

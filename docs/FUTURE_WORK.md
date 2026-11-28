@@ -7219,7 +7219,7 @@ reverse — and its post-verify keeps drafting while the target verifies (up to 
 between the two; here they would.
 
 #### #504 — A split whose guesses flow is priced as the sum of its stages, but runs at its slowest stage's pace
-`P2` · perf-split · **OPEN — BUILT (closed loop, `daemon::state::flow_balance` + `parallax::cut_for_the_flow`), real-link A/B pending** (2026-11-27) — 2026-11-26 · evidence: `docs/plans/faster_than_local.md` § 15, `docs/plans/small_slices.md` § 2 and step 6, `docs/invariants/scheduling.md` § "A tree that flows"
+`P2` · perf-split · **OPEN — BUILT (closed loop, `daemon::state::flow_balance` + `parallax::cut_for_the_flow`); 2026-11-28: the cut MEASURED on the real link (16 → 12 → 9 here: code 38.2 → 46.8 → 53.1 tok/s) and a shed now moves half the measured gap at once (`layers_to_shed`, 16 → 9 in three steps, not seven) — the closed loop's own real-link run pending** (2026-11-27) — 2026-11-26 · evidence: `docs/plans/faster_than_local.md` § 15, `docs/plans/small_slices.md` § 2 and step 6, `docs/invariants/scheduling.md` § "A tree that flows"
 
 **Seen** (arithmetic on measured stage times, nothing run): the planner prices a chain as the SUM of its segments'
 costs (`scheduler::parallax::chain_cost_terms`, every `VertexCost` field added up). That is a reply's time when one
