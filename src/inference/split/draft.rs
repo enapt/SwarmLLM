@@ -80,6 +80,8 @@ struct FlowTimes {
     /// Calls that grew fewer levels than asked because the last one
     /// proposed was unlikely to be reached ([`FlowStep::depth_floor`]).
     gated: u32,
+    /// Rows proposed under a chain off the trunk ([`side_rows_a_level`]).
+    side_rows: u32,
 }
 
 impl Drop for FlowGrowth {
@@ -99,9 +101,107 @@ impl Drop for FlowGrowth {
             forward_ms = format_args!("{:.0}", t.forward_ms),
             followers_ms = format_args!("{:.0}", t.followers_ms),
             gated = t.gated,
+            side_rows = t.side_rows,
             "DIAG: a guessing model's flowing tree ended"
         );
     }
+}
+
+/// Rows a level of a tree that flows keeps for chains OFF its trunk —
+/// `SWARMLLM_FLOW_SIDE_ROWS` (0-8; default 0: every row best-first).
+///
+/// Best-first by path rating (EAGLE-2's rule) proposes a runner-up under a
+/// trunk row but seldom deepens it: a chain under a rank-2 follower outranks
+/// the trunk's next row only once the trunk stands ~7 levels deeper, and a
+/// prose reply's stands 4-6 ahead. So a verdict that takes the runner-up — 35
+/// of 151 on the 14B's prose, half of them rank 2 (t504gap, 2026-11-27) —
+/// voids the trunk and finds almost nothing standing under the row it took:
+/// the reply waits a round trip for the next level. In a tree that flows a
+/// row's worth is not only its path's chance: a row under a runner-up expires
+/// at that runner-up's verdict, and is worth the stall it saves if taken. The
+/// rows kept here deepen the best chains off the trunk, best-first among
+/// themselves (Fable 2's "twin trunks", `memory/archive/fable_night_1129_review.md`);
+/// at least one row a level stays best-first. Read in the drafter's worker.
+///
+/// **Measured null, so off** (2026-11-28 17:00-17:20Z, the 14B on the
+/// Thailand-Australia link, both ends .318 + #510, `real_link.sh` TAG
+/// t1129side, ABCCBA, 6 replies an arm a kind): prose 25.5 / 26.0 / 25.8 tok/s
+/// with 0 / 2 / 3 side rows (medians 26.2 / 26.3 / 27.0), code 48.4 / 46.4 /
+/// 46.8 — the rows deepened the runner-ups (`under_runner_up_mean` fell from
+/// 7.9-9.8 to 4.4-8.3) and bought nothing a reply could see, while costing
+/// code its trunk's depth.
+pub(crate) fn side_rows_a_level() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("SWARMLLM_FLOW_SIDE_ROWS")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .map_or(0, |v| v.min(8))
+    })
+}
+
+/// The trunk of a tree that flows: from the walk's row, each row's
+/// best-rated live follower in turn — the path the walk takes while every
+/// verdict is the first guess. `true` for the rows on it, by row.
+fn trunk_of(flow: &crate::inference::draft_tree::FlowTree, rating: &[f32]) -> Vec<bool> {
+    let n = flow.len();
+    let rated = |row: usize| rating.get(row).copied().unwrap_or(f32::NEG_INFINITY);
+    let mut best: Vec<Option<usize>> = vec![None; n];
+    for row in flow.at() + 1..n {
+        if !flow.is_live(row) {
+            continue;
+        }
+        let Some(parent) = flow.tree().parent(row) else {
+            continue;
+        };
+        if best[parent].is_none_or(|b| rated(row) > rated(b)) {
+            best[parent] = Some(row);
+        }
+    }
+    let mut on = vec![false; n];
+    let mut row = Some(flow.at());
+    while let Some(r) = row.filter(|&r| r < n) {
+        on[r] = true;
+        row = best[r];
+    }
+    on
+}
+
+/// Up to `most` followers that deepen a chain off the trunk — a live parent
+/// not on it ([`trunk_of`]) — best first, popped from `queue`; the rest go
+/// back. A follower its parent already carries, or one chosen before it
+/// carries, is dropped, as the best-first pass drops it.
+fn side_candidates(
+    queue: &mut std::collections::BinaryHeap<Candidate>,
+    flow: &crate::inference::draft_tree::FlowTree,
+    trunk: &[bool],
+    most: usize,
+) -> Vec<Candidate> {
+    let mut chosen: Vec<Candidate> = Vec::new();
+    let mut back = Vec::new();
+    while chosen.len() < most {
+        let Some(c) = queue.pop() else { break };
+        let Some(parent) = c.parent else {
+            back.push(c);
+            continue;
+        };
+        if !flow.is_live(parent) || flow.has_child(parent, c.token) {
+            continue;
+        }
+        if trunk.get(parent).copied().unwrap_or(true) {
+            back.push(c);
+            continue;
+        }
+        if chosen
+            .iter()
+            .any(|o| o.parent == Some(parent) && o.token == c.token)
+        {
+            continue;
+        }
+        chosen.push(c);
+    }
+    queue.extend(back);
+    chosen
 }
 
 impl FlowGrowth {
@@ -1341,6 +1441,7 @@ impl SplitModel {
         }
         let mut out = Vec::new();
         let levels = step.levels.max(1);
+        let side_most = side_rows_a_level().min(step.rows.saturating_sub(1));
         for level in 0..levels {
             self.read_flow_rows(kv, request_id, session, sampling, noise)?;
             let before = out.len();
@@ -1353,6 +1454,25 @@ impl SplitModel {
                 .copied()
                 .unwrap_or(0.0);
             let mut reached = 0.0f64;
+            if side_most > 0 {
+                let room = side_most
+                    .min(step.live_most.saturating_sub(live))
+                    .min(MAX_TREE_ROWS.saturating_sub(session.flow.len()));
+                let trunk = trunk_of(&session.flow, &session.rating);
+                for c in side_candidates(&mut session.queue, &session.flow, &trunk, room) {
+                    let Some(parent) = c.parent else { continue };
+                    session
+                        .flow
+                        .push(parent, c.token)
+                        .map_err(SwarmError::Internal)?;
+                    session.rating.push(c.score);
+                    session.unrated.push(false);
+                    out.push((parent as u16, c.token));
+                    reached += f64::from(c.score - walk_rating).exp();
+                    live += 1;
+                    session.times.side_rows += 1;
+                }
+            }
             while out.len() - before < step.rows
                 && live < step.live_most
                 && session.flow.len() < MAX_TREE_ROWS
@@ -1738,6 +1858,46 @@ fn probability_at(logits: &[f32], token: usize, temperature: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{likeliest, likeliest_rows_where_they_are, probability_at, runner_up_of};
+
+    /// The trunk is the best-rated follower from the walk's row down; the
+    /// side rows deepen the best chain OFF it, never the trunk itself, and
+    /// put every other follower back for the best-first pass.
+    #[test]
+    fn side_rows_deepen_a_chain_off_the_trunk() {
+        use super::{side_candidates, trunk_of, Candidate};
+        use crate::inference::draft_tree::FlowTree;
+        // 0 → 1 (trunk, -0.1) → 3 (-0.2); 0 → 2 (runner-up, -1.5)
+        let mut flow = FlowTree::new(10, 7).unwrap();
+        let a = flow.push(0, 11).unwrap();
+        let b = flow.push(0, 12).unwrap();
+        let c = flow.push(a, 13).unwrap();
+        let rating = [0.0, -0.1, -1.5, -0.2];
+        assert_eq!(trunk_of(&flow, &rating), vec![true, true, false, true]);
+        let cand = |score: f32, parent: usize, token: u32| Candidate {
+            score,
+            own: score,
+            parent: Some(parent),
+            token,
+        };
+        let mut queue = std::collections::BinaryHeap::from(vec![
+            cand(-0.3, c, 20), // the trunk's next row: best overall
+            cand(-1.6, b, 21), // under the runner-up: the side row
+            cand(-1.7, b, 21), // the same row again: dropped
+            cand(-1.9, b, 22),
+            cand(-2.5, 0, 12), // carried already: dropped
+        ]);
+        let side = side_candidates(&mut queue, &flow, &trunk_of(&flow, &rating), 2);
+        let got: Vec<_> = side.iter().map(|c| (c.parent, c.token)).collect();
+        assert_eq!(got, vec![(Some(b), 21), (Some(b), 22)]);
+        // The trunk's follower is back for the best-first pass (and the
+        // carried one, never popped, waits for that pass to drop it).
+        let rest: Vec<_> = queue.into_sorted_vec().iter().map(|c| c.token).collect();
+        assert_eq!(rest, vec![12, 20]);
+        // With the walk on the runner-up, the old trunk is dead and the
+        // runner-up's line IS the trunk: nothing is off it.
+        flow.advance(b).unwrap();
+        assert_eq!(trunk_of(&flow, &rating), vec![false, false, true, false]);
+    }
 
     /// A guess's runner-up is the largest logit but the guess's — an equal
     /// one included, the first such, as the greedy pick breaks a tie — and

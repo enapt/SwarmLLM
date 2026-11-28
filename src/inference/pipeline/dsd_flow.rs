@@ -83,7 +83,13 @@ use super::local::{ActivationUnits, ResendOnRefusal, SegmentBudget};
 use super::{PipelineExecutor, TailWalk};
 
 /// Rows the drafter proposes a level (`levels_a_call`). 8, EAGLE-2's top-k a
-/// depth. `SWARMLLM_FLOW_ROWS` (1-64).
+/// depth. `SWARMLLM_FLOW_ROWS` (1-64). Measured against 4 and 16 on the 14B's
+/// Thailand-Australia split (cut 9, the 1.5B helper, both ends v0.3.318, 14
+/// replies an arm, 2026-11-28): 8 wrote prose at 24.2 and code at 46.0 tok/s,
+/// 16 (live rows 256) at 19.1 and 38.5 — its level took 9.1 ms against 7.8
+/// and it missed no less often — and 4 at 21.8 and 41.2, this node then the
+/// slower end. Rows for chains off the trunk come out of these 8
+/// (`split::side_rows_a_level`), not on top of them.
 fn rows_a_level() -> u32 {
     static N: OnceLock<u32> = OnceLock::new();
     *N.get_or_init(|| knob("SWARMLLM_FLOW_ROWS", 8, 1, 64))
@@ -109,7 +115,15 @@ fn levels_a_call(with_the_walk: bool) -> u32 {
 /// Three levels a call, two where the flow carries the walk (a recurrent
 /// target, Qwen 3.5). The 14B's sweep kept three: a level fewer saved ~4.5 ms
 /// of a 40 ms forward and cost 17% of prose and 27% of code a forward
-/// (2026-11-15, `docs/invariants/scheduling.md`). On the 9B with its drafter's
+/// (2026-11-15, `docs/invariants/scheduling.md`). Swept again once the far
+/// end skipped dead rows (#510) and a level cost ~7.2 ms of a ~31 ms cycle
+/// (2026-11-28, TH↔AU, 9 layers here, `real_link_t1129lev`, ABCDDCBA, two
+/// replies a prompt an arm): medians prose 23.8 / 24.6 / 23.4 and code
+/// 42.6 / 43.0 / 48.6 tok/s at two / three / four, four with the depth floor
+/// at 0.5 23.2 / 42.1. Prose has no lever in depth, so a gate on the
+/// drafter's own confidence at each level (llama.cpp's `p_min`, SVIP) was
+/// not built; four's code lead is one prompt's (+14%; the others −1% and
+/// +4%) and waits for a second sitting. On the 9B with its drafter's
 /// levels captured a level costs ~8.5 ms of drafting and ~2.5 of this node's
 /// layers in a ~48 ms forward, so two levels pay: prose 14.65 / 15.19 and code
 /// 25.88 / 24.90 tok/s against three's 14.38 / 13.94 and 23.60 / 23.13, four's
@@ -1839,6 +1853,9 @@ impl PipelineExecutor {
             taken_ranks = %Verdicts::ranks_line(run.verdicts.taken_ranks),
             offered_ranks = %Verdicts::ranks_line(run.verdicts.offered_ranks),
             levels_ahead_median = format_args!("{:.0}", run.verdicts.levels_ahead_median()),
+            under_runner_up_mean = format_args!("{:.2}", run.verdicts.under_runner_up_mean()),
+            answer_sat_ms = format_args!("{:.1}", run.verdicts.sat_ms_median()),
+            answer_sat_ms_mean = format_args!("{:.1}", run.verdicts.sat_ms_mean()),
             "DSD: a tree that flowed is complete"
         );
         // How many leading layers the next flow of this model runs here
@@ -2271,22 +2288,16 @@ impl FlowRun<'_, '_> {
             if let Some(rank) = guessed(parent).position(|guess| guess == row) {
                 self.verdicts.offered(guessed(parent).count());
                 self.verdicts.taken(rank);
+                if rank > 0 {
+                    self.verdicts.runner_up_taken(levels_beneath(tree, row));
+                }
             }
             match parent {
                 Some(parent) => row = parent,
                 None => break,
             }
         }
-        // Levels beneath the walk's row, deepest first found breadth-first.
-        let mut levels = 0u32;
-        let mut frontier: Vec<usize> = tree.children(Some(reached)).collect();
-        while !frontier.is_empty() {
-            levels += 1;
-            frontier = frontier
-                .iter()
-                .flat_map(|&row| tree.children(Some(row)))
-                .collect();
-        }
+        let levels = levels_beneath(tree, reached);
         self.verdicts.ahead(levels);
         if !missed {
             return;
@@ -2912,6 +2923,7 @@ impl FlowRun<'_, '_> {
         tailed: Option<Tailed>,
     ) -> Result<Taken, SwarmError> {
         self.answers += 1;
+        self.verdicts.sat(arrived.elapsed());
         if fault_flow_fail_at() == Some(self.answers) {
             tracing::warn!(
                 request_id = %self.exec.request.id,
@@ -3234,6 +3246,18 @@ struct Verdicts {
     offered_ranks: [u32; 4],
     /// Levels standing beneath the walk's row as each walk ended.
     levels_ahead: Vec<f32>,
+    /// Levels standing beneath each guess the walk took that was NOT the
+    /// drafter's first under its row — what a runner-up's take found already
+    /// drafted, the depth side rows exist to give it
+    /// (`split::side_rows_a_level`).
+    under_runner_up: Vec<f32>,
+    /// How long each answer sat between ARRIVING here and the loop taking
+    /// it: the drafter call or the near forward it waited behind (the loop
+    /// reads arrived answers only between them), and a turn held for an
+    /// earlier one. The part of a verdict's delay that is this node's own
+    /// (Fable night 11-28 item 2: ~60 ms of each verdict is neither the wire
+    /// nor the far's least time).
+    sat_ms: Vec<f32>,
 }
 
 impl Verdicts {
@@ -3288,11 +3312,60 @@ impl Verdicts {
         median_of(&self.levels_ahead)
     }
 
+    /// The walk took a guess past the drafter's first with `levels` levels
+    /// standing beneath it.
+    fn runner_up_taken(&mut self, levels: u32) {
+        if self.under_runner_up.len() < Self::MOST_KEPT {
+            self.under_runner_up.push(levels as f32);
+        }
+    }
+
+    /// An answer sat `sat` between arriving and being taken.
+    fn sat(&mut self, sat: std::time::Duration) {
+        if self.sat_ms.len() < Self::MOST_KEPT {
+            self.sat_ms.push(sat.as_secs_f32() * 1000.0);
+        }
+    }
+
+    fn sat_ms_median(&self) -> f32 {
+        median_of(&self.sat_ms)
+    }
+
+    fn sat_ms_mean(&self) -> f32 {
+        if self.sat_ms.is_empty() {
+            return 0.0;
+        }
+        self.sat_ms.iter().sum::<f32>() / self.sat_ms.len() as f32
+    }
+
+    /// The mean, not the median: most runner-ups find nothing beneath them,
+    /// and the side rows' effect is in the few that do.
+    fn under_runner_up_mean(&self) -> f32 {
+        if self.under_runner_up.is_empty() {
+            return 0.0;
+        }
+        self.under_runner_up.iter().sum::<f32>() / self.under_runner_up.len() as f32
+    }
+
     /// `first/second/third/later` for the reply's line.
     fn ranks_line(ranks: [u32; 4]) -> String {
         let [first, second, third, later] = ranks;
         format!("{first}/{second}/{third}/{later}")
     }
+}
+
+/// Levels drafted beneath `row`: its deepest line, found breadth-first.
+fn levels_beneath(tree: &crate::inference::draft_tree::DraftTree, row: usize) -> u32 {
+    let mut levels = 0u32;
+    let mut frontier: Vec<usize> = tree.children(Some(row)).collect();
+    while !frontier.is_empty() {
+        levels += 1;
+        frontier = frontier
+            .iter()
+            .flat_map(|&row| tree.children(Some(row)))
+            .collect();
+    }
+    levels
 }
 
 /// The median of `values`, 0 for none.
@@ -3442,6 +3515,11 @@ mod tests {
             verdicts.ahead(levels);
         }
         assert_eq!(verdicts.levels_ahead_median(), 2.0);
+        assert_eq!(verdicts.under_runner_up_mean(), 0.0, "no runner-up taken");
+        for levels in [0, 0, 3] {
+            verdicts.runner_up_taken(levels);
+        }
+        assert_eq!(verdicts.under_runner_up_mean(), 1.0);
     }
 
     fn feed(g: &mut FlowGuard, t0: Instant, sent_ms: u64, delay: f64) {
