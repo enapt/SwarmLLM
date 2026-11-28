@@ -7346,6 +7346,14 @@ a const assertion), so where the flows then ran, every cut from the asked one up
 `a_shed_the_plans_could_not_take_marks_every_cut_they_tried` (red with only the asked cut recorded),
 `the_cuts_refused_on_the_way_are_those_before_where_the_flows_ran`. A wider level (16 rows) at
 12 lost (code 38.1, prose 18.1-19.9: this node 46-50 ms a forward, its levels waiting 19-22% of the flow).
+
+**Where the planner starts, a shed is rarely needed (2026-11-28, `real_link_t504gap/`, the `flowwide` shape: AU
+holding [3,48)).** Left to itself the planner handed the far end everything it could take, [0,8) here, so the
+balance only stepped BACK: 8 → 9 in all four arms after 4-12 flows (this node 31-32 ms a forward, the far's 45-53),
+undone once as 7% slower. Gap shed against `SWARMLLM_FLOW_BALANCE_STEP=one`, ABBA, 24 replies an arm, all served:
+code 51.7 / 51.6, prose 21.9 / 20.3, prose2 22.2 / 21.8, prose3 21.8 / 21.2 (medians) — the same, as it must be
+where no shed fires. So the gap shed pays where the planner's sum leaves too many layers here (16 in the earlier
+shape); the planner's own cut, near the far end's limit, already sits where the hand-set best did (8-9).
 ## A chunk is as wide as it pays (2026-10-30, #374)
 
 **The rule**: the continuous stream sends each chunk at one of two widths — the narrow one
