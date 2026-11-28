@@ -1190,9 +1190,20 @@ fn rows_the_far_ran(rows: usize, drawn: usize) -> usize {
 /// carried it, so the first one in stands. One the far end left undrawn
 /// (#510, `NOT_DRAWN`) is marked beside it, never read as a word; a later real
 /// draw of the row (a rebase's forward runs whole) takes it and clears the mark.
-fn take_row_answer(draws: &mut [Option<u32>], not_drawn: &mut [bool], row: usize, draw: u32) {
-    if draws.get(row).is_none_or(Option::is_some) {
-        return;
+///
+/// Answers whether the row came back drawn OTHERWISE than the draw that stands:
+/// a far reading it again in another row count, where a near-tie came out the
+/// other way (`draft_tree::SentBefore`) — counted as `redrawn_otherwise`.
+fn take_row_answer(
+    draws: &mut [Option<u32>],
+    not_drawn: &mut [bool],
+    row: usize,
+    draw: u32,
+) -> bool {
+    match draws.get(row) {
+        None => return false,
+        Some(Some(first)) => return draw != NOT_DRAWN && draw != *first,
+        Some(None) => {}
     }
     if draw == NOT_DRAWN {
         if let Some(mark) = not_drawn.get_mut(row) {
@@ -1204,6 +1215,7 @@ fn take_row_answer(draws: &mut [Option<u32>], not_drawn: &mut [bool], row: usize
             *mark = false;
         }
     }
+    false
 }
 
 /// The row a walk that stopped at `end` waits on where the far end left that
@@ -1496,6 +1508,12 @@ struct FlowRun<'a, 'r> {
     /// A miss the full tree had no room for while a rebase was unsettled: its
     /// token is emitted, its row pushed once the rebase is answered.
     bonus_waiting: Option<u32>,
+    /// The walk parted from the far's while a rebase was out
+    /// ([`Self::rebase_where_the_walks_parted`]): looked at again once it is
+    /// answered.
+    parted_waiting: bool,
+    /// Rebases made where the walks parted (#510).
+    walks_parted: u32,
     /// The rows a level and the live rows the drafter may keep ahead of the
     /// walk, held down while the forwards queue.
     guard: FlowGuard,
@@ -1562,6 +1580,10 @@ struct FlowRun<'a, 'r> {
     /// none of theirs — what the far end did not compute (#510).
     rows_not_drawn: u32,
     forwards_not_drawn: u32,
+    /// Rows answered again otherwise than the draw that stands
+    /// ([`take_row_answer`]): a far that reads rows again in another row
+    /// count and walks by its second draw parts from this walk (#510).
+    redrawn_otherwise: u32,
     /// Answers held back because the walk can reach none of their rows
     /// (`dead_wait_on`), in turn: read with the next answer it can reach, or
     /// never, where a rebase cuts this node's cache below them first.
@@ -1673,6 +1695,8 @@ impl PipelineExecutor {
             least_answer_ms: None,
             settled_base: start_pos as usize,
             unsettled: false,
+            parted_waiting: false,
+            walks_parted: 0,
             bonus_waiting: None,
             guard,
             copied: vec![Copied::No],
@@ -1700,6 +1724,7 @@ impl PipelineExecutor {
             not_drawn: vec![false],
             rows_not_drawn: 0,
             forwards_not_drawn: 0,
+            redrawn_otherwise: 0,
             waiting_dead: Vec::new(),
             dead_waited: 0,
             dead_cut: 0,
@@ -1751,6 +1776,8 @@ impl PipelineExecutor {
             skips_rows = run.skips_rows,
             rows_not_drawn = run.rows_not_drawn,
             forwards_not_drawn = run.forwards_not_drawn,
+            redrawn_otherwise = run.redrawn_otherwise,
+            walks_parted = run.walks_parted,
             dead_wait = dead_wait_on(),
             dead_waited = run.dead_waited,
             // Those still waiting when the reply ended were never read either.
@@ -1891,6 +1918,7 @@ impl FlowRun<'_, '_> {
             if self.bonus_waiting.is_some() && !self.unsettled {
                 self.push_waiting_bonus().await?;
             }
+            self.rebase_a_waiting_parting().await?;
             let grew = self.grow().await?;
             if self.sent < self.flow.len() && self.out.len() < window {
                 let rows = self.rows_unsent();
@@ -2050,6 +2078,44 @@ impl FlowRun<'_, '_> {
         let forward = self.send(rows).await?;
         self.out.push(forward);
         self.unsettled = true;
+        Ok(())
+    }
+
+    /// The walk stands on a row the far computer left undrawn (#510): the far
+    /// walked another way (`draft_tree::SentBefore` names how a far of
+    /// v0.3.317 does). A rebase's forward reads the walk's row and every row
+    /// following it again whole, and the far answers each, so the walks meet
+    /// at the cost of one round trip — where the reply used to finish in tree
+    /// rounds at about half the speed (2026-11-28, TH→AU, the 14B: prose 12
+    /// against 21). With a rebase still out it waits for that one's answer
+    /// (`parted_waiting`), which may draw the row itself.
+    async fn rebase_where_the_walks_parted(&mut self) -> Result<(), SwarmError> {
+        if self.unsettled || self.bonus_waiting.is_some() {
+            self.parted_waiting = true;
+            return Ok(());
+        }
+        self.walks_parted += 1;
+        self.rebase().await
+    }
+
+    /// A parting held while a rebase was out (`parted_waiting`): rebased now
+    /// only where the walk still stands on a row left undrawn.
+    async fn rebase_a_waiting_parting(&mut self) -> Result<(), SwarmError> {
+        if !self.parted_waiting || self.unsettled || self.bonus_waiting.is_some() {
+            return Ok(());
+        }
+        self.parted_waiting = false;
+        if walk_parted_at(
+            WalkEnd::Waiting {
+                row: self.flow.at(),
+            },
+            &self.not_drawn,
+        )
+        .is_some()
+        {
+            self.walks_parted += 1;
+            self.rebase().await?;
+        }
         Ok(())
     }
 
@@ -2947,7 +3013,9 @@ impl FlowRun<'_, '_> {
                 Some(map) => map.get(row).copied().flatten(),
             };
             if let Some(row) = row {
-                take_row_answer(&mut self.draws, &mut self.not_drawn, row, draw);
+                if take_row_answer(&mut self.draws, &mut self.not_drawn, row, draw) {
+                    self.redrawn_otherwise += 1;
+                }
             }
         }
         // When it ARRIVED: the time it then sat while this node drafted or ran
@@ -3043,16 +3111,12 @@ impl FlowRun<'_, '_> {
         );
         // #510: the far leaves undrawn only rows its own walk left, so this
         // walk standing on one has parted from it — a near-tie drawn two ways.
-        // Its tokens so far are the model's; the rounds finish the reply.
-        let parted = walk_parted_at(end, &self.not_drawn);
-        let walks_parted = |row: usize| {
-            SwarmError::Inference(format!(
-                "a tree that flows: the walk reached row {row}, which the far computer left undrawn"
-            ))
-        };
+        // Its tokens so far are the model's; a rebase brings the walks together
+        // again (`rebase_where_the_walks_parted`).
+        let parted = walk_parted_at(end, &self.not_drawn).is_some();
         if emitted.is_empty() {
-            if let Some(row) = parted {
-                return Err(walks_parted(row));
+            if parted {
+                self.rebase_where_the_walks_parted().await?;
             }
             return Ok(Taken::Continue);
         }
@@ -3099,8 +3163,8 @@ impl FlowRun<'_, '_> {
         match end {
             WalkEnd::Waiting { row } => {
                 self.advance(row)?;
-                if let Some(row) = parted {
-                    return Err(walks_parted(row));
+                if parted {
+                    self.rebase_where_the_walks_parted().await?;
                 }
             }
             WalkEnd::Missed { row, token } => {
@@ -3250,8 +3314,10 @@ mod tests {
         assert_eq!(draws[1], Some(42));
         assert!(!not_drawn[1], "the mark goes with the real draw");
         // The first draw in stands: neither a sentinel nor another draw moves it.
-        take_row_answer(&mut draws, &mut not_drawn, 2, NOT_DRAWN);
-        take_row_answer(&mut draws, &mut not_drawn, 2, 9);
+        // Another draw is told apart (`redrawn_otherwise`); the same one is not.
+        assert!(!take_row_answer(&mut draws, &mut not_drawn, 2, NOT_DRAWN));
+        assert!(!take_row_answer(&mut draws, &mut not_drawn, 2, 7));
+        assert!(take_row_answer(&mut draws, &mut not_drawn, 2, 9));
         assert_eq!((draws[2], not_drawn[2]), (Some(7), false));
         // A row past the tree is dropped.
         take_row_answer(&mut draws, &mut not_drawn, 3, 5);

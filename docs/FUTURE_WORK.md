@@ -3784,7 +3784,31 @@ TAG=fresh303, 02:26-02:29Z, the thread sampler beside it in `threads_fresh303.tx
 the owner is #146 (4).
 
 #### #510 — A split's far card computes every row of a guess tree, the ones the walk has already left too
-`P2` · perf-split · **RELEASED v0.3.317 (2026-11-28), real link pending** (step 0 PASSED: 86-90% of the far's rows dead at service; 24 rows +24-29% over 8 on a card; the real-link A/B needs both ends on 0.3.317) — 2026-11-27 · evidence: memory `archive/fable_flow_law_1127.md`
+`P2` · perf-split · **RELEASED v0.3.317 (2026-11-28); real link MEASURED: no gain as released — a fix for its parted walks is on main** (step 0 PASSED: 86-90% of the far's rows dead at service; 24 rows +24-29% over 8 on a card) — 2026-11-27 · evidence: memory `archive/fable_flow_law_1127.md`
+
+**Real link, 2026-11-28 05:46-06:23Z** (t517ab: the published v0.3.317 at BOTH ends, here [0,16) + AU's 3060
+[16,48), the 1.5B helper, the copy store off; ABBA BAAB inside one head binary, `SWARMLLM_FLOW_LIVE_ROWS=0` the off
+arms; 4 prompts × 4 arms each way; `~/swarmllm-gate/deep/fr/real_link_t517ab/`). **The mechanism fired**: the far's
+own time a forward 33-41 → 26-28 ms. **The speed did not move**: arm means on / off — code 38.2 / 41.2, prose 18.1 /
+18.7, prose2 19.5 / 20.0, prose3 17.3 / 20.0. Two causes: (1) **5 of 20 skipping replies ended their flow** at a
+parted walk (0 of 20 off) — a rebase's forward drew rows again in another row count and a near-tie flipped; the far
+walked by the second draw, the head by the first (`docs/invariants/memory.md` § "A far end that skips rows", gotcha
+#1192); those replies finished in tree rounds (prose 12.1, code 30.6). **Fixed on main**: the far keeps the draw it
+sent first across the cut (`draft_tree::SentBefore`), the head rebases where walks part
+(`rebase_where_the_walks_parted`, one round trip) and counts `redrawn_otherwise`; the far half needs the next
+release on the far. (2) **This node, not the far, set the pace**: here 37-44 ms a forward against the far's 26-28,
+and #504's balance sheds ONE layer per step — each rig arm starts fresh and took one step at its last reply, so the
+memo's "6-8 layers off the head" never happened inside an arm. A sitting judging the skip needs the head at the
+balanced cut (here [0,12)) or arms long enough for the balance to settle.
+**The head half VERIFIED the same morning** (t510fix, 06:36-07:07Z, a CUDA build of main + the fix at the head, AU
+still on the published v0.3.317, here [0,12) + AU [12,48), skip on / off ABBA BA, 3 arms × 4 replies each way):
+**0 of 24 flows ended** (8 partings rebased and went on, `walks_parted`); the far's re-draws came back OTHERWISE than
+its first draws in nearly every reply of BOTH arms (`redrawn_otherwise` 0-11 a reply) — the mechanism, seen
+directly. The far's own time 29-36 ms with the skip against 44-98 without (at 36 layers the far set the pace), and
+**code 47.0 tok/s against 43.6 (+8%; every skipping reply above every other)**; prose 17.5 / 20.7 / 21.4 against
+20.3 / 20.5 / 20.8 over three prompts (−3%, inside the spread: every greedy reply's text differed, gotcha index
+"ONE greedy prompt"). Still open: the far half (needs the next release on the far), and the head's own pace — at
+[0,12) here ~37-39 ms a forward, its 1.5B drafter ~24 of them — which now bounds prose and code alike.
 
 In a flow whose far end draws (`peer-last`), the far learns the walk ~62 ms before this node, yet serves every row it is
 sent: the head counts dead rows only for a shape it finishes itself (`dsd_flow::note_dead_here`, `sent.here`), and

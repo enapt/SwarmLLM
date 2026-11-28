@@ -446,6 +446,10 @@ pub(crate) const NOT_DRAWN: u32 = u32::MAX;
 /// its path — so a draw never comes from a cache missing a row it reads: a
 /// requester whose walk differs from this one's meets [`NOT_DRAWN`] and checks
 /// in rounds, never a wrong word.
+///
+/// **The first draw sent for a row stands** ([`SentBefore`]): a rebase's
+/// forward reads its kept rows again, and the requester keeps the draw that
+/// came in first, so this segment answers and walks by that one too.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct LiveRows {
     /// The tree's first position (`LayerForward::draft_tree_from`).
@@ -457,6 +461,101 @@ pub(crate) struct LiveRows {
     sound: Vec<bool>,
     /// Per row: this segment's draw, kept for the rows it answered.
     draws: Vec<Option<u32>>,
+    /// Per row: its parent and token as the last forward carried the tree,
+    /// so a row can be named by its tokens from `from` once the rows it was
+    /// numbered among are cut ([`Self::truncated_to`]).
+    shape: Vec<(Option<u16>, u32)>,
+    /// The draws sent for a tree this segment's cache was taken back into —
+    /// a rebase cuts to the tree's start and reads the kept rows again.
+    sent_before: Option<SentBefore>,
+}
+
+/// The draws a far segment sent for rows of a tree, by each row's tokens from
+/// the tree's start (`base`), kept across the cut a rebase makes (#510).
+///
+/// A rebase's forward reads its kept rows again in ONE forward, a different
+/// row count from the forwards that first drew them, and a card's sums depend
+/// on the row count (batch invariance: Thinking Machines, "Defeating
+/// Nondeterminism in LLM Inference", 2025; vLLM's `VLLM_BATCH_INVARIANT`). At
+/// a near-tie the greedy draw can come out the other way. The requester keeps
+/// the draw that came in first (`dsd_flow::take_row_answer`); a far that
+/// walked by the second skipped the rows the requester's walk then reached,
+/// which ended the flow (2026-11-28, TH→AU, the 14B: 2 replies of 5, one with
+/// no miss). Prior art: LLM-42 keeps a token once decided rather than run
+/// batch-invariant kernels; vLLM's batch-invariant mode costs speed. Taken
+/// here: never decide a row twice.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SentBefore {
+    base: usize,
+    draws: std::collections::HashMap<Vec<u32>, u32>,
+}
+
+/// The tokens from a tree's start to `row` and including it, over a parent
+/// list that names only earlier rows (`DraftTree::new`'s rule); `None` where
+/// one does not.
+fn tokens_to_row(
+    parent: impl Fn(usize) -> Option<usize>,
+    token: impl Fn(usize) -> u32,
+    row: usize,
+) -> Option<Vec<u32>> {
+    let mut path = vec![token(row)];
+    let mut r = row;
+    while let Some(p) = parent(r) {
+        if p >= r {
+            return None;
+        }
+        path.push(token(p));
+        r = p;
+    }
+    path.reverse();
+    Some(path)
+}
+
+impl SentBefore {
+    /// The draws `rows` sent, by path; `None` where it sent none or its shape
+    /// does not cover them. A path two rows share is left out: neither is the
+    /// row a later forward names by it.
+    fn of(rows: &LiveRows) -> Option<Self> {
+        if rows.shape.len() != rows.draws.len() {
+            return None;
+        }
+        let mut draws = std::collections::HashMap::new();
+        let mut shared = std::collections::HashSet::new();
+        for (row, draw) in rows.draws.iter().enumerate() {
+            let Some(draw) = *draw else { continue };
+            let Some(path) = tokens_to_row(
+                |r| rows.shape[r].0.map(usize::from),
+                |r| rows.shape[r].1,
+                row,
+            ) else {
+                continue;
+            };
+            if draws.insert(path.clone(), draw).is_some() {
+                shared.insert(path);
+            }
+        }
+        for path in &shared {
+            draws.remove(path);
+        }
+        (!draws.is_empty()).then_some(Self {
+            base: rows.from,
+            draws,
+        })
+    }
+
+    /// Per row of `tree` (carrying `tokens`), the draw sent for the row with
+    /// its path before; `None` for every row where `tree` starts elsewhere.
+    fn for_tree(&self, tree: &DraftTree, tokens: &[u32]) -> Vec<Option<u32>> {
+        (0..tree.len())
+            .map(|row| {
+                if tree.base() != self.base {
+                    return None;
+                }
+                tokens_to_row(|r| tree.parent(r), |r| tokens[r], row)
+                    .and_then(|path| self.draws.get(&path).copied())
+            })
+            .collect()
+    }
 }
 
 impl LiveRows {
@@ -472,12 +571,18 @@ impl LiveRows {
     }
 
     /// What is left once the requester takes its cache back to `pos`: `None`
-    /// where that cuts into the positions before the tree.
+    /// where that cuts into the positions before the tree. A cut into the
+    /// tree remembers the draws it sent ([`SentBefore`]): a rebase cuts to the
+    /// tree's start and its forward reads the kept rows again.
     pub(crate) fn truncated_to(mut self, pos: usize) -> Option<Self> {
         let rows = pos.checked_sub(self.from)?;
+        if rows < self.draws.len() {
+            self.sent_before = SentBefore::of(&self);
+        }
         self.local.truncate(rows);
         self.sound.truncate(rows);
         self.draws.truncate(rows);
+        self.shape.truncate(rows);
         Some(self)
     }
 
@@ -514,6 +619,10 @@ impl LiveRows {
         self.sound = self.sound.split_off(off);
         self.draws = self.draws.split_off(off);
         self.from = base;
+        // Named again by the forward that reads them (`plan` sets it); the
+        // draws sent before a cut are for that cut's own forward only.
+        self.shape.clear();
+        self.sent_before = None;
         Some(self)
     }
 
@@ -546,6 +655,12 @@ impl LiveRows {
             ));
         }
         let read_before = len - positions;
+        // A tree's first forward after a cut into it (a rebase's) is answered
+        // with the draws sent before for the rows it reads again.
+        let sent_before = match &held {
+            Some(held) if read_before == 0 => held.sent_before.clone(),
+            _ => None,
+        };
         let mut state = match held {
             _ if read_before == 0 => LiveRows {
                 from: tree.base(),
@@ -572,13 +687,22 @@ impl LiveRows {
                 local: (0..read_before).map(|r| Some(r as u16)).collect(),
                 sound: vec![true; read_before],
                 draws: vec![None; read_before],
+                ..LiveRows::default()
             },
         };
+        state.sent_before = None;
         let computed_before = state.local.iter().flatten().count();
         let rows = read_before..len;
         let mut draws = state.draws.clone();
         draws.resize(len, None);
         let live = rows_the_walk_may_reach(tree, tokens, &draws, anchor, rows.clone());
+        // Rows read again keep the draws sent for them, for the answer and for
+        // every later walk here. `live` stays every row from the requester's
+        // walk on: a draw it lost to its own rebase (`stale_answers`) is sent
+        // again, the first one.
+        if let Some(sent) = sent_before {
+            state.draws = sent.for_tree(tree, tokens);
+        }
         // A tree's first forward runs whole: a rebase's leads with the path
         // the walk took (`FlowTree::rebase_forward`), rows BEFORE the walk's
         // that every kept row reads, and a reply's first has drawn nothing.
@@ -629,6 +753,9 @@ impl LiveRows {
             Some(DraftTree::new(tree.base(), parents)?)
         };
         state.draws.resize(len, None);
+        state.shape = (0..len)
+            .map(|row| (tree.parent(row).map(|p| p as u16), tokens[row]))
+            .collect();
         Ok(ServeRows {
             rows: serve.iter().map(|&row| row - read_before).collect(),
             tree: compact,
@@ -665,7 +792,8 @@ impl ServeRows {
 
     /// The forward's answer — per row, its draw where it goes back,
     /// [`NOT_DRAWN`] elsewhere — from the rows run's draws (`draws[i]` is
-    /// `rows[i]`'s), and what to keep.
+    /// `rows[i]`'s), and what to keep. A row drawn before keeps the draw sent
+    /// then ([`SentBefore`]).
     pub(crate) fn answer(mut self, draws: &[u32]) -> Result<(Vec<u32>, LiveRows), String> {
         if draws.len() != self.rows.len() {
             return Err(format!(
@@ -678,8 +806,7 @@ impl ServeRows {
         let mut out = vec![NOT_DRAWN; self.positions];
         for ((&row, &draw), &answered) in self.rows.iter().zip(draws).zip(&self.answered) {
             if answered {
-                out[row] = draw;
-                self.next.draws[first + row] = Some(draw);
+                out[row] = *self.next.draws[first + row].get_or_insert(draw);
             }
         }
         Ok((out, self.next))
@@ -1419,6 +1546,49 @@ mod tests {
         assert_eq!(plan.index_pos(), 306);
     }
 
+    /// A rebase's forward reads its kept rows again in one forward of another
+    /// row count; on a card a near-tie can draw the other way. The requester
+    /// keeps the first draw, so the far must answer and walk by it too, or the
+    /// two walks part and the flow ends (2026-11-28, TH→AU: 2 replies of 5).
+    #[test]
+    fn a_row_read_again_after_a_rebase_keeps_the_draw_sent_first() {
+        // Root 5 at 100; 9 and 11 follow it.
+        let three = DraftTree::new(100, vec![None, Some(0), Some(0)]).unwrap();
+        let first = LiveRows::plan(None, &three, &[5, 9, 11], 0, 3, 8).unwrap();
+        let (out, kept) = first.answer(&[9, 13, 99]).unwrap();
+        assert_eq!(out, vec![9, 13, 99]);
+        // 13 and 17 follow 9, 21 follows 13: the walk here is at row 3 (13).
+        let tree =
+            DraftTree::new(100, vec![None, Some(0), Some(0), Some(1), Some(1), Some(3)]).unwrap();
+        let tokens = [5, 9, 11, 13, 17, 21];
+        let second = LiveRows::plan(Some(kept), &tree, &tokens, 0, 3, 8).unwrap();
+        let (out, kept) = second.answer(&[21, 0, 25]).unwrap();
+        assert_eq!(out, vec![21, NOT_DRAWN, 25]);
+        // The requester walked 5 → 9 → 13 and rebases there: its cache and
+        // this one are cut to 100, then read again — the path (5, 9), the kept
+        // rows (13, 21) and one new row (40 after 21).
+        let cut = kept.truncated_to(100).unwrap();
+        let again = DraftTree::new(100, vec![None, Some(0), Some(1), Some(2), Some(3)]).unwrap();
+        let rebase = LiveRows::plan(Some(cut), &again, &[5, 9, 13, 21, 40], 2, 5, 8).unwrap();
+        assert_eq!(
+            rebase.rows,
+            vec![0, 1, 2, 3, 4],
+            "a rebase's forward runs whole"
+        );
+        // Drawn again, 13 and 21 come out the other way (14, 26): the draws
+        // sent first stand; the new row's is its own.
+        let (out, kept) = rebase.answer(&[1, 2, 14, 26, 50]).unwrap();
+        assert_eq!(out, vec![NOT_DRAWN, NOT_DRAWN, 21, 25, 50]);
+        // The next forward, sent from the kept rows' first (13): 25 follows 21
+        // (the walk's), 77 follows 13. Walked by the first draws, 13 → 21 → 25:
+        // row 3 is live and drawn; walked by 14 it would have missed at 13 and
+        // left row 3 undrawn where the requester's walk reaches it.
+        let next = DraftTree::new(102, vec![None, Some(0), Some(1), Some(1), Some(0)]).unwrap();
+        let plan = LiveRows::plan(Some(kept), &next, &[13, 21, 40, 25, 77], 0, 2, 8).unwrap();
+        let (out, _) = plan.answer(&[60, 61]).unwrap();
+        assert_eq!(out, vec![60, NOT_DRAWN]);
+    }
+
     #[test]
     fn rows_kept_start_a_later_tree_only_where_none_before_it_was_skipped() {
         let held = LiveRows {
@@ -1426,6 +1596,7 @@ mod tests {
             local: vec![Some(0), None, Some(1)],
             sound: vec![true, false, true],
             draws: vec![Some(4), None, Some(6)],
+            ..LiveRows::default()
         };
         // Row 1 was skipped: the cache does not hold position 301 where a tree
         // from 302 would say.
@@ -1445,6 +1616,7 @@ mod tests {
             local: vec![Some(0), Some(0)],
             sound: vec![true, true],
             draws: vec![None, None],
+            ..LiveRows::default()
         };
         assert!(broken.rebased_to(301).is_none());
     }

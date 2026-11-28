@@ -6715,9 +6715,29 @@ the requester's position through **`KvCacheStore::local_position`**; a new check
 on its path was computed (`LiveRows::plan` keeps `sound` per row). A padding row, and a row whose path lost a
 skipped row (the requester's walk row being one the far left), are computed over a cache missing what they read:
 they answer `NOT_DRAWN`. So the far never sends a word it read wrongly, and a requester whose walk parted from the
-far's (a near-tie drawn two ways, the first draw in standing at the requester) meets `NOT_DRAWN` on its walk and
-the tree rounds finish the reply (`dsd_flow::FlowRun::walk`). Liveness only shrinks as the walk moves, so a row the
-walk reaches in agreement was live, and sound, when it ran.
+far's meets `NOT_DRAWN` on its walk and rebases there (`dsd_flow::FlowRun::rebase_where_the_walks_parted`): the
+rebase's forward runs the walk's row and its followers whole and the far answers each, one round trip. Liveness only
+shrinks as the walk moves, so a row the walk reaches in agreement was live, and sound, when it ran.
+
+**The first draw sent for a row stands at both ends** (`draft_tree::SentBefore`). A rebase's forward reads its kept
+rows again in ONE forward — the path and every kept row, a different row count from the forwards that first drew
+them — and a card's sums depend on the row count (batch invariance: Thinking Machines, "Defeating Nondeterminism in
+LLM Inference", 2025; vLLM's `VLLM_BATCH_INVARIANT` mode buys it with speed). At a near-tie the greedy draw comes out
+the other way. The requester keeps the draw that came in FIRST (`dsd_flow::take_row_answer`); v0.3.317's far started
+afresh at the rebase's cut and walked by the SECOND, skipped the rows the requester's walk then reached, and the
+reply finished in tree rounds. **Measured** on the published v0.3.317 at both ends (TH→AU, the 14B, the 1.5B helper,
+2026-11-28 05:46Z, `~/swarmllm-gate/deep/fr/real_link_t517ab/`): 2 of 5 replies of the first skipping arm ended
+their flow ("the walk reached row 1 / 14, which the far computer left undrawn"), each after 2 rebases, one with NO
+miss; prose 12.1 tok/s against 21.4-21.8 for the replies that kept flowing, code 30.6. Now the far remembers, at a
+cut into the tree, the draw it sent for each row by the row's tokens from the tree's start (the rows of one parent
+carry distinct tokens, `FlowTree::push`), and answers and walks a row read again by that draw. Prior art: LLM-42
+keeps a token once decided rather than run batch-invariant kernels; taken here: never decide a row twice. The
+requester counts rows answered again otherwise (`redrawn_otherwise` on the reply line) and rebases where walks
+parted (`walks_parted`). Test: `draft_tree::tests::a_row_read_again_after_a_rebase_keeps_the_draw_sent_first` —
+red with the rebase's second draws kept (the next forward runs nothing where the requester's walk reaches).
+**The requester's half verified on the real link** (t510fix, 2026-11-28 06:36-07:07Z, AU still on v0.3.317, here
+[0,12)): 0 of 24 flows ended, 8 partings rebased and went on; `redrawn_otherwise` read 0-11 a reply in skipping AND
+non-skipping arms — a card's re-draw differs from its first draw in nearly every reply.
 
 **A tree's first forward runs whole** — a rebase's leads with the path the walk took, rows BEFORE the walk's row
 that every kept row reads; skipping them as "not on the walk" would leave every kept row unsound.
