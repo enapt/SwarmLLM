@@ -97,6 +97,25 @@ pub trait GgmlType: Sized + Clone + Send + Sync {
     fn vec_dot_rows(n: usize, xs: &[Self], ys: &[Self::VecDotType], rows: usize, out: &mut [f32]) {
         vec_dot_rows_generic::<Self>(n, xs, ys, rows, out)
     }
+
+    /// SwarmLLM patch: TWO weight columns against the same `rows` activation
+    /// rows — `vec_dot_rows` for `xs0` into `out0` and for `xs1` into `out1`,
+    /// which is the default. A type whose kernel can load each activation
+    /// block once for both columns overrides it, under the same rule: every
+    /// output bit-identical to `vec_dot_rows` on its own column.
+    #[allow(clippy::too_many_arguments)]
+    fn vec_dot_rows2(
+        n: usize,
+        xs0: &[Self],
+        xs1: &[Self],
+        ys: &[Self::VecDotType],
+        rows: usize,
+        out0: &mut [f32],
+        out1: &mut [f32],
+    ) {
+        Self::vec_dot_rows(n, xs0, ys, rows, out0);
+        Self::vec_dot_rows(n, xs1, ys, rows, out1);
+    }
 }
 
 /// The per-row loop `vec_dot_rows` falls back to (and what every override is
@@ -136,6 +155,109 @@ pub(crate) fn vec_dot_rows_chosen<T: GgmlType>(
         vec_dot_rows_generic::<T>(n, xs, ys, rows, out)
     } else {
         T::vec_dot_rows(n, xs, ys, rows, out)
+    }
+}
+
+/// SwarmLLM patch: [`vec_dot_rows_chosen`] for two columns at once — the type's
+/// `vec_dot_rows2`, or one column at a time under `SWARMLLM_QMATMUL_COLS=1`
+/// (the A/B of the two-column kernels inside one binary) and under
+/// `SWARMLLM_QMATMUL_ROWS=per-row`. The outputs are the same bits every way.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn vec_dot_rows2_chosen<T: GgmlType>(
+    n: usize,
+    xs0: &[T],
+    xs1: &[T],
+    ys: &[T::VecDotType],
+    rows: usize,
+    out0: &mut [f32],
+    out1: &mut [f32],
+) {
+    static ONE_COLUMN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let one_column = *ONE_COLUMN.get_or_init(|| {
+        std::env::var("SWARMLLM_QMATMUL_COLS").is_ok_and(|v| v == "1")
+            || std::env::var("SWARMLLM_QMATMUL_ROWS").is_ok_and(|v| v == "per-row")
+    });
+    if one_column {
+        vec_dot_rows_chosen::<T>(n, xs0, ys, rows, out0);
+        vec_dot_rows_chosen::<T>(n, xs1, ys, rows, out1);
+    } else {
+        T::vec_dot_rows2(n, xs0, xs1, ys, rows, out0, out1)
+    }
+}
+
+/// SwarmLLM patch: the most activation rows one `vec_dot_rows` call of a
+/// tiled matmul is handed ([`row_block_for`]'s ceiling).
+pub const MOST_ROWS_A_BLOCK: usize = 128;
+
+/// SwarmLLM patch (2026-11-28): how many quantized activation rows a tiled
+/// matmul multiplies against each weight column before moving to the next
+/// block of rows — as many as fit in `SWARMLLM_QMATMUL_ROW_KB` (192) KB, a
+/// multiple of 8 (the Q4_K kernel's pass), from 16 to [`MOST_ROWS_A_BLOCK`].
+///
+/// It was a fixed 128 rows. That kept a 2,048-wide row block (Q8_0: 278 KB)
+/// in a core's L2, but an FFN down's 8,192-wide one is 1.1 MB, so every one of
+/// its 2,048 columns streamed it from L3: 34 bytes per block product against
+/// the weight column's 34 / 128. Sizing by bytes keeps the block in L2 at
+/// every width and re-reads each weight column once per block instead (17.8 MB
+/// for that matrix at 16 rows a block — L3 for most of it, and ~2 bytes a
+/// product). Prior art: llama.cpp's `ggml_compute_forward_mul_mat_one_chunk`
+/// tiles 16 x 16 for the same reason; BLIS sizes its `mc` by the L2.
+///
+/// `SWARMLLM_QMATMUL_ROW_BLOCK=<rows>` fixes the count (128 = before), the
+/// A/B inside one binary. Every output is one `vec_dot_rows` result either
+/// way, so the block's size never changes a bit. Read once.
+pub fn row_block_for<T: GgmlType>(k_in_blocks: usize) -> usize {
+    static FIXED: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    static BUDGET: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let fixed = *FIXED.get_or_init(|| {
+        std::env::var("SWARMLLM_QMATMUL_ROW_BLOCK")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .map(|rows| rows.clamp(1, MOST_ROWS_A_BLOCK))
+    });
+    if let Some(rows) = fixed {
+        return rows;
+    }
+    let budget = *BUDGET.get_or_init(|| {
+        std::env::var("SWARMLLM_QMATMUL_ROW_KB")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&kb| kb > 0)
+            .unwrap_or(192)
+            * 1024
+    });
+    let row_bytes = (k_in_blocks * std::mem::size_of::<T::VecDotType>()).max(1);
+    (budget / row_bytes / 8 * 8).clamp(16, MOST_ROWS_A_BLOCK)
+}
+
+/// SwarmLLM patch (2026-11-28): `SWARMLLM_QMATMUL_OUT=transposed` sends a
+/// several-row matmul back through the zeroed column-major buffer and
+/// transpose it had before `matmul` wrote its outputs in place — the A/B;
+/// the same bits either way. Read once.
+fn writes_through_a_transpose() -> bool {
+    static OLD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OLD.get_or_init(|| std::env::var("SWARMLLM_QMATMUL_OUT").is_ok_and(|v| v == "transposed"))
+}
+
+/// `matmul`'s output, written by several tasks at once — each only at the
+/// columns it owns (see the call site).
+struct RowMajorOut(*mut f32);
+
+// SAFETY: the pointer is only written through `write`, whose callers each
+// write disjoint indices; nothing reads it while the tasks run.
+unsafe impl Send for RowMajorOut {}
+unsafe impl Sync for RowMajorOut {}
+
+impl RowMajorOut {
+    /// Copies `run` to the output from index `at` on.
+    ///
+    /// # Safety
+    /// `at..at + run.len()` is inside the output, and no other thread writes
+    /// any of it.
+    #[inline(always)]
+    unsafe fn write_run(&self, at: usize, run: &[f32]) {
+        std::ptr::copy_nonoverlapping(run.as_ptr(), self.0.add(at), run.len())
     }
 }
 
@@ -1289,6 +1411,24 @@ impl GgmlType for BlockQ8_0 {
         return super::avx::vec_dot_rows_q8_0_q8_0(n, xs, ys, rows, out);
 
         vec_dot_rows_generic::<Self>(n, xs, ys, rows, out)
+    }
+
+    // SwarmLLM patch: two columns a pass (see `avx::vec_dot_rows2_q8_0_q8_0`).
+    #[allow(unreachable_code)]
+    fn vec_dot_rows2(
+        n: usize,
+        xs0: &[Self],
+        xs1: &[Self],
+        ys: &[Self::VecDotType],
+        rows: usize,
+        out0: &mut [f32],
+        out1: &mut [f32],
+    ) {
+        #[cfg(target_feature = "avx2")]
+        return super::avx::vec_dot_rows2_q8_0_q8_0(n, xs0, xs1, ys, rows, out0, out1);
+
+        Self::vec_dot_rows(n, xs0, ys, rows, out0);
+        Self::vec_dot_rows(n, xs1, ys, rows, out1);
     }
 
     fn vec_dot_unopt(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> f32 {
@@ -2992,8 +3132,8 @@ pub fn matmul<T: GgmlType>(
     // Here the weight column is the outer loop instead: each one is read once
     // and applied to every row while it sits in L1. This is the shape llama.cpp
     // uses (`llamafile_sgemm`/tinyBLAS for batched cases, per-row dots only for
-    // m == 1). Results are produced column-major and transposed back; the
-    // transpose is m*n f32 and negligible beside the dots.
+    // m == 1). Each task's results are produced column-major in a small tile
+    // and written out a row at a time (see below).
     //
     // Verified bit-identical to the original ordering by `examples/qmatmul_bench.rs`,
     // which reimplements the upstream loop and asserts exact equality — every dst
@@ -3019,20 +3159,72 @@ pub fn matmul<T: GgmlType>(
 
     const COL_BLOCK: usize = 64;
     // SWARMLLM PATCH — row blocking. With the column as the outer loop, every
-    // column's pass streams ALL m quantized activation rows; at m=128 that is
-    // ~450 KB (L2-resident), at a whole 896-token prompt in one forward it is
-    // ~3 MB and comes from L3 for every one of thousands of columns — which is
-    // why the per-row cost measured in `qmatmul_bench` at m=128 did not carry
-    // to large m. Blocks of ROW_BLOCK rows keep the activations in L2; the
-    // weights are re-read once per row block instead (14 MB per pass for the
-    // FFN, negligible beside the dots). Production prefill chunks are 128
-    // tokens, so ROW_BLOCK = 128 makes large-m calls behave like the chunked
-    // path rather than slower than it.
-    const ROW_BLOCK: usize = 128;
+    // column's pass streams ALL the block's quantized activation rows; blocks
+    // of `row_block_for` rows keep them in L2 (sized by the row's BYTES, see
+    // there), and the weights are re-read once per row block instead.
+    let row_block = row_block_for::<T>(k_in_blocks);
+    if !writes_through_a_transpose() {
+        // SWARMLLM PATCH (2026-11-28) — each task owns a run of COL_BLOCK
+        // columns and writes its outputs into `dst` itself, row-major: no
+        // `n * m` buffer zeroed for every call (4 MB for a 128-token chunk of
+        // an 8,192-wide FFN — fresh pages each time) and no whole-matrix
+        // transpose after it. Within a task the row blocks are the OUTER loop,
+        // so one block of activations stays in L2 for all the task's columns
+        // (and no rayon region is opened per row block). A row block's results
+        // land column-major in the task's own tile (each column's rows in one
+        // `vec_dot_rows` call, as before) and go out as one contiguous run per
+        // row, as llama.cpp's `mul_mat_one_chunk` copies its `tmp` tile:
+        // written a column at a time, a power-of-two `n` would put every row's
+        // output in the same few L1 sets. Every output is still one
+        // `vec_dot_rows` over the same operands, so the bits cannot change.
+        if dst.len() != m * n {
+            crate::bail!("matmul: {} outputs for {m} rows of {n}", dst.len())
+        }
+        let out = RowMajorOut(dst.as_mut_ptr());
+        (0..n.div_ceil(COL_BLOCK)).into_par_iter().for_each(|blk| {
+            let cols = blk * COL_BLOCK..((blk + 1) * COL_BLOCK).min(n);
+            let width = cols.len();
+            let mut tile = [0f32; MOST_ROWS_A_BLOCK * COL_BLOCK];
+            let mut run = [0f32; COL_BLOCK];
+            let mut row_base = 0;
+            while row_base < m {
+                let rows = row_block.min(m - row_base);
+                let lhs_blk = &lhs_b[row_base * k_in_blocks..(row_base + rows) * k_in_blocks];
+                // Two columns a call where the type has a kernel for them
+                // (`GgmlType::vec_dot_rows2`), so each activation block is
+                // loaded once for both; an odd last column alone.
+                let col_of = |c: usize| &rhs_t[c * k_in_blocks..(c + 1) * k_in_blocks];
+                let mut j = 0;
+                while j + 1 < width {
+                    let (first, second) = tile[j * rows..(j + 2) * rows].split_at_mut(rows);
+                    let c = cols.start + j;
+                    vec_dot_rows2_chosen::<T>(k, col_of(c), col_of(c + 1), lhs_blk, rows, first, second);
+                    j += 2;
+                }
+                if j < width {
+                    let c = cols.start + j;
+                    vec_dot_rows_chosen::<T>(k, col_of(c), lhs_blk, rows, &mut tile[j * rows..(j + 1) * rows]);
+                }
+                for r in 0..rows {
+                    for (j, v) in run[..width].iter_mut().enumerate() {
+                        *v = tile[j * rows + r];
+                    }
+                    // SAFETY: the run is `dst[(row_base + r) * n + cols.start..][..width]`,
+                    // inside `m * n == dst.len()` since `row_base + r < m` and
+                    // `cols.end <= n`; those columns are this task's alone.
+                    unsafe { out.write_run((row_base + r) * n + cols.start, &run[..width]) };
+                }
+                row_base += rows;
+            }
+        });
+        return Ok(());
+    }
+    // `SWARMLLM_QMATMUL_OUT=transposed`: the column-major buffer and transpose
+    // this matmul had before, for the A/B.
     let mut dst_t = vec![0f32; n * m];
     let mut row_base = 0;
     while row_base < m {
-        let rows = ROW_BLOCK.min(m - row_base);
+        let rows = row_block.min(m - row_base);
         let lhs_blk = &lhs_b[row_base * k_in_blocks..(row_base + rows) * k_in_blocks];
         dst_t
             .par_chunks_mut(m * COL_BLOCK)

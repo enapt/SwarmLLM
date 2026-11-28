@@ -292,10 +292,66 @@ asserts exact equality against the upstream ordering for Q4_K and Q6_K at every
 m it prices — run it after touching either kernel. **R is a register-pressure
 knob, not a "bigger is better" one**: Q4_K at R=8 spilled the 16 ymm registers and
 R=4 was 1.2x faster at every m. `matmul` also runs the column-outer loop per
-`ROW_BLOCK = 128` rows so the quantized activations stay in L2 — a whole-prompt
+block of rows so the quantized activations stay in L2 — a whole-prompt
 forward had streamed ~3 MB from L3 per column, which is why a per-row cost measured
 at m=128 never carried to large m. The `examples/prefill_bench` single-forward
 number is only representative of the production 128-token chunks because of this.
+
+**The block is sized by the row's BYTES, and the outputs are written in place
+(2026-11-28).** The block was a fixed 128 rows: 278 KB of Q8_0 activations at a
+2,048-wide projection (in a 512 KB L2), but 1.1 MB at an 8,192-wide FFN down, so
+each of its 2,048 columns streamed the block from L3 — 34 bytes a block product
+for the activations against 0.3 for the weights. Measured then: Llama-3.2-1B Q8_0
+pp512 at 4 threads, ours 106.5-107.5 tok/s against llama.cpp's 147.2-147.4 (decode
+level). **`k_quants::row_block_for`** is now the one size (`matmul` and
+`matmul_rows`): as many rows as fit `SWARMLLM_QMATMUL_ROW_KB` (192) KB, a multiple
+of 8, 16..=128 — 88 rows at 2,048 wide, 16 at 8,192 — the weights re-read once a
+block (llama.cpp's `ggml_compute_forward_mul_mat_one_chunk` tiles 16 x 16; BLIS
+sizes `mc` by the L2). Within a task the row blocks are the outer loop, so no rayon
+region opens per block. And each task writes its own 64 columns into the row-major
+output itself (`RowMajorOut`): a row block's results land column-major in the task's
+32 KB tile and go out as one contiguous run per row, as llama.cpp's `mul_mat_one_chunk`
+copies its `tmp` tile — written a column at a time, a power-of-two `n` (2,048, 8,192)
+put every row's output in the same few L1 sets (the review's catch, before any run).
+The zeroed `n * m` column-major buffer (4 MB a call for a 128-token chunk of an
+8,192-wide FFN, fresh pages each time) and the whole-matrix transpose are gone. Every output is still one `vec_dot_rows`
+result over the same operands, so neither change can move a bit;
+`examples/qmatmul_bench` checks the 1B's shapes at 128 and 512 rows and a ragged
+output count against the upstream loop. A/B `SWARMLLM_QMATMUL_ROW_BLOCK=128` (the
+fixed block), `SWARMLLM_QMATMUL_OUT=transposed` (the buffer and transpose).
+**Measured** (`deep/fr/cpumm_1129`, one binary, arms by env, two rounds, live node
+stopped): the 1B's pp512 at 4 threads read in 128-token chunks (a node's processor
+chunk) 115.8 / 119.9 tok/s against 110.7 / 111.5 with both switches back, whole
+113.3 / 113.5 against 108.8 / 111.7 — +2-7%. The in-place output carries it (the
+fixed block written in place: 114.0-116.7; the sized block through the transpose:
+107.7-116.1, the old arm's spread). Per call (`qmatmul_bench`, 4 threads) the
+8,192-wide FFN down took 16.1 ms at 128 rows against 19.1 and 66 against 75 at 512;
+a block of 7 rows did as well as 16 or 88, so past fitting in L2 the size is no
+lever. The profile is 95% quantized matmuls (FFN up + gate 53%, down 26%), so the
+gap to llama.cpp's 147 is the kernel's.
+
+**Q8_0 takes two weight columns a pass (2026-11-28).** llama.cpp reads a Q8_0 prompt
+on x86 AVX2 through llamafile's tinyBLAS (`sgemm.cpp`, `tinyBLAS_Q0_AVX`,
+`gemm4xN<2>`: 4 weight rows × 2 activation rows, 8 accumulators; its CPU repack takes
+no Q8_0 on x86). **`GgmlType::vec_dot_rows2`** is that tile transposed: two columns ×
+four rows, each activation block loaded once for both columns
+(`avx::vec_dot_rows2_q8_0_q8_0`, `dot_q8_0_q8_0_rows2::<R>`), every output its own
+accumulator over the one-column pass's operations in their order — bit-identical,
+checked by `qmatmul_bench` at every shape it prices, an odd output count included
+(2,048 × 999: one column left over goes through the one-column kernel). `matmul`
+hands a task's columns over in pairs through **`k_quants::vec_dot_rows2_chosen`**; a
+type without a two-column kernel answers with two one-column calls (the trait's
+default). **Measured** (`deep/fr/cpumm2_1129`, one binary, three rounds): per call no
+clear change (±5%, the 8,192-wide FFN down at 512 rows 64.9 against 70.9 ms, the up
+72.0 against 69.0) — yet the whole prompt pass read 116.6-121.5 tok/s against
+111.0-116.4 with one column, in all six pairs (+4-5%; the profile run 114.9 against
+109.4). With the two changes above, 1B Q8_0 pp512 at 4 threads went from 108.8-111.7
+to 116.6-121.5 (+8-10%). A/B `SWARMLLM_QMATMUL_COLS=1` (one column a pass, also under
+`SWARMLLM_QMATMUL_ROWS=per-row`). Arithmetic says the gap left (~3.9 cycles a block
+product at 4 threads where the instructions need ~2) is not the load count;
+`qmatmul_bench --llama-shapes` reads one call against ggml's own perf case
+(`test-backend-ops perf -b CPU -o MUL_MAT`, 4096 × 512 × 14336) before another
+kernel is guessed.
 
 ### Q2_K and Q3_K have several-row kernels too, and every one is priced in one binary (2026-10-11)
 

@@ -517,9 +517,6 @@ impl<B: Clone + Send + Sync + 'static> QuantizedBlocks for Vec<B> {
     }
 }
 
-/// Activation rows per `vec_dot_rows` call of [`QuantizedType::matmul_rows`]
-/// — `k_quants::matmul`'s `ROW_BLOCK`, which keeps them in L2.
-const MATMUL_ROW_BLOCK: usize = 128;
 
 /// Fewest rows [`QuantizedType::quantize_rows`] quantizes in parallel: a
 /// decoded token's few rows are not worth a fork. Either way each row is the
@@ -563,7 +560,8 @@ where
 
     // The loops of `k_quants::matmul` over a range of its columns: one
     // `T::vec_dot` per output for one row, `T::vec_dot_rows` over blocks of
-    // `MATMUL_ROW_BLOCK` rows for more — the same operands, so the same bits.
+    // `k_quants::row_block_for` rows for more (`k_quants::matmul`'s blocks,
+    // which keep them in L2) — the same operands, so the same bits.
     fn matmul_rows(
         &self,
         k: usize,
@@ -601,9 +599,10 @@ where
             }
             return Ok(());
         }
+        let row_block = k_quants::row_block_for::<T>(k_in_blocks);
         let mut base = 0;
         while base < rows {
-            let n = MATMUL_ROW_BLOCK.min(rows - base);
+            let n = row_block.min(rows - base);
             let block = &lhs[base * k_in_blocks..(base + n) * k_in_blocks];
             for (j, out) in dst.chunks_mut(rows).enumerate() {
                 k_quants::vec_dot_rows_chosen::<T>(k, col(j), block, n, &mut out[base..base + n]);

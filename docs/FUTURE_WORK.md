@@ -8715,6 +8715,14 @@ Each has a reason it is not being built now. Pick one up only when its trigger a
   Not bit-identical to the one-row dot unless the scale arithmetic is reproduced row for row. A
   check must stay rank-identical to a one-position step, so judge it against llama.cpp, never by
   bytes.
+  **Narrowed 2026-11-28 for Q8_0** (`docs/invariants/inference.md` § "Q8_0 takes two weight
+  columns a pass"): llama.cpp's Q8_0 prompt on x86 is tinyBLAS's 4 × 2 tile, not a repack; ours
+  now takes two columns × four rows a pass, bit-identical, with the row block sized by bytes and
+  the outputs written in place — Llama-3.2-1B Q8_0 pp512 at 4 threads 108.8-111.7 → 116.6-121.5
+  tok/s against llama.cpp's 147. What is left: (a) the ~20% to llama.cpp on Q8_0, first read ONE
+  call against ggml's perf case (`qmatmul_bench --llama-shapes` vs `test-backend-ops perf -b CPU
+  -o MUL_MAT`) before another kernel is guessed; (b) Q4_K / Q6_K, where llama.cpp's x86 repack
+  (`ggml_gemm_q4_K_8x8_q8_K`) applies and ours is level only at 8 threads on the 3B (README).
 - **#470 — Keep a saved prompt on disk when memory needs its room (a third tier)** (2026-11-17, from llm-d 1.0's
   announcement, asked about on Discord). A saved prompt (`PrefixCache`) lives on the card or in host RAM and is dropped
   when room is wanted; reading a 20-50k-token agent prompt again takes minutes on a processor or a split. llm-d tiers

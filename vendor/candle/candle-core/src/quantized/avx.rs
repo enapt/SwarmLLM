@@ -507,6 +507,91 @@ rows_of_a_32_value_format!(vec_dot_rows_q5_0_q8_0, dot_q5_0_q8_0_rows, vec_dot_q
 rows_of_a_32_value_format!(vec_dot_rows_q4_1_q8_1, dot_q4_1_q8_1_rows, vec_dot_q4_1_q8_1, BlockQ4_1, BlockQ8_1, q4_1_bytes, with_minimum);
 rows_of_a_32_value_format!(vec_dot_rows_q5_1_q8_1, dot_q5_1_q8_1_rows, vec_dot_q5_1_q8_1, BlockQ5_1, BlockQ8_1, q5_1_bytes, with_minimum);
 
+/// SwarmLLM patch (2026-11-28): `R` rows of TWO Q8_0 columns in one pass —
+/// [`dot_q8_0_q8_0_rows`] for each column, the rows' blocks loaded once for
+/// both. A one-column pass loads every activation block once per column, a
+/// load for each product; here one load serves two, as llamafile's
+/// `tinyBLAS_Q0_AVX` (`gemm4xN<2>`) shares them across its tile. Each output
+/// keeps its own accumulator and sees the one-column pass's operations in its
+/// order — the same scale lanes, the same signs, the same fused add — so the
+/// bits cannot change (`examples/qmatmul_bench` asserts it).
+#[inline(always)]
+unsafe fn dot_q8_0_q8_0_rows2<const R: usize>(
+    xs0: &[BlockQ8_0],
+    xs1: &[BlockQ8_0],
+    ys: &[BlockQ8_0],
+    kb: usize,
+    out0: &mut [f32],
+    out1: &mut [f32],
+) {
+    let mut acc0 = [_mm256_setzero_ps(); R];
+    let mut acc1 = [_mm256_setzero_ps(); R];
+    for (bi, (x0, x1)) in xs0.iter().zip(xs1).enumerate() {
+        let d_all0 = block_scale_products::<R>(x0.d, |r| ys[r * kb + bi].d);
+        let d_all1 = block_scale_products::<R>(x1.d, |r| ys[r * kb + bi].d);
+        let bx0 = q8_0_bytes(x0);
+        let ax0 = _mm256_sign_epi8(bx0, bx0);
+        let bx1 = q8_0_bytes(x1);
+        let ax1 = _mm256_sign_epi8(bx1, bx1);
+        for r in 0..R {
+            let by = _mm256_loadu_si256(ys[r * kb + bi].qs.as_ptr() as *const __m256i);
+            let q0 = mul_sum_us8_pairs_float(ax0, _mm256_sign_epi8(by, bx0));
+            acc0[r] = _mm256_fmadd_ps(row_lane(d_all0, r), q0, acc0[r]);
+            let q1 = mul_sum_us8_pairs_float(ax1, _mm256_sign_epi8(by, bx1));
+            acc1[r] = _mm256_fmadd_ps(row_lane(d_all1, r), q1, acc1[r]);
+        }
+    }
+    for r in 0..R {
+        out0[r] = hsum_float_8(acc0[r]);
+        out1[r] = hsum_float_8(acc1[r]);
+    }
+}
+
+/// Two Q8_0 columns against `rows` activation rows — [`vec_dot_rows_q8_0_q8_0`]
+/// for each, in passes of four rows over both, the 2-3 row tail in one pass
+/// ([`tail_in_one_pass`]), a lone row through the single-row kernel.
+#[inline(always)]
+pub(crate) fn vec_dot_rows2_q8_0_q8_0(
+    n: usize,
+    xs0: &[BlockQ8_0],
+    xs1: &[BlockQ8_0],
+    ys: &[BlockQ8_0],
+    rows: usize,
+    out0: &mut [f32],
+    out1: &mut [f32],
+) {
+    let kb = xs0.len();
+    debug_assert!(n.is_multiple_of(QK8_0), "vec_dot_rows2_q8_0_q8_0: {n} is not divisible by {QK8_0}");
+    debug_assert_eq!(xs1.len(), kb, "vec_dot_rows2_q8_0_q8_0: two columns of one length");
+    debug_assert_eq!(ys.len(), rows * kb, "vec_dot_rows2_q8_0_q8_0: rows × blocks");
+    debug_assert!(out0.len() >= rows && out1.len() >= rows);
+    const R: usize = 4;
+    let mut r0 = 0;
+    while r0 + R <= rows {
+        let ys = &ys[r0 * kb..(r0 + R) * kb];
+        unsafe { dot_q8_0_q8_0_rows2::<R>(xs0, xs1, ys, kb, &mut out0[r0..r0 + R], &mut out1[r0..r0 + R]) };
+        r0 += R;
+    }
+    let left = rows - r0;
+    if tail_in_one_pass(left) {
+        let ys = &ys[r0 * kb..rows * kb];
+        let (out0, out1) = (&mut out0[r0..rows], &mut out1[r0..rows]);
+        unsafe {
+            if left == 3 {
+                dot_q8_0_q8_0_rows2::<3>(xs0, xs1, ys, kb, out0, out1)
+            } else {
+                dot_q8_0_q8_0_rows2::<2>(xs0, xs1, ys, kb, out0, out1)
+            }
+        }
+        return;
+    }
+    for r in r0..rows {
+        let y = &ys[r * kb..(r + 1) * kb];
+        out0[r] = vec_dot_q8_0_q8_0(n, xs0, y);
+        out1[r] = vec_dot_q8_0_q8_0(n, xs1, y);
+    }
+}
+
 /// Q4_1: the nibbles, in 0..=15 (the minimum is added apart).
 #[inline(always)]
 unsafe fn q4_1_bytes(x: &BlockQ4_1) -> __m256i {

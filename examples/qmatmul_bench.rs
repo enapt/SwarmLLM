@@ -8,7 +8,8 @@
 //! cargo run --release --no-default-features --features dev --example qmatmul_bench
 //! ```
 use candle_core::quantized::k_quants::{
-    matmul, BlockQ2K, BlockQ3K, BlockQ4K, BlockQ4_0, BlockQ5_0, BlockQ6K, BlockQ8_0, GgmlType,
+    matmul, row_block_for, BlockQ2K, BlockQ3K, BlockQ4K, BlockQ4_0, BlockQ5_0, BlockQ6K, BlockQ8_0,
+    GgmlType,
 };
 use rayon::prelude::*;
 
@@ -113,7 +114,12 @@ fn bench<T: GgmlType>(label: &str, k: usize, n: usize, ms: &[usize]) {
     let src: Vec<f32> = (0..n * k).map(|_| noise(1.0)).collect();
     T::from_float(&src, &mut rhs);
 
-    println!("\n  {label}  (k={k}, n={n})");
+    // The block `matmul` will cut its rows into — printed so a run shows the
+    // sizing (and `SWARMLLM_QMATMUL_ROW_BLOCK` / `_ROW_KB`) took effect.
+    println!(
+        "\n  {label}  (k={k}, n={n}, {} rows a block)",
+        row_block_for::<T>(k_in_blocks)
+    );
     println!(
         "      {:>4}  {:>10}  {:>12}  {:>10}  {:>14}  {:>10}",
         "m", "total ms", "ms per row", "vs m=1", "per-row kernel", "rows gain"
@@ -325,6 +331,14 @@ fn main() {
         kernel_sweep::<BlockQ6K>("Q6_K", 3072);
         return;
     }
+    // llama.cpp's own case (`test-backend-ops perf -b CPU -o MUL_MAT`: 4096
+    // outputs × 512 rows × 14336 wide), to read one call against ggml's CPU
+    // backend at the same thread count before guessing where a gap lies.
+    if std::env::args().any(|a| a == "--llama-shapes") {
+        bench::<BlockQ8_0>("llama.cpp perf Q8_0", 14336, 4096, &[512]);
+        bench::<BlockQ4K>("llama.cpp perf Q4_K", 14336, 4096, &[512]);
+        return;
+    }
     println!("candle quantized matmul (Q4_K)");
     // llama-3.2-3b shapes: attention projection and FFN up.
     // m = 2..7 are a speculative check's shapes (1-6 guesses): a full pass of
@@ -362,6 +376,18 @@ fn main() {
     bench::<BlockQ5_0>("ffn up Q5_0", 896, 4864, &rows);
     bench::<BlockQ4_0>("ffn up Q4_0", 896, 4864, &rows);
     bench::<BlockQ8_0>("output head Q8_0", 896, 151936, &[1, 2, 4, 8]);
+    // Llama-3.2-1B Q8_0's 2,048-wide projections and 8,192-wide FFN down
+    // (2026-11-28, the processor's prompt reading: 27% behind llama.cpp) at a
+    // processor chunk (128) and a whole 512-token prompt — the widths
+    // `row_block_for` cuts differently — plus an output count no 64-column
+    // run divides, each checked against the reference bit for bit.
+    let chunk = [1, 4, 16, 17, 128, 512];
+    bench::<BlockQ8_0>("1B ffn up Q8_0", 2048, 8192, &chunk);
+    bench::<BlockQ8_0>("1B ffn down Q8_0", 8192, 2048, &chunk);
+    bench::<BlockQ8_0>("ragged Q8_0", 8192, 1000, &[37, 128]);
+    // An odd last run (999 = 15 × 64 + 39): two-column passes leave one
+    // column for the one-column kernel (`GgmlType::vec_dot_rows2`).
+    bench::<BlockQ8_0>("ragged odd Q8_0", 2048, 999, &[3, 37, 128]);
     if std::env::args().any(|a| a == "--rows-only") {
         return;
     }
